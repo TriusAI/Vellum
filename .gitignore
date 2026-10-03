@@ -1,0 +1,14 @@
+# library database
+library.db
+library.db-wal
+library.db-shm
+
+# tesseract language data (download per README)
+tessdata/
+
+# python
+__pycache__/
+*.egg-info/
+.venv/
+build/
+dist/

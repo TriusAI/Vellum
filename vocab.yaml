@@ -1,0 +1,26 @@
+# Vellum controlled vocabulary.
+# tag name -> description shown to the LLM when choosing tags.
+# The LLM can ONLY emit tags from this list (constrained decoding); anything
+# genuinely missing lands in `tags_other` — review with `vellum vocab review`.
+tags:
+  artificial-intelligence: "Machine learning, neural networks, and related AI research or applications"
+  philosophy: "Philosophy in general — arguments, schools of thought, metaphysics, ethics"
+  epistemology: "Theory of knowledge, justification, belief, skepticism"
+  logic: "Formal logic, proof theory, reasoning"
+  mathematics: "Mathematics proper — proofs, structures, theorems"
+  computer-science: "Computing, algorithms, software, systems"
+  cryptography: "Ciphers, codes, cryptanalysis, secure communication"
+  history: "Historical events, periods, or historiography"
+  biography: "Account of a person's life"
+  literary-criticism: "Analysis or interpretation of literature"
+  fiction: "Novels, short stories, and other imaginative writing"
+  poetry: "Verse and poetics"
+  economics: "Economy, markets, trade, economic theory"
+  politics: "Political systems, policy, power"
+  sociology: "Society, culture, social structures and movements"
+  psychology: "Mind, behavior, cognition, mental processes"
+  cognitive-science: "Interdisciplinary study of mind and intelligence"
+  linguistics: "Language structure, grammar, phonology, semantics"
+  natural-science: "Physics, chemistry, biology, and other natural sciences"
+  engineering: "Applied design and construction of systems and devices"
+  reference: "Encyclopedias, handbooks, dictionaries, standards"

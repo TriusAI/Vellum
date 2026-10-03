@@ -1,0 +1,22 @@
+[project]
+name = "vellum"
+version = "0.1.0"
+description = "Small local-model library manager: OCR, summaries, controlled-vocabulary tagging, full-text + semantic search."
+requires-python = ">=3.10"
+dependencies = [
+    "pymupdf>=1.24",
+    "pytesseract>=0.3.10",
+    "pillow>=10.0",
+    "ollama>=0.4",
+    "pyyaml>=6.0",
+]
+
+[project.scripts]
+vellum = "vellum.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["vellum"]

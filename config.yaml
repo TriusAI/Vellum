@@ -1,0 +1,27 @@
+# Vellum configuration.
+# Paths are relative to this file's directory.
+
+# Folders/files you point `vellum ingest` at are indexed as-is (files are not
+# copied); this is just the default watch folder.
+library_dir: ~/VellumLibrary
+
+db: library.db
+
+models:
+  llm: qwen3:4b            # summarization + tagging (Ollama, local)
+  embed: nomic-embed-text  # semantic search embeddings (Ollama, local)
+
+llm:
+  think: false             # qwen3 thinking mode: better, much slower on CPU
+  num_ctx: 8192
+  temperature: 0.3
+
+ocr:
+  langs: eng+chi_sim+fin   # Tesseract language codes; tessdata lives in ./tessdata
+  dpi: 300
+  min_chars_per_page: 50  # fewer extractable chars than this + images -> OCR the page
+  workers: 3
+
+summarize:
+  chunk_chars: 6000
+  max_tags: 8
