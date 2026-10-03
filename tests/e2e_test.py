@@ -54,6 +54,7 @@ def main():
     tmp = Path(tempfile.mkdtemp(prefix="vellum-e2e-", dir="/tmp/opencode"))
     cfg = tmp / "config.yaml"
     cfg.write_text(TEST_CONFIG.format(db=tmp / "test.db", lib=tmp / "library"))
+    shutil.copy(ROOT / "vocab.yaml", tmp / "vocab.yaml")
 
     try:
         make_fixtures(tmp / "library")
@@ -75,13 +76,14 @@ def main():
                        ("artificial-intelligence", "cognitive-science",
                         "philosophy")), f"expected a relevant vocab tag in:\n{out.stdout}"
             # constrained tags only: every emitted tag must be in the vocabulary
+            import ast
             import yaml
             vocab = yaml.safe_load((ROOT / "vocab.yaml").read_text())["tags"]
             out = run(cfg, "show", "2")  # doc #2 is the scanned pdf
             for line in out.stdout.splitlines():
                 if line.startswith("tags:"):
-                    for t in line.removeprefix("tags:").split(","):
-                        assert t.strip() in vocab, f"drifted tag: {t!r}"
+                    for t in ast.literal_eval(line[len("tags:"):].strip()):
+                        assert t in vocab, f"drifted tag: {t!r}"
             run(cfg, "embed")
             out = run(cfg, "search", "intelligence and the body", "--semantic")
             assert "cognitive_machines" in out.stdout, "semantic search found nothing"

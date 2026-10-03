@@ -45,6 +45,7 @@ def cmd_process(args):
 
 
 def cmd_search(args):
+    import sqlite3
     from .db import connect
     from .embed import semantic_search
     cfg = load_config(args.config)
@@ -62,15 +63,27 @@ def cmd_search(args):
     else:
         # FTS5 keyword search with snippet highlighting.
         q = args.query
-        rows = conn.execute(
-            "SELECT d.title, d.path, c.page_no, "
-            "       snippet(fts, 0, '[', ']', '…', 12) AS snip, "
-            "       bm25(fts) AS rank "
-            "FROM fts JOIN chunks c ON c.id = fts.rowid "
-            "JOIN documents d ON d.id = c.doc_id "
-            "WHERE fts MATCH ? ORDER BY rank LIMIT ?",
-            (q, args.limit),
-        ).fetchall()
+        try:
+            rows = conn.execute(
+                "SELECT d.title, d.path, c.page_no, "
+                "       snippet(fts, 0, '[', ']', '…', 12) AS snip, "
+                "       bm25(fts) AS rank "
+                "FROM fts JOIN chunks c ON c.id = fts.rowid "
+                "JOIN documents d ON d.id = c.doc_id "
+                "WHERE fts MATCH ? ORDER BY rank LIMIT ?",
+                (q, args.limit),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            # raw query wasn't valid FTS5 syntax — treat it as one literal phrase
+            rows = conn.execute(
+                "SELECT d.title, d.path, c.page_no, "
+                "       snippet(fts, 0, '[', ']', '…', 12) AS snip, "
+                "       bm25(fts) AS rank "
+                "FROM fts JOIN chunks c ON c.id = fts.rowid "
+                "JOIN documents d ON d.id = c.doc_id "
+                "WHERE fts MATCH ? ORDER BY rank LIMIT ?",
+                ('"' + q.replace('"', '""') + '"', args.limit),
+            ).fetchall()
         if not rows:
             print("no matches")
             return
@@ -191,6 +204,8 @@ def build_parser() -> argparse.ArgumentParser:
                                     "(default: $VELLUM_CONFIG or ./config.yaml)")
     p.add_argument("-V", "--version", action="version",
                    version=f"vellum {__version__}")
+    p.add_argument("-v", "--verbose", action="store_true",
+                   help="debug logging")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     sp = sub.add_parser("ingest", help="index files/directories "
@@ -230,8 +245,8 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv=None):
     parser = build_parser()
     args = parser.parse_args(argv)
-    verbose = getattr(args, "reprocess", False)
-    _setup_logging(verbose)
+    _setup_logging(getattr(args, "verbose", False)
+                   or getattr(args, "reprocess", False))
     args.func(args)
 
 
