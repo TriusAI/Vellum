@@ -3,12 +3,15 @@ library.db
 library.db-wal
 library.db-shm
 
-# tesseract language data (download per README)
-tessdata/
-
-# python
-__pycache__/
-*.egg-info/
+# python (retired prototype; keep ignoring leftovers if any are regenerated)
 .venv/
+__pycache__/
+*.pyc
+
+# build artifacts
 build/
-dist/
+pack/stage/
+pack/bin/
+pack/docker/vellum
+pack/*.tar.gz
+*.test

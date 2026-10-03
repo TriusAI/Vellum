@@ -1,23 +1,24 @@
 # Vellum
 
-A small, local-model library manager for books, papers, and literature.
+A small, **fully local** library manager for books, papers, and literature.
 It indexes your files, OCRs whatever needs OCR, writes a summary paragraph,
 and tags every document against **your own controlled vocabulary** — so you
 never end up with `ml`, `ML`, `machine learning`, and `machinelearning` as
 four different tags.
 
 Everything runs locally on CPU: [Ollama](https://ollama.com) serves a small
-LLM (default Qwen3-4B) and an embedding model; Tesseract handles OCR.
-Storage is a single SQLite file with FTS5 full-text search.
+LLM (default Qwen3-4B) and an embedding model; MuPDF (`mutool`) extracts
+text; Tesseract handles OCR. Storage is a single SQLite file with FTS5
+full-text search. `vellum` is one static Go binary (AGPL-3.0).
 
 ## How it works
 
 ```
-ingest ──▶ text extraction (PyMuPDF)   born-digital PDFs, EPUB, TXT, MD
-        └▶ OCR fallback (Tesseract)    pages with little text but images
-process ─▶ summarize (map-reduce)      long docs: per-chunk summaries, then one paragraph
-        └▶ tag (constrained decoding)  the LLM *cannot* spell a tag outside your vocabulary
-search ──▶ FTS5 keyword + semantic     embeddings via nomic-embed-text, cosine search
+ingest ──▶ text extraction (mutool)      born-digital PDFs, EPUB (via conversion), TXT, MD
+        └▶ OCR fallback (Tesseract)     pages with little text but images
+process ──▶ summarize (map-reduce)       long docs: per-chunk summaries, then one paragraph
+         └▶ tag (constrained decoding)  the LLM *cannot* spell a tag outside your vocabulary
+search ───▶ FTS5 keyword + semantic      embeddings via nomic-embed-text, cosine search
 ```
 
 ### Why tags don't drift
@@ -29,32 +30,31 @@ request contains
 "tags": { "type": "array", "items": { "type": "string", "enum": ["epistemology", "cryptography", ...] } }
 ```
 
-Constrained decoding makes it physically impossible for the model to emit
-anything outside the `enum`. The schema also contains a freeform `tags_other`
+Grammar-constrained decoding makes it impossible for the model to emit
+anything outside the `enum`. The schema also has a freeform `tags_other`
 field (capped at 3 entries): when a document clearly belongs to a topic you
 haven't defined yet, the LLM names it there. Review those with
 `vellum vocab review` and promote the keepers into `vocab.yaml` — your
 vocabulary grows deliberately instead of drifting.
 
-## Setup
+## Build from source
 
-Prerequisites: Python ≥ 3.10, [Tesseract](https://github.com/tesseract-ocr/tesseract),
-and [Ollama](https://ollama.com).
+Prerequisites: Go ≥ 1.24, `mutool` (MuPDF tools) and `tesseract` on PATH for
+extraction/OCR, Ollama for the models.
 
 ```bash
-cd Vellum
-python -m venv .venv && . .venv/bin/activate
-pip install -e .            # installs the `vellum` command
+go build -o vellum ./cmd/vellum
+go test ./tests/          # e2e; set MUTOOL=<path> if mutool is not on PATH
+```
 
-ollama pull qwen3:4b        # summarization + tagging (~2.5 GB)
+```bash
+ollama pull qwen3:4b          # summarization + tagging (~2.5 GB)
 ollama pull nomic-embed-text  # semantic search embeddings (~270 MB)
 ```
 
 Tesseract language data lives in `tessdata/` (project-local, so adding
-languages needs no root). It currently ships `eng`, `chi_sim`, `fin`
-(fast variants — see [tessdata_fast](https://github.com/tesseract-ocr/tessdata_fast));
-to add a language, drop its `.traineddata` there and add the code to
-`ocr.langs` in `config.yaml`.
+languages needs no root): currently `eng`, `chi_sim`, `fin` (fast variants).
+To add a language, drop its `.traineddata` there and extend `ocr.langs`.
 
 ## Usage
 
@@ -78,43 +78,94 @@ vellum vocab promote marine-biology "Study of ocean life"   # adopt a suggestion
 vellum vocab add my-new-tag "what it covers"
 ```
 
+## Download pack (one folder, everything included)
+
+`pack/build.sh` assembles a portable, self-contained folder —
+Go binary + mutool + tesseract (+ libs) + traineddata + ollama +
+the models (~3 GB, dominated by qwen3:4b):
+
+```bash
+pack/build-mutool.sh      # builds mutool from the pinned MuPDF tag
+pack/build.sh             # -> pack/vellum-<ver>-linux-amd64.tar.gz
+```
+
+Unpack and run — `vellum.sh` starts the bundled Ollama server on first use
+and points everything at the bundled tools/models:
+
+```bash
+tar -xzf vellum-*-linux-amd64.tar.gz
+cd vellum-*-linux-amd64
+./vellum.sh ingest ~/books/
+```
+
+## Docker image
+
+Same content as a container (models baked into the image):
+
+```bash
+CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o pack/docker/vellum ./cmd/vellum
+docker build -f pack/Dockerfile -t vellum .
+
+mkdir vellum-data && cd vellum-data
+docker run --rm -v "$PWD:/data" vellum ingest /data/library
+docker run --rm -v "$PWD:/data" vellum process
+docker run --rm -v "$PWD:/data" vellum search "tabula rasa" --semantic
+```
+
+`config.yaml`, `vocab.yaml`, `library.db`, and the `library/` folder all
+live in the mounted `/data`.
+
 ## Configuration
 
-`config.yaml` (next to the library DB): model names, thinking mode, context
-size, OCR languages/DPI/page-detection threshold, chunk size, max tags.
-`vocab.yaml`: the controlled vocabulary — tag name → description; the
+`config.yaml` (found via `--config`, `$VELLUM_CONFIG`, or `./config.yaml`):
+model names, thinking mode, context size, OCR languages/DPI/page-detection
+threshold, chunk size, max tags, and tool paths (`tools.mutool`,
+`tools.tesseract`, `tools.tessdata`) — the pack sets these to its bundled
+binaries. `vocab.yaml`: the controlled vocabulary — tag name → description;
 descriptions are shown to the LLM when it chooses, so write them clearly.
+
+The SQLite schema is identical to the retired Python prototype's, so a
+`library.db` created by it keeps working as-is.
 
 ## Notes & limits
 
 - **CPU speed**: Qwen3-4B runs at a few tokens/s on a typical 8-core CPU.
   A 20-page paper takes a few minutes; a 300-page book considerably longer.
-  Ingest/OCR/FTS never touch the LLM and are fast. If you later get a GPU,
-  change `models.llm` and set `llm.think: true` for better summaries.
+  Ingest/OCR/FTS never touch the LLM and are fast. On a GPU later: change
+  `models.llm`, set `llm.think: true`.
 - **Scanned PDFs with a bad text layer**: pages with ≥ `min_chars_per_page`
   extractable characters are trusted as born-digital. If a scan has a junk
   OCR layer, lower the threshold or delete the text layer first.
 - **Semantic search** is brute-force cosine over chunk vectors — instant at
   personal-library scale (tens of thousands of chunks).
+- **Portability**: the Go binary is fully static; the bundled `mutool` is
+  built from the pinned upstream tag; tesseract's non-glibc libs ship in
+  `lib/`. A reasonably current glibc on the target system is assumed.
 - File paths are stored as absolute paths; files are indexed in place.
-  Moving files means re-ingesting (the DB rows update by path).
 
 ## Project layout
 
 ```
 Vellum/
-├── config.yaml        # settings
-├── vocab.yaml         # controlled tag vocabulary
-├── library.db         # created on first run (documents, chunks, tags, FTS5)
-├── tessdata/          # Tesseract .traineddata files
-├── vellum/
-│   ├── cli.py         # commands
-│   ├── ingest.py      # extraction pipeline
-│   ├── ocr.py         # PyMuPDF extraction + Tesseract fallback
-│   ├── summarize.py   # map-reduce summaries + constrained tagging
-│   ├── llm.py         # Ollama chat (structured output) + embeddings
-│   ├── vocab.py       # vocabulary load/save
-│   ├── db.py          # SQLite schema + FTS5
-│   └── embed.py       # chunk embeddings + cosine search
-└── tests/             # end-to-end tests with generated sample docs
+├── cmd/vellum/          # CLI entry point
+├── internal/
+│   ├── config/          # config.yaml loading
+│   ├── extract/         # mutool extraction + tesseract OCR fallback
+│   ├── llm/             # Ollama client (structured output + embeddings)
+│   ├── ingest/           # pipeline: ingest + process (summarize/tag)
+│   ├── summarize/       # map-reduce summaries + constrained tagging
+│   ├── vocab/           # vocabulary load/save
+│   ├── search/          # FTS5 + cosine semantic search
+│   └── db/              # SQLite schema + FTS5 triggers
+├── tests/               # e2e test + a minimal test-only PDF writer
+├── testdata/            # scan stand-in image for the OCR path
+├── pack/                # portable pack + Docker image build scripts
+├── tessdata/            # tesseract .traineddata (project-local)
+├── config.yaml          # dev config
+└── vocab.yaml           # controlled tag vocabulary
 ```
+
+## License
+
+AGPL-3.0 (see LICENSE and THIRD-PARTY-NOTICES.md — MuPDF is AGPL, which is
+also why Vellum is).
