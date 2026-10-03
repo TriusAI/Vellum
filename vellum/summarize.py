@@ -21,6 +21,16 @@ Plain text only, no headings or lists.
 Excerpt:
 {text}"""
 
+DIRECT_PROMPT = """\
+You are writing the index entry for a document in a personal library.
+Write ONE flowing paragraph (150-300 words) summarizing the whole document
+below: its topic, its main arguments or findings, and what kind of text it
+is. Do NOT copy passages from the document — describe it in your own words.
+Plain text only, no headings, no lists, no markdown.
+
+Document:
+{text}"""
+
 REDUCE_PROMPT = """\
 You are writing the index entry for a document in a personal library.
 Below are summaries of consecutive excerpts of the document, in order.
@@ -89,7 +99,7 @@ def summarize(cfg: Config, text: str) -> str:
     chunks = _chunk_text(text, chunk_chars)
 
     if len(chunks) <= 1:
-        prompt = REDUCE_PROMPT.format(summaries=f"[entire document]\n{text[:chunk_chars * 3]}")
+        prompt = DIRECT_PROMPT.format(text=text[:chunk_chars * 3])
     else:
         log.info("map phase: %d chunks", len(chunks))
         summaries = []
