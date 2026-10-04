@@ -89,36 +89,40 @@ func decodeBody(r *http.Request, v any) error {
 
 // documentJSON is one library entry, machine-friendly.
 type documentJSON struct {
-	ID          int64    `json:"id"`
-	Path        string   `json:"path"`
-	Title       string   `json:"title"`
-	Authors     string   `json:"authors"`
-	Year        string   `json:"year"`
-	Summary     string   `json:"summary"`
-	Status      string   `json:"status"`
-	Tags        []string `json:"tags"`
-	OCRPages    int      `json:"ocr_pages"`
-	NPages      int      `json:"n_pages"`
-	Error       string   `json:"error,omitempty"`
-	AddedAt     string   `json:"added_at"`
-	ProcessedAt string   `json:"processed_at,omitempty"`
+	ID            int64    `json:"id"`
+	Path          string   `json:"path"`
+	Title         string   `json:"title"`
+	Authors       string   `json:"authors"`
+	Year          string   `json:"year"`
+	Summary       string   `json:"summary"`
+	Status        string   `json:"status"`
+	Kind          string   `json:"kind,omitempty"`
+	SummarySource string   `json:"summary_source,omitempty"`
+	Tags          []string `json:"tags"`
+	OCRPages      int      `json:"ocr_pages"`
+	NPages        int      `json:"n_pages"`
+	Error         string   `json:"error,omitempty"`
+	AddedAt       string   `json:"added_at"`
+	ProcessedAt   string   `json:"processed_at,omitempty"`
 }
 
 const docColumns = "id, path, title, authors, year, summary, status, " +
-	"error, ocr_pages, n_pages, added_at, processed_at"
+	"kind, summary_source, error, ocr_pages, n_pages, added_at, processed_at"
 
 type scanDoc struct {
 	id                            int64
 	path, status, addedAt         string
 	title, authors, year, summary sql.NullString
-	err, processedAt              sql.NullString
+	kind, summarySource, err      sql.NullString
+	processedAt                   sql.NullString
 	ocrPages, nPages              sql.NullInt64
 }
 
 func scanDocRow(sc interface{ Scan(...any) error }) (scanDoc, error) {
 	var d scanDoc
 	err := sc.Scan(&d.id, &d.path, &d.title, &d.authors, &d.year, &d.summary,
-		&d.status, &d.err, &d.ocrPages, &d.nPages, &d.addedAt, &d.processedAt)
+		&d.status, &d.kind, &d.summarySource, &d.err, &d.ocrPages, &d.nPages,
+		&d.addedAt, &d.processedAt)
 	return d, err
 }
 
@@ -127,6 +131,7 @@ func (d scanDoc) toJSON() documentJSON {
 		ID: d.id, Path: d.path,
 		Title: d.title.String, Authors: d.authors.String,
 		Year: d.year.String, Summary: d.summary.String, Status: d.status,
+		Kind: d.kind.String, SummarySource: d.summarySource.String,
 		OCRPages: int(d.ocrPages.Int64), NPages: int(d.nPages.Int64),
 		Error: d.err.String, AddedAt: d.addedAt,
 		ProcessedAt: d.processedAt.String, Tags: []string{},
@@ -279,7 +284,7 @@ func (s *Server) patchDocument(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		Title, Authors, Year, Summary *string
+		Title, Authors, Year, Summary, Kind *string
 	}
 	if err := decodeBody(r, &body); err != nil {
 		writeErr(w, 400, "bad JSON body: "+err.Error())
@@ -288,7 +293,7 @@ func (s *Server) patchDocument(w http.ResponseWriter, r *http.Request) {
 	set := map[string]string{}
 	for col, p := range map[string]*string{
 		"title": body.Title, "authors": body.Authors,
-		"year": body.Year, "summary": body.Summary} {
+		"year": body.Year, "summary": body.Summary, "kind": body.Kind} {
 		if p != nil {
 			set[col] = *p
 		}

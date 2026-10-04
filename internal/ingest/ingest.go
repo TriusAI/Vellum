@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"vellum/internal/classify"
 	"vellum/internal/config"
 	"vellum/internal/db"
 	"vellum/internal/extract"
@@ -178,9 +179,45 @@ func ingestOne(cfg *config.Config, conn *sql.DB, path string, reprocess bool) (s
 	if err := db.ReplaceDocumentText(conn, docID, res.Chunks); err != nil {
 		return "failed", err
 	}
-	log.Printf("%s: %d chunks (%d OCR pages) in %.1fs",
-		filepath.Base(abs), len(res.Chunks), res.OCRPages, time.Since(t0).Seconds())
+
+	// kind detection is instant and deterministic: structural heuristics
+	// over the extracted text (paper/book/gallery/course/reference).
+	// Users can override via `vellum kind` or the API.
+	kind, _ := classify.Detect(strings.Join(sampleChunks(res.Chunks), "\n\n"),
+		res.OCRPages, len(res.Chunks))
+	if _, err := conn.Exec(
+		"UPDATE documents SET kind=? WHERE id=?", kind, docID); err != nil {
+		return "failed", err
+	}
+
+	log.Printf("%s: %d chunks (%d OCR pages) in %.1fs%s",
+		filepath.Base(abs), len(res.Chunks), res.OCRPages,
+		time.Since(t0).Seconds(), kindSuffix(kind))
 	return action, nil
+}
+
+// sampleChunks takes leading + trailing chunks for classification.
+func sampleChunks(chunks []db.Chunk) []string {
+	if len(chunks) <= 8 {
+		return chunkTexts(chunks)
+	}
+	sample := append(chunkTexts(chunks[:5]), chunkTexts(chunks[len(chunks)-3:])...)
+	return sample
+}
+
+func chunkTexts(chunks []db.Chunk) []string {
+	out := make([]string, len(chunks))
+	for i, c := range chunks {
+		out[i] = c.Text
+	}
+	return out
+}
+
+func kindSuffix(kind string) string {
+	if kind == "" {
+		return ""
+	}
+	return " [" + kind + "]"
 }
 
 // ProcessPending summarizes and tags documents. With ids empty it takes all
@@ -194,8 +231,8 @@ func ingestOne(cfg *config.Config, conn *sql.DB, path string, reprocess bool) (s
 func ProcessPending(cfg *config.Config, conn *sql.DB, v *vocab.Vocabulary,
 	ids []int64, limit int, progress func(string)) ([]ProcessResult, error) {
 	type docRow struct {
-		id                         int64
-		path, title, authors, year string
+		id                               int64
+		path, title, authors, year, kind string
 	}
 	var docs []docRow
 
@@ -203,8 +240,8 @@ func ProcessPending(cfg *config.Config, conn *sql.DB, v *vocab.Vocabulary,
 		for _, id := range ids {
 			var d docRow
 			err := conn.QueryRow(
-				"SELECT id, path, title, authors, year FROM documents WHERE id=?", id).
-				Scan(&d.id, &d.path, &d.title, &d.authors, &d.year)
+				"SELECT id, path, title, authors, year, kind FROM documents WHERE id=?", id).
+				Scan(&d.id, &d.path, &d.title, &d.authors, &d.year, &d.kind)
 			if err == sql.ErrNoRows {
 				log.Printf("process: no document #%d", id)
 				continue
@@ -215,7 +252,7 @@ func ProcessPending(cfg *config.Config, conn *sql.DB, v *vocab.Vocabulary,
 			docs = append(docs, d)
 		}
 	} else {
-		q := "SELECT id, path, title, authors, year FROM documents WHERE status='ingested' ORDER BY id"
+		q := "SELECT id, path, title, authors, year, kind FROM documents WHERE status='ingested' ORDER BY id"
 		if limit > 0 {
 			q += fmt.Sprintf(" LIMIT %d", limit)
 		}
@@ -225,7 +262,7 @@ func ProcessPending(cfg *config.Config, conn *sql.DB, v *vocab.Vocabulary,
 		}
 		for rows.Next() {
 			var d docRow
-			if err := rows.Scan(&d.id, &d.path, &d.title, &d.authors, &d.year); err != nil {
+			if err := rows.Scan(&d.id, &d.path, &d.title, &d.authors, &d.year, &d.kind); err != nil {
 				rows.Close()
 				return nil, err
 			}
@@ -243,7 +280,7 @@ func ProcessPending(cfg *config.Config, conn *sql.DB, v *vocab.Vocabulary,
 			progress(fmt.Sprintf("document %d/%d: %s", i+1, len(docs), filepath.Base(d.path)))
 		}
 		log.Printf("processing %s", d.path)
-		res, err := processOne(cfg, conn, v, d.id, d.title, d.authors, d.year, progress)
+		res, err := processOne(cfg, conn, v, d.id, d.title, d.authors, d.year, d.kind, progress)
 		if err != nil {
 			log.Printf("processing failed for %s: %s", d.path, err)
 			conn.Exec("UPDATE documents SET status='error', error=? WHERE id=?",
@@ -260,11 +297,58 @@ func ProcessPending(cfg *config.Config, conn *sql.DB, v *vocab.Vocabulary,
 }
 
 func processOne(cfg *config.Config, conn *sql.DB, v *vocab.Vocabulary,
-	docID int64, title, authors, year string, progress func(string)) (*summarize.TagResult, error) {
+	docID int64, title, authors, year, kind string, progress func(string)) (*summarize.TagResult, error) {
 	text, err := db.DocumentText(conn, docID)
 	if err != nil {
 		return nil, err
 	}
+
+	// ---- fast paths keyed on the detected kind -------------------------
+
+	// near-empty text (galleries, image-only scans): nothing to summarize
+	if len(strings.TrimSpace(text)) < 400 {
+		if _, err := conn.Exec(
+			"UPDATE documents SET summary='', summary_source='', status='done', processed_at=datetime('now') WHERE id=?",
+			docID); err != nil {
+			return nil, err
+		}
+		log.Printf("done: no text to summarize (kind=%q)", kind)
+		return &summarize.TagResult{}, nil
+	}
+
+	// papers: extract the abstract instead of generating a summary —
+	// the authors' own words, at zero LLM cost for the summary itself
+	if kind == "paper" {
+		report := progress
+		if report == nil {
+			report = func(string) {}
+		}
+		report("extracting abstract")
+		abstract := classify.ExtractAbstract(text)
+		if abstract != "" {
+			report("choosing tags (from abstract)")
+			// tag from the abstract + the opening text (title page)
+			opening := text
+			if len(opening) > 3000 {
+				opening = opening[:3000]
+			}
+			tags, err := summarize.TagDocument(cfg, v, []string{abstract, opening},
+				nil, abstract, progress)
+			if err != nil {
+				return nil, err
+			}
+			if err := storeProcessed(conn, docID, title, authors, year, tags,
+				abstract, "extracted"); err != nil {
+				return nil, err
+			}
+			log.Printf("done: extracted abstract (%d chars) — tags: %s",
+				len(abstract), strings.Join(tags.Tags, ", "))
+			return tags, nil
+		}
+		// no abstract found: fall through to the generic path
+	}
+
+	// ---- generic path: map-reduce over the whole document --------------
 	// one map phase feeds both the summary and the tagging call —
 	// long documents are tagged from summaries + opening text, not by
 	// re-sending a huge raw-text prefix
@@ -281,38 +365,8 @@ func processOne(cfg *config.Config, conn *sql.DB, v *vocab.Vocabulary,
 		return nil, err
 	}
 
-	newTitle := title
-	if newTitle == "" {
-		newTitle = tags.Title
-	}
-	newAuthors := authors
-	if newAuthors == "" {
-		newAuthors = strings.Join(tags.Authors, ", ")
-	}
-	newYear := year
-	if newYear == "" {
-		newYear = tags.Year
-	}
-	// never trust an LLM (or a PDF producer) fully: junk stays out of the index
-	newTitle = cleanMetaValue(newTitle)
-	newAuthors = cleanMetaValue(newAuthors)
-	if !yearRE.MatchString(newYear) {
-		newYear = ""
-	}
-
-	if _, err := conn.Exec(
-		"UPDATE documents SET summary=?, title=?, authors=?, year=?, status='done', processed_at=datetime('now') WHERE id=?",
-		summary, newTitle, newAuthors, newYear, docID); err != nil {
-		return nil, err
-	}
-	pairs := make([][2]string, 0, len(tags.Tags)+len(tags.TagsOther))
-	for _, t := range tags.Tags {
-		pairs = append(pairs, [2]string{t, "vocab"})
-	}
-	for _, t := range tags.TagsOther {
-		pairs = append(pairs, [2]string{t, "suggested"})
-	}
-	if err := db.SetTags(conn, docID, pairs); err != nil {
+	if err := storeProcessed(conn, docID, title, authors, year, tags,
+		summary, "generated"); err != nil {
 		return nil, err
 	}
 	log.Printf("done: tags: %s%s", strings.Join(tags.Tags, ", "),
@@ -334,4 +388,40 @@ func cleanMetaValue(s string) string {
 		return ""
 	}
 	return strings.TrimSpace(s)
+}
+
+// storeProcessed writes the outcome of a successful processing pass.
+func storeProcessed(conn *sql.DB, docID int64, title, authors, year string,
+	tags *summarize.TagResult, summary, summarySource string) error {
+	newTitle := title
+	if newTitle == "" {
+		newTitle = tags.Title
+	}
+	newAuthors := authors
+	if newAuthors == "" {
+		newAuthors = strings.Join(tags.Authors, ", ")
+	}
+	newYear := year
+	if newYear == "" {
+		newYear = tags.Year
+	}
+	// never trust an LLM (or a PDF producer) fully: junk stays out of the index
+	newTitle = cleanMetaValue(newTitle)
+	newAuthors = cleanMetaValue(newAuthors)
+	if !yearRE.MatchString(newYear) {
+		newYear = ""
+	}
+	if _, err := conn.Exec(
+		"UPDATE documents SET summary=?, summary_source=?, title=?, authors=?, year=?, status='done', processed_at=datetime('now') WHERE id=?",
+		summary, summarySource, newTitle, newAuthors, newYear, docID); err != nil {
+		return err
+	}
+	pairs := make([][2]string, 0, len(tags.Tags)+len(tags.TagsOther))
+	for _, t := range tags.Tags {
+		pairs = append(pairs, [2]string{t, "vocab"})
+	}
+	for _, t := range tags.TagsOther {
+		pairs = append(pairs, [2]string{t, "suggested"})
+	}
+	return db.SetTags(conn, docID, pairs)
 }

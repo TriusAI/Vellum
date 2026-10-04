@@ -45,30 +45,33 @@ file (FTS5). Models served locally by llama.cpp llama-server.
 `
 
 // versionString is reported by --version, /api/status and `vellum agent`.
-const versionString = "0.3.0"
+const versionString = "0.4.0"
 
 // documentColumns is the explicit projection used everywhere (never SELECT *,
 // so the scan order is fixed even if the schema gains columns).
-const documentColumns = "id, path, title, authors, year, summary, status"
+const documentColumns = "id, path, title, authors, year, summary, status, kind, summary_source"
 
 type document struct {
-	ID      int64  `json:"id"`
-	Path    string `json:"path"`
-	Title   string `json:"title"`
-	Authors string `json:"authors"`
-	Year    string `json:"year"`
-	Summary string `json:"summary"`
-	Status  string `json:"status"`
+	ID            int64  `json:"id"`
+	Path          string `json:"path"`
+	Title         string `json:"title"`
+	Authors       string `json:"authors"`
+	Year          string `json:"year"`
+	Summary       string `json:"summary"`
+	Status        string `json:"status"`
+	Kind          string `json:"kind,omitempty"`
+	SummarySource string `json:"summary_source,omitempty"`
 }
 
 func (d *document) scan(sc scannable) error {
-	var title, authors, year, summary sql.NullString
+	var title, authors, year, summary, kind, sumSource sql.NullString
 	if err := sc.Scan(&d.ID, &d.Path, &title, &authors, &year, &summary,
-		&d.Status); err != nil {
+		&d.Status, &kind, &sumSource); err != nil {
 		return err
 	}
 	d.Title, d.Authors, d.Year, d.Summary =
 		title.String, authors.String, year.String, summary.String
+	d.Kind, d.SummarySource = kind.String, sumSource.String
 	return nil
 }
 
@@ -130,6 +133,8 @@ func main() {
 		cmdVocab(cfg, args[1:])
 	case "embed":
 		cmdEmbed(cfg, args[1:])
+	case "kind":
+		cmdKind(cfg, args[1:])
 	case "serve":
 		cmdServe(cfg, args[1:])
 	case "agent", "agents":
@@ -512,6 +517,44 @@ GROUP BY t.tag ORDER BY n DESC, t.tag`)
 	default:
 		log.Fatalf("unknown vocab action: %s", action)
 	}
+}
+
+// cmdKind shows or overrides the detected document kind ("paper", "book",
+// "gallery", "course", "reference", or any custom string).
+func cmdKind(cfg *config.Config, args []string) {
+	if len(args) < 1 {
+		log.Fatalf("usage: vellum kind ID [VALUE]   (no value = show)")
+	}
+	id, err := strconv.ParseInt(args[0], 10, 64)
+	if err != nil {
+		log.Fatalf("kind expects a numeric document id")
+	}
+	conn := mustOpen(cfg)
+	var kind sql.NullString
+	err = conn.QueryRow("SELECT kind FROM documents WHERE id=?", id).Scan(&kind)
+	if err == sql.ErrNoRows {
+		log.Fatalf("no document #%d", id)
+	}
+	if err != nil {
+		log.Fatalf("kind: %s", err)
+	}
+	if len(args) < 2 {
+		if kind.String == "" {
+			fmt.Printf("#%d: kind not detected (generic processing)\n", id)
+		} else {
+			fmt.Printf("#%d: %s\n", id, kind.String)
+		}
+		return
+	}
+	value := strings.ToLower(strings.TrimSpace(args[1]))
+	if value == "none" || value == "-" {
+		value = ""
+	}
+	if _, err := conn.Exec("UPDATE documents SET kind=? WHERE id=?", value, id); err != nil {
+		log.Fatalf("kind: %s", err)
+	}
+	fmt.Printf("#%d: kind set to %q\n", id, value)
+	fmt.Println("note: re-run `vellum process " + args[0] + "` to process with the new kind")
 }
 
 func cmdEmbed(cfg *config.Config, args []string) {

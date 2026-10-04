@@ -185,9 +185,21 @@ func TestE2E(t *testing.T) {
 	}
 
 	lines := strings.Split(strings.TrimSpace(lorem), "\n")
+	// structured like a real paper: Abstract heading + section heading,
+	// so kind detection (paper) and the abstract-extraction fast path run
+	paperLines := []string{"Abstract"}
+	paperLines = append(paperLines, strings.Split(
+		"This paper argues that contemporary accounts of machine intelligence "+
+			"systematically underrate the role of embodiment. Against the tabula rasa "+
+			"assumptions of large-scale pretraining, we defend the position that "+
+			"learning is always structured by an agent's sensorimotor loops, and we "+
+			"review three schools of thought: symbolic AI, connectionism, and the "+
+			"enactivist program in support of this claim.", " ")...)
+	paperLines = append(paperLines, "1 Introduction")
+	paperLines = append(paperLines, lines...)
 	if err := testutil.WriteTextPDF(filepath.Join(lib, "cognitive_machines_digital.pdf"),
 		"On the Origin of Cognitive Machines",
-		[]testutil.TextPage{{Title: "On the Origin of Cognitive Machines", Lines: lines}}); err != nil {
+		[]testutil.TextPage{{Title: "On the Origin of Cognitive Machines", Lines: paperLines}}); err != nil {
 		t.Fatal(err)
 	}
 	scanPNG := filepath.Join("..", "testdata", "scan_page.png")
@@ -242,6 +254,17 @@ func TestE2E(t *testing.T) {
 		t.Fatalf("expected added=3 failed=0, got +%d/-%d", st.Added, st.Failed)
 	}
 
+	// kind detection happened at ingest, deterministically
+	var digitalKind string
+	if err := conn.QueryRow(
+		"SELECT kind FROM documents WHERE path LIKE '%cognitive_machines_digital%'").
+		Scan(&digitalKind); err != nil {
+		t.Fatal(err)
+	}
+	if digitalKind != "paper" {
+		t.Fatalf("digital pdf not classified as paper, got %q", digitalKind)
+	}
+
 	// OCR actually extracted the scanned page?
 	hits, err := search.Keyword(conn, "sensorimotor", 20)
 	if err != nil {
@@ -290,6 +313,20 @@ func TestE2E(t *testing.T) {
 	defer rows.Close()
 	if rows.Next() {
 		t.Fatal("not all documents reached status=done")
+	}
+
+	// ---- paper fast path: summary must be the EXTRACTED abstract
+	var sumSource, paperSummary string
+	if err := conn.QueryRow(
+		"SELECT summary, summary_source FROM documents WHERE path LIKE '%cognitive_machines_digital%'").
+		Scan(&paperSummary, &sumSource); err != nil {
+		t.Fatal(err)
+	}
+	if sumSource != "extracted" {
+		t.Fatalf("paper did not take the abstract fast path (summary_source=%q)", sumSource)
+	}
+	if !strings.Contains(paperSummary, "sensorimotor") {
+		t.Fatalf("summary is not the abstract: %q", paperSummary[:200])
 	}
 
 	// ---- long-document regression: a ~35k-char doc must not blow the

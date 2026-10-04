@@ -32,7 +32,9 @@ CREATE TABLE IF NOT EXISTS documents(
   ocr_pages INTEGER DEFAULT 0,
   n_pages INTEGER,
   added_at TEXT DEFAULT (datetime('now')),
-  processed_at TEXT
+  processed_at TEXT,
+  kind TEXT DEFAULT '',
+  summary_source TEXT DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS chunks(
@@ -68,7 +70,9 @@ CREATE TRIGGER IF NOT EXISTS chunks_au AFTER UPDATE OF text ON chunks BEGIN
 END;
 `
 
-// Open opens (creating if needed) the library database and applies the schema.
+// Open opens (creating if needed) the library database, applies the schema
+// and runs lightweight additive migrations (libraries from older versions
+// keep working; nothing is ever dropped).
 func Open(dbPath string) (*sql.DB, error) {
 	if err := os.MkdirAll(filepath.Dir(dbPath), 0o755); err != nil {
 		return nil, err
@@ -82,7 +86,45 @@ func Open(dbPath string) (*sql.DB, error) {
 		conn.Close()
 		return nil, err
 	}
+	if err := migrate(conn); err != nil {
+		conn.Close()
+		return nil, err
+	}
 	return conn, nil
+}
+
+// migrate applies additive column migrations. Old SQLite versions can't
+// ALTER TABLE ... IF NOT EXISTS, so check pragma table_info first.
+func migrate(conn *sql.DB) error {
+	migrations := []struct{ table, column, ddl string }{
+		{"documents", "kind", "ALTER TABLE documents ADD COLUMN kind TEXT DEFAULT ''"},
+		{"documents", "summary_source", "ALTER TABLE documents ADD COLUMN summary_source TEXT DEFAULT ''"},
+	}
+	for _, m := range migrations {
+		rows, err := conn.Query("PRAGMA table_info(" + m.table + ")")
+		if err != nil {
+			return err
+		}
+		found := false
+		for rows.Next() {
+			var cid int
+			var name, ctype string
+			var notnull int
+			var dflt sql.NullString
+			var pk int
+			rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk)
+			if name == m.column {
+				found = true
+			}
+		}
+		rows.Close()
+		if !found {
+			if _, err := conn.Exec(m.ddl); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // MetaGet reads a key from the meta table ("" if absent).

@@ -76,6 +76,19 @@ Inspect:            vellum show all --json
   -> [{"id":N,"path":"...","title":"...","authors":"...","year":"...",
        "summary":"...","status":"done","tags":["..."],"ocr_pages":N,...},...]
 
+## Document kinds + fast paths
+Every document gets a kind at ingest (instant, deterministic heuristics):
+"paper", "book", "gallery", "course", "reference", or "" (generic).
+- papers with an Abstract section: the summary IS the extracted abstract
+  (summary_source="extracted" — the authors' own words, no generation), and
+  tagging runs once over it — seconds instead of minutes.
+- near-empty texts (galleries): processed without any LLM call.
+- everything else: the generic map-reduce.
+Override a kind (then re-process):
+    vellum kind 42 paper
+    vellum process 42
+The API accepts kind in GET/PATCH /api/documents.
+
 ## Vocabulary curation (IMPORTANT)
 Tags are constrained to vocab.yaml. The tagging prompt also invites the
 model to PROPOSE new tags when a document's central topic isn't covered:

@@ -68,6 +68,9 @@ function docCard(d) {
     row.append(el("span", { class: "chip status" }, esc(d.status)));
   if (d.summary) row.append(el("div", { class: "summary" }, esc(d.summary)));
   const chips = el("div", { class: "chips" });
+  if (d.kind) chips.append(el("span", { class: "chip status" }, esc(d.kind)));
+  if (d.summary_source === "extracted")
+    chips.append(el("span", { class: "chip" }, "abstract"));
   for (const t of d.tags) chips.append(el("span", { class: "chip" }, esc(t)));
   row.append(chips);
   // per-document process: don't wait for the whole batch
@@ -186,7 +189,9 @@ function detailContent(tab) {
   // summary tab: metadata editing + tags
   const body = el("div", {},
     el("h2", {}, esc(d.title || d.path.split("/").pop())),
-    el("div", { class: "hint" }, esc(d.path)));
+    el("div", { class: "hint" }, esc(d.path)),
+    d.summary_source === "extracted" ? el("div", { class: "hint" },
+      "summary: extracted abstract (the authors' own words — not model-generated)") : null);
   if (d.status !== "done")
     body.append(el("div", { class: "hint" },
       `status: ${esc(d.status)} ${d.error ? "— " + esc(d.error) : ""}`));
@@ -200,6 +205,9 @@ function detailContent(tab) {
   body.append(el("label", {}, "year"));
   const inYear = el("input", { value: d.year, size: "6" });
   body.append(inYear);
+  body.append(el("label", {}, "kind (paper/book/gallery/course/reference/custom; drives the processing path)"));
+  const inKind = el("input", { value: d.kind || "", placeholder: "not detected" });
+  body.append(inKind);
   body.append(el("label", {}, "summary"));
   const inSummary = el("textarea", {}, d.summary || "");
   body.append(inSummary);
@@ -212,7 +220,7 @@ function detailContent(tab) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           title: inTitle.value, authors: inAuthors.value,
-          year: inYear.value, summary: inSummary.value,
+          year: inYear.value, summary: inSummary.value, kind: inKind.value,
         }),
       });
       notice("Saved.");
