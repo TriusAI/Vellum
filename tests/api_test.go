@@ -129,6 +129,43 @@ func TestAPI(t *testing.T) {
 		t.Fatalf("expected added=2, got %+v", st)
 	}
 
+	// fs listing backs the ingest picker: entries typed, unsupported
+	// files flagged, dotfiles hidden
+	if err := os.WriteFile(filepath.Join(lib, "junk.bin"),
+		[]byte("not a document"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(lib, ".hidden.md"),
+		[]byte("hidden"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var fsres struct {
+		Path    string `json:"path"`
+		Entries []struct {
+			Name      string `json:"name"`
+			Dir       bool   `json:"dir"`
+			Supported bool   `json:"supported"`
+		} `json:"entries"`
+	}
+	request("GET", "/api/fs?path="+lib, "", &fsres, 200)
+	if fsres.Path != lib {
+		t.Fatalf("fs path echo wrong: %q", fsres.Path)
+	}
+	supportedNames := map[string]bool{}
+	for _, e := range fsres.Entries {
+		supportedNames[e.Name] = e.Supported
+	}
+	if !supportedNames["doc.pdf"] || !supportedNames["notes.md"] {
+		t.Fatalf("supported files not flagged: %+v", fsres.Entries)
+	}
+	if supportedNames["junk.bin"] {
+		t.Fatal("junk.bin must not be flagged supported")
+	}
+	if _, ok := supportedNames[".hidden.md"]; ok {
+		t.Fatal("dotfiles must be hidden from the picker")
+	}
+	request("GET", "/api/fs?path=relative/path", "", nil, 400)
+
 	// documents list
 	var docs []map[string]any
 	request("GET", "/api/documents", "", &docs, 200)

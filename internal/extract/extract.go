@@ -20,9 +20,11 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"unicode"
 
 	"vellum/internal/config"
 	"vellum/internal/db"
+	"vellum/internal/ocrimg"
 )
 
 var (
@@ -119,11 +121,17 @@ func extractPDFLike(path string, cfg *config.Config) (*Result, error) {
 	needsOCR := []int{}
 	for i, text := range pagesText {
 		trimmed := strings.TrimSpace(text)
-		if len(trimmed) < cfg.OCR.MinCharsPerPage {
-			// Low text: OCR only if the page actually contains image XObjects
+		insufficient := len(trimmed) < cfg.OCR.MinCharsPerPage
+		// An embedded text layer can be BROKEN — scans processed by
+		// some other tool's bad OCR pass. Garbage in the layer is
+		// worse than no layer: it poisons summaries, tags, and search.
+		// Such pages go through image OCR like textless pages do.
+		insane := !insufficient && !textLayerSane(trimmed)
+		if insufficient || insane {
+			// OCR only if the page actually contains image XObjects
 			// (verified: `mutool show file 'pages.N.Resources.XObject.*'`
 			// lists XObjects, or prints null when there are none).
-			if pageHasImage(cfg.Tools.Mutool, pdfPath, i+1) || trimmed == "" {
+			if pageHasImage(cfg.Tools.Mutool, pdfPath, i+1) || insufficient {
 				needsOCR = append(needsOCR, i)
 			}
 		}
@@ -210,7 +218,10 @@ func cleanMetaValue(s string) string {
 }
 
 // ocrPagesIn OCRs the given pages in parallel, filling chunks in place.
-// Returns how many OCR passes produced text.
+// Returns how many OCR passes produced text. Scan geometry is handled
+// per page: two-up spreads (open-book scans) are detected and split at
+// the gutter, and rotated scans are turned upright (tesseract OSD when
+// available, ink-profile heuristics otherwise) before recognition.
 func ocrPagesIn(cfg *config.Config, pdfPath, tmpdir string, pages []int, chunks []db.Chunk) int {
 	tessdataPrefix(cfg)
 
@@ -221,6 +232,7 @@ func ocrPagesIn(cfg *config.Config, pdfPath, tmpdir string, pages []int, chunks 
 			missing)
 		return 0
 	}
+	osdOK := osdAvailable(cfg.Tools.Tesseract)
 
 	sem := make(chan struct{}, cfg.OCR.Workers)
 	var wg sync.WaitGroup
@@ -233,28 +245,249 @@ func ocrPagesIn(cfg *config.Config, pdfPath, tmpdir string, pages []int, chunks 
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
-			png := filepath.Join(tmpdir, fmt.Sprintf("p-%d.png", idx+1))
-			if _, err := run(cfg.Tools.Mutool, "draw", "-r",
-				strconv.Itoa(cfg.OCR.DPI), "-o", png, pdfPath,
+			pgmPath := filepath.Join(tmpdir, fmt.Sprintf("p-%d.pgm", idx+1))
+			if _, err := run(cfg.Tools.Mutool, "draw", "-F", "pgm", "-r",
+				strconv.Itoa(cfg.OCR.DPI), "-o", pgmPath, pdfPath,
 				strconv.Itoa(idx+1)); err != nil {
 				return
 			}
-			out, err := run(cfg.Tools.Tesseract, png, "stdout", "-l", langs)
+			data, err := os.ReadFile(pgmPath)
 			if err != nil {
 				return
 			}
-			text := clean(string(out))
+			im, err := ocrimg.DecodePGM(data)
+			if err != nil {
+				return
+			}
+			text, passes := ocrBitmap(cfg, langs, osdOK, im, tmpdir,
+				fmt.Sprintf("p-%d", idx+1))
 			if text == "" {
 				return
 			}
 			chunks[idx].Text = text
 			mu.Lock()
-			done++
+			done += passes
 			mu.Unlock()
 		}(pageIdx)
 	}
 	wg.Wait()
 	return done
+}
+
+// ocrBitmap runs the scan-geometry pipeline on one page bitmap and
+// returns the recognized text plus how many raster passes produced
+// text (a detected spread counts its two halves separately).
+//
+// Pipeline: (1) open-book spreads are detected geometrically (a
+// near-white gutter column at page center flanked by ink) and split
+// into halves; (2) otherwise the whole page goes through orientation
+// arbitration — candidates ORDERED by cheap signals (tesseract OSD
+// when its traineddata is present, else ink-profile hints), each
+// candidate OCR'd and scored against a common-word dictionary, first
+// pass scoring >= orientAcceptThreshold wins, best-of kept otherwise;
+// (3) an un-rotated sideways spread is re-checked and split there;
+// (4) halves go through the same orientation arbitration (0/180).
+//
+// The dictionary arbitration is what makes orientation CORRECTNESS
+// content-independent: the cheap hints proved reliable for ordering
+// but flip their absolute sign across fonts/DPI/glyph mixes, so they
+// are hints — a wrong hint costs one extra OCR pass, never accuracy.
+func ocrBitmap(cfg *config.Config, langs string, osdOK bool,
+	im *ocrimg.Image, tmpdir, id string) (string, int) {
+	parts := []ocrPart{{im: im, path: filepath.Join(tmpdir, id+".pgm")}}
+
+	// open-book layout: two pages in one image, gutter near the center
+	if at, ok := ocrimg.DetectSpine(im); ok {
+		l, r := im.SplitTwoUp(at)
+		parts = []ocrPart{
+			{im: l, path: filepath.Join(tmpdir, id+"-l.pgm")},
+			{im: r, path: filepath.Join(tmpdir, id+"-r.pgm")},
+		}
+		text, n := ocrParts(cfg, langs, osdOK, parts)
+		return text, n
+	}
+
+	// no spread signature: whole-page orientation arbitration first
+	// (sideways scans must be un-rotated before the gutter shows)
+	oriented, text := ocrPartOriented(cfg, langs, osdOK, parts[0])
+	if at, ok := ocrimg.DetectSpine(oriented); ok {
+		// sideways spread: now upright, the gutter is visible — split
+		// and refine the halves (their text beats the fused-column one)
+		l, r := oriented.SplitTwoUp(at)
+		halves, n := ocrParts(cfg, langs, osdOK, []ocrPart{
+			{im: l, path: filepath.Join(tmpdir, id+"-l.pgm")},
+			{im: r, path: filepath.Join(tmpdir, id+"-r.pgm")},
+		})
+		if n > 0 {
+			return halves, n
+		}
+	}
+	if text == "" {
+		return "", 0
+	}
+	return text, 1
+}
+
+// ocrPart is one image going through OCR with its temp-file path.
+type ocrPart struct {
+	im   *ocrimg.Image
+	path string
+}
+
+// ocrParts runs orientation arbitration per image and joins the text.
+func ocrParts(cfg *config.Config, langs string, osdOK bool, parts []ocrPart) (string, int) {
+	texts := []string{}
+	n := 0
+	for _, p := range parts {
+		_, text := ocrPartOriented(cfg, langs, osdOK, p)
+		if text != "" {
+			texts = append(texts, text)
+			n++
+		}
+	}
+	return strings.Join(texts, "\n\n"), n
+}
+
+// orientAcceptThreshold: an OCR pass scoring at least this on word
+// quality is trusted outright; lower passes only win by comparison.
+const orientAcceptThreshold = 0.40
+
+// ocrPartOriented runs the orientation arbitration on one image: each
+// candidate rotation is written out and OCR'd; the winning image and
+// its text come back.
+func ocrPartOriented(cfg *config.Config, langs string, osdOK bool, p ocrPart) (*ocrimg.Image, string) {
+	if !writePGM(p.im, p.path) {
+		return p.im, ""
+	}
+	cands := orientCandidates(cfg, p.path, p.im, osdOK)
+	if len(cands) == 0 {
+		cands = []int{0}
+	}
+	best, bestText := p.im, ""
+	bestScore := -1.0
+	for _, deg := range cands {
+		img := p.im
+		if deg != 0 {
+			img = p.im.Rotate(deg)
+		}
+		if !writePGM(img, p.path) { // always write: file may hold a prior pass
+			break
+		}
+		out, err := run(cfg.Tools.Tesseract, p.path, "stdout",
+			"-l", langs, "--dpi", strconv.Itoa(cfg.OCR.DPI))
+		if err != nil {
+			continue
+		}
+		text := clean(string(out))
+		if text == "" {
+			continue
+		}
+		score := ocrQuality(text)
+		if score > bestScore {
+			best, bestText, bestScore = img, text, score
+		}
+		if score >= orientAcceptThreshold {
+			break // confident; no arbitration pass needed
+		}
+	}
+	return best, bestText
+}
+
+// orientCandidates returns the rotations (clockwise fix degrees) to
+// try, best guess first. OSD reads actual glyph shapes and is trusted
+// alone when confident; the ink-profile hints only ORDER the
+// candidates (their absolute sign proved unreliable across content).
+func orientCandidates(cfg *config.Config, pgmPath string, im *ocrimg.Image, osdOK bool) []int {
+	if osdOK {
+		if deg, ok := osdRotate(cfg.Tools.Tesseract, pgmPath, cfg.OCR.DPI); ok {
+			return []int{deg}
+		}
+	}
+	// axis: which profile carries the line rhythm (text-line pitch)
+	rows := ocrimg.RhythmScore(im.RowFractions(110))
+	cols := ocrimg.RhythmScore(im.ColFractions(110))
+	if cols > rows*1.3 && cols >= 0.15 {
+		// text lines run vertically: a quarter turn fixes them; the
+		// cw candidate's MassAsym sign hints which side
+		a := ocrimg.MassAsym(im.Rotate(90), 110)
+		if a > 0 {
+			return []int{90, 270}
+		}
+		return []int{270, 90}
+	}
+	if rows >= 0.15 {
+		// horizontal text: 0 vs 180; positive hint = upright first
+		a := ocrimg.MassAsym(im, 110)
+		if a < 0 {
+			return []int{180, 0}
+		}
+		return []int{0, 180}
+	}
+	return nil // no structure: single try at 0°
+}
+
+var (
+	reOOrientation = regexp.MustCompile(`Orientation in degrees:\s*(\d+)`)
+	reOConfidence  = regexp.MustCompile(`Orientation confidence:\s*([\d.]+)`)
+)
+
+// osdRotate parses tesseract's OSD output (--psm 0): the "Rotate:"
+// value is the clockwise correction to apply; low confidence (short
+// pages, decorative scans) means abstain.
+func osdRotate(tesseract, pgmPath string, dpi int) (int, bool) {
+	out, err := run(tesseract, pgmPath, "stdout", "-l", "osd",
+		"--psm", "0", "--dpi", strconv.Itoa(dpi))
+	if err != nil {
+		return 0, false // "too few characters" and friends
+	}
+	s := string(out)
+	c := reOConfidence.FindStringSubmatch(s)
+	if c == nil {
+		return 0, false
+	}
+	conf, _ := strconv.ParseFloat(c[1], 64)
+	if conf < 3.0 {
+		return 0, false
+	}
+	m := reOOrientation.FindStringSubmatch(s)
+	if m == nil {
+		return 0, false
+	}
+	deg, _ := strconv.Atoi(m[1])
+	if deg != 0 && deg != 90 && deg != 180 && deg != 270 {
+		return 0, false
+	}
+	return deg, true
+}
+
+// osdAvailable reports whether the osd traineddata can be loaded
+// (checked once per document; OSD refuses to run without it).
+func osdAvailable(tesseract string) bool {
+	if v, ok := osdAvailableCache.Load(tesseract + "|" + os.Getenv("TESSDATA_PREFIX")); ok {
+		return v.(bool)
+	}
+	ok := false
+	if out, err := run(tesseract, "--list-langs"); err == nil {
+		for _, line := range strings.Split(string(out), "\n") {
+			if strings.TrimSpace(line) == "osd" {
+				ok = true
+				break
+			}
+		}
+	}
+	osdAvailableCache.Store(tesseract+"|"+os.Getenv("TESSDATA_PREFIX"), ok)
+	return ok
+}
+
+var osdAvailableCache sync.Map
+
+// writePGM serializes im as a binary PGM (tesseract and OSD both read
+// plain PGM files directly — no PNG dependency).
+func writePGM(im *ocrimg.Image, path string) bool {
+	var b bytes.Buffer
+	fmt.Fprintf(&b, "P5\n%d %d\n255\n", im.W, im.H)
+	b.Write(im.Pix)
+	return os.WriteFile(path, b.Bytes(), 0o644) == nil
 }
 
 // tessdataPrefix points Tesseract at a project-local tessdata dir if one
@@ -299,3 +532,64 @@ func missingLangs(tesseract, langs string) []string {
 	}
 	return missing
 }
+
+// textLayerSane is a cheap plausibility check for an embedded text
+// layer: recognizable characters (no glyph-code garbage) and word-like
+// structure (broken word spacing is the classic bad-OCR signature).
+// Used to decide whether a page's embedded text can be trusted or the
+// page should be re-OCR'd from its raster.
+func textLayerSane(s string) bool {
+	if len(s) < cfgMinSaneChars {
+		return false
+	}
+	bad := 0
+	for _, r := range s {
+		if !unicode.IsLetter(r) && !unicode.IsDigit(r) &&
+			!unicode.IsSpace(r) && !unicode.IsPunct(r) && !unicode.IsSymbol(r) {
+			bad++
+		}
+	}
+	if float64(bad)/float64(len(s)) > garbleMaxRatio {
+		return false
+	}
+	// word structure: most alphabetic characters belong to words of
+	// 3+ letters ("thequickbrown" = 0 would fail)
+	letters, wordish := 0, 0
+	for _, match := range reWord.FindAllString(s, -1) {
+		wordish += len(match)
+	}
+	for _, r := range s {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') {
+			letters++
+		}
+	}
+	if letters == 0 {
+		return false // pure numbers/punct: not prose
+	}
+	if float64(wordish)/float64(letters) < wordishMinRatio {
+		return false
+	}
+	// broken spacing is the classic bad-OCR signature: prose has
+	// short tokens; concatenated words make one endless "token".
+	// (CJK text has no Word spaces at all and fails here — accepted
+	// trade-off: CJK pages with images get re-OCR'd, text-only CJK
+	// pages keep their layer.)
+	tokens := strings.Fields(s)
+	total := 0
+	for _, tok := range tokens {
+		total += len(tok)
+	}
+	if len(tokens) == 0 || total/len(tokens) > tokenMaxLen {
+		return false
+	}
+	return true
+}
+
+const (
+	cfgMinSaneChars = 40
+	garbleMaxRatio  = 0.04
+	wordishMinRatio = 0.55
+	tokenMaxLen     = 14
+)
+
+var reWord = regexp.MustCompile(`[A-Za-zÀ-ž]{3,}`)

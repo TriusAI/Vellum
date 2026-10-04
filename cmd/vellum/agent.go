@@ -115,12 +115,16 @@ Editing vocab.yaml by hand is also fine (name: description, YAML map).
 
 ## JSON API (vellum serve, default http://127.0.0.1:8090)
     GET  /api/status                 # counts, server availability
-    GET  /api/documents             # all documents (with tags)
+    GET  /api/documents             # all documents (with tags); filters:
+                                    #   ?kind=&category=&tag=&tag= (AND)'
+    GET  /api/categories            # distinct categories + counts
     GET  /api/documents/{id}        # + chunks, tag_sources
     GET  /api/documents/{id}/file    # the original file (?dl=1 to download)
     PATCH /api/documents/{id}       # {"title":..,"authors":..,"year":..,"summary":..}
     PUT  /api/documents/{id}/tags   # {"tags":[...]} (replaces; source=manual)
     POST /api/ingest                # {"paths":[...],"reprocess":false} -> stats
+    GET  /api/fs?path=/abs/dir      # dir listing for the ingest picker
+                                    # (loopback-only; no file contents served)
     POST /api/process               # {"ids":[...]} or {} for all pending -> results
     GET  /api/search?q=&mode=keyword|semantic&limit=N
     GET  /api/vocab                 # [{"name":..,"description":..}]
@@ -133,9 +137,17 @@ Errors: {"error":"..."} with 4xx/5xx status codes.
 - process requires a non-empty vocabulary; it refuses with a clear error
   otherwise (nothing is destroyed, just do vocab add first).
 - CPU-only: process takes minutes per document; ingest/search are fast.
-- Scanned PDFs: pages with < ocr.min_chars_per_page extractable chars but
-  images get OCR'd (tesseract). A scan with a junk text layer needs
-  min_chars_per_page lowered.
+- Scan geometry is handled by the OCR pipeline: two-page spreads
+  (open-book scans, one image per spread) are split at the detected
+  gutter into two pages; rotated scans are turned upright (tesseract
+  OSD when osd.traineddata is available, else ink-profile heuristics).
+- A page whose EMBEDDED text layer is garbage (some other tool's bad
+  OCR pass) is detected ("the quick brown fox" without spaces,
+  glyph-code junk) and re-OCR'd from the raster — bad embedded layers
+  no longer poison summaries/tags/search. No config knob needed.
+- The ingest picker in the web UI browses the filesystem and picks
+  files/directories (GET /api/fs?path=/abs/dir — loopback-only,
+  read-only listings; entries carry "supported" flags).
 - Metadata: PDF producers emit junk ("unknown"); Vellum filters known
   junk values and validates years as 4-digit patterns.
 - Files are indexed in place (absolute paths, sha256 change detection).

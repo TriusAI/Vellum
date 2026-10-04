@@ -363,14 +363,104 @@ $("#q").addEventListener("keydown", (e) => { if (e.key === "Enter") doSearch(); 
 
 /* ---------------------------------------------------------------- ingest */
 
+let fsSelected = [];
+let fsPath = null;
+
+const joinPath = (base, name) => (base.endsWith("/") ? base + name : base + "/" + name);
+
+async function fsOpen(path) {
+  const data = await api("/api/fs" + (path ? "?path=" + encodeURIComponent(path) : ""));
+  fsPath = data.path;
+  // breadcrumb: root + segments, each clickable
+  const crumbs = $("#fs-crumbs");
+  crumbs.replaceChildren();
+  const segs = data.path.split("/").filter(Boolean);
+  let acc = "";
+  crumbs.append(el("span", { class: "crumb", onclick: () => fsOpen("/") }, "/"));
+  for (const s of segs) {
+    acc += "/" + s;
+    crumbs.append(el("span", { class: "crumb", onclick: () => fsOpen(acc) }, s));
+    crumbs.append(el("span", { class: "crumb-sep" }, "/"));
+  }
+  crumbs.classList.add("done");
+  // entries: directories first, then files, alphabetical
+  const list = $("#fs-list");
+  list.replaceChildren();
+  if (data.parent) {
+    list.append(el("div", {
+      class: "fs-row dir", onclick: () => fsOpen(data.parent),
+    }, "← .."));
+  }
+  const rows = [...data.entries]
+    .sort((a, b) => (b.dir - a.dir) || a.name.localeCompare(b.name));
+  for (const e of rows) {
+    const full = joinPath(data.path, e.name);
+    if (e.dir) {
+      const row = el("div", { class: "fs-row dir" }, "▸ " + e.name);
+      row.onclick = () => fsOpen(full);
+      const add = el("button", {
+        class: "mini", title: "select this whole directory",
+        onclick: (ev) => { ev.stopPropagation(); fsToggle(full, row); },
+      }, "+");
+      row.append(add);
+      list.append(row);
+    } else {
+      const kb = e.size > 1 << 20
+        ? Math.round(e.size / (1 << 20)) + " MB"
+        : Math.max(1, Math.round(e.size / 1024)) + " kB";
+      const row = el("div", { class: "fs-row file" }, e.name,
+        el("span", { class: "size" }, kb));
+      if (!e.supported) {
+        row.classList.add("unsupported");
+        row.title = "unsupported file type";
+      } else {
+        row.onclick = () => fsToggle(full, row);
+      }
+      if (fsSelected.includes(full)) row.classList.add("sel");
+      list.append(row);
+    }
+  }
+  fsChips();
+}
+
+function fsToggle(path, row) {
+  const i = fsSelected.indexOf(path);
+  if (i >= 0) fsSelected.splice(i, 1);
+  else fsSelected.push(path);
+  if (row) row.classList.toggle("sel", i < 0);
+  fsChips();
+}
+
+function fsChips() {
+  const box = $("#fs-selected");
+  box.replaceChildren();
+  if (!fsSelected.length && !$("#ingest-paths").classList.contains("hidden"))
+    box.append(el("span", { class: "hint" }, "no file chosen — using pasted paths"));
+  for (const p of fsSelected) {
+    box.append(el("span", {
+      class: "chip", title: p,
+      onclick: () => fsToggle(p),
+    }, p.split("/").pop() + "  ✕"));
+  }
+}
+
 $("#btn-ingest").onclick = () => {
   $("#ingest-result").classList.add("hidden");
   $("#dlg-ingest").showModal();
+  fsSelected = [];
+  fsOpen().catch((e) => notice("fs: " + e.message));
+  fsChips();
 };
 $("#ingest-cancel").onclick = () => $("#dlg-ingest").close();
+$("#fs-paste-toggle").onclick = () => {
+  $("#ingest-paths").classList.toggle("hidden");
+  fsChips();
+};
 $("#ingest-go").onclick = async () => {
-  const paths = $("#ingest-paths").value
-    .split("\n").map((s) => s.trim()).filter(Boolean);
+  const paths = [...fsSelected];
+  for (const p of $("#ingest-paths").value
+    .split("\n").map((s) => s.trim()).filter(Boolean))
+    if (!paths.includes(p)) paths.push(p);
   if (!paths.length) return;
   const btn = $("#ingest-go");
   btn.textContent = "Ingesting…";
@@ -387,7 +477,9 @@ $("#ingest-go").onclick = async () => {
     for (const f of st.files || [])
       if (f.action === "failed") pre.textContent += `\nFAILED: ${f.path}: ${f.error}`;
     await loadDocs();
+    await loadCategories();
     await refresh();
+    if (!st.Failed) $("#dlg-ingest").close();
   } catch (e) { notice("ingest: " + e.message); }
   btn.textContent = "Ingest";
 };

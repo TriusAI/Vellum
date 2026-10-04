@@ -85,7 +85,8 @@ vellum vocab promote marine-biology "Study of ocean life"   # adopt a suggested 
 vellum vocab add my-new-tag "what it covers"
 
 # 5. browse: local web UI (search, read summaries/chunks, edit metadata,
-#    curate tags, trigger ingest/process — all in the browser)
+#    curate tags, trigger ingest/process — all in the browser; ingest picks
+#    files with a built-in filesystem picker)
 vellum serve --open
 ```
 
@@ -187,9 +188,13 @@ The SQLite schema is identical to the retired Python prototype's, so a
 - **Server lifecycle**: llama.cpp serves one model per process, so the
   launcher runs two small llama-servers (chat :8081, embeddings :8082) and
   reuses them if they're already up.
-- **Scanned PDFs with a bad text layer**: pages with ≥ `min_chars_per_page`
-  extractable characters are trusted as born-digital. If a scan has a junk
-  OCR layer, lower the threshold or delete the text layer first.
+- **Scan geometry** (v0.6.0): OCR handles common scan quirks — open-book
+  two-page spreads are split at the detected gutter (each half processed
+  as its own page), rotated scans are turned upright (tesseract OSD when
+  `tessdata/osd.traineddata` exists, ink-profile heuristics otherwise),
+  and pages whose embedded text layer is garbage (broken word spacing,
+  glyph-code junk — another tool's bad OCR pass) are detected and
+  re-OCR'd from the raster instead of poisoning summaries and tags.
 - **Semantic search** is brute-force cosine over chunk vectors — instant at
   personal-library scale (tens of thousands of chunks).
 - **Portability**: the Go binary is fully static; the bundled `mutool` is

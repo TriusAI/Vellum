@@ -8,6 +8,7 @@ import (
 	"embed"
 	"encoding/json"
 	"io/fs"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -18,6 +19,7 @@ import (
 
 	"vellum/internal/config"
 	"vellum/internal/db"
+	"vellum/internal/extract"
 	"vellum/internal/ingest"
 	"vellum/internal/llm"
 	"vellum/internal/search"
@@ -54,6 +56,7 @@ func (s *Server) Mux() http.Handler {
 	mux.HandleFunc("PATCH /api/documents/{id}", s.patchDocument)
 	mux.HandleFunc("PUT /api/documents/{id}/tags", s.putTags)
 	mux.HandleFunc("POST /api/ingest", s.postIngest)
+	mux.HandleFunc("GET /api/fs", s.fsList)
 	mux.HandleFunc("POST /api/process", s.postProcess)
 	mux.HandleFunc("GET /api/search", s.search)
 	mux.HandleFunc("GET /api/vocab", s.getVocab)
@@ -444,6 +447,65 @@ func (s *Server) putTags(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.document(w, r)
+}
+
+// fsList backs the ingest file picker: lists ONE directory's entries
+// (no file contents are served). Local-machine tool: the request must
+// come from loopback even when serve was bound to a wider interface.
+func (s *Server) fsList(w http.ResponseWriter, r *http.Request) {
+	host := r.RemoteAddr
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	host = strings.Trim(host, "[]")
+	if host != "127.0.0.1" && host != "::1" {
+		writeErr(w, 403, "filesystem browsing is loopback-only")
+		return
+	}
+	dir := r.URL.Query().Get("path")
+	if dir == "" {
+		if home, err := os.UserHomeDir(); err == nil {
+			dir = home
+		}
+	}
+	if !filepath.IsAbs(dir) {
+		writeErr(w, 400, "path must be absolute")
+		return
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
+	type entry struct {
+		Name      string `json:"name"`
+		Dir       bool   `json:"dir"`
+		Supported bool   `json:"supported"`
+		Size      int64  `json:"size,omitempty"`
+	}
+	out := struct {
+		Path    string  `json:"path"`
+		Parent  string  `json:"parent,omitempty"`
+		Entries []entry `json:"entries"`
+	}{Path: dir, Entries: []entry{}}
+	if parent := filepath.Dir(dir); parent != dir {
+		out.Parent = parent
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".") {
+			continue // dotfiles: not interesting in a library picker
+		}
+		full := filepath.Join(dir, e.Name())
+		en := entry{Name: e.Name(), Dir: e.IsDir()}
+		if !e.IsDir() {
+			en.Supported = extract.Supported(full)
+			if fi, err := e.Info(); err == nil {
+				en.Size = fi.Size()
+			}
+		}
+		out.Entries = append(out.Entries, en)
+	}
+	writeJSON(w, 200, out)
 }
 
 func (s *Server) postIngest(w http.ResponseWriter, r *http.Request) {

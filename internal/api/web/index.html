@@ -45,8 +45,13 @@
 
 <dialog id="dlg-ingest">
   <h2>Ingest files or directories</h2>
-  <p class="hint">One path per line. Absolute paths recommended (files are indexed in place).</p>
-  <textarea id="ingest-paths" rows="6" placeholder="/home/me/books
+  <div id="fs-browser">
+    <div id="fs-crumbs"></div>
+    <div id="fs-list"></div>
+    <div id="fs-selected"></div>
+  </div>
+  <p class="hint"><a id="fs-paste-toggle" class="link">paste paths instead…</a> (files are indexed in place)</p>
+  <textarea id="ingest-paths" rows="4" class="hidden" placeholder="/home/me/books
 /home/me/papers/that-scan.pdf"></textarea>
   <div class="row">
     <label><input type="checkbox" id="ingest-reprocess"> re-extract unchanged files</label>

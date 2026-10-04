@@ -206,7 +206,7 @@ func TestE2E(t *testing.T) {
 	if _, err := os.Stat(scanPNG); err != nil {
 		t.Skip("testdata/scan_page.png missing")
 	}
-	if err := testutil.WriteImagePDF(filepath.Join(lib, "cognitive_machines_scan.pdf"), scanPNG); err != nil {
+	if err := testutil.WriteImagePDF(filepath.Join(lib, "cognitive_machines_scan.pdf"), scanPNG, 300); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(lib, "engineering_notes.md"), []byte(

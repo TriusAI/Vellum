@@ -91,3 +91,25 @@ mark { background: #f5e6a8; }
   padding: .35rem .5rem; font-size: .85rem;
 }
 .filters input { width: 13rem; }
+
+/* ---------------------------------------------------------------- picker */
+#fs-browser { margin: .4rem 0; }
+#fs-crumbs { font-size: .8rem; color: var(--muted); margin-bottom: .25rem;
+  word-break: break-all; max-height: 2.6em; overflow: hidden; }
+.crumb { color: var(--accent); cursor: pointer; }
+.crumb:hover { text-decoration: underline; }
+.crumb-sep { opacity: .45; }
+#fs-list { height: 15rem; overflow-y: auto; border: 1px solid var(--line);
+  margin-bottom: .5rem; }
+.fs-row { padding: .22rem .5rem; cursor: pointer; display: flex;
+  justify-content: space-between; align-items: center; gap: .6rem;
+  font-size: .85rem; }
+.fs-row:hover { background: rgba(127, 127, 127, .12); }
+.fs-row.dir { color: var(--muted); }
+.fs-row.file.sel { background: rgba(90, 140, 255, .25); }
+.fs-row.file.unsupported { opacity: .4; cursor: not-allowed; }
+.fs-row .size { opacity: .5; font-size: .75rem; }
+.fs-row .mini { padding: 0 .45rem; font-size: .8rem; }
+#fs-selected { display: flex; flex-wrap: wrap; gap: .3rem; min-height: 1.6rem;
+  margin-bottom: .4rem; }
+#fs-selected .chip { display: inline-flex; cursor: pointer; }
