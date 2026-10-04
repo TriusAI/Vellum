@@ -186,7 +186,12 @@ func TagDocument(cfg *config.Config, v *vocab.Vocabulary, text string) (*TagResu
 	}
 	for _, t := range strSlice(out["tags_other"]) {
 		t = strings.ToLower(strings.TrimSpace(t))
-		if t != "" && len(res.TagsOther) < 3 {
+		switch t {
+		case "", "unknown", "untitled", "unspecified", "anonymous", "none",
+			"n/a", "na", "null", "other", "misc", "miscellaneous":
+			continue // LLM hedging is not a suggestion
+		}
+		if len(res.TagsOther) < 3 {
 			res.TagsOther = append(res.TagsOther, t)
 		}
 	}
