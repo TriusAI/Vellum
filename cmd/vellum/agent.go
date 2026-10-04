@@ -76,18 +76,31 @@ Inspect:            vellum show all --json
   -> [{"id":N,"path":"...","title":"...","authors":"...","year":"...",
        "summary":"...","status":"done","tags":["..."],"ocr_pages":N,...},...]
 
-## Document kinds + fast paths
+## Document kinds, categories, and fast paths
 Every document gets a kind at ingest (instant, deterministic heuristics):
 "paper", "book", "gallery", "course", "reference", or "" (generic).
 - papers with an Abstract section: the summary IS the extracted abstract
-  (summary_source="extracted" — the authors' own words, no generation), and
+  (summary_source="abstract" — the authors' own words, no generation), and
   tagging runs once over it — seconds instead of minutes.
+- books: the summary is the extracted FRONT MATTER (preface, else
+  foreword, else introduction — the author's own overview of the book;
+  summary_source="front-matter"), with the contents listing fed to
+  tagging as a topic hint. Full map-reduce of a whole book only happens
+  when no front matter is found.
 - near-empty texts (galleries): processed without any LLM call.
 - everything else: the generic map-reduce.
 Override a kind (then re-process):
     vellum kind 42 paper
     vellum process 42
-The API accepts kind in GET/PATCH /api/documents.
+
+Categories are YOUR shelving (any string; e.g. "ai-papers", "theology"):
+    vellum category 42 ai-papers     # set; "none" clears
+    vellum show all --kind paper --category ai-papers --tag transformer
+    vellum search "attention" --kind paper --tag ai --category ai-papers
+(--tag repeatable; a doc must have ALL listed tags.)
+The API accepts kind/category in GET/PATCH /api/documents, filter params
+on GET /api/documents and GET /api/search (kind, category, repeated tag),
+and GET /api/categories lists distinct categories with counts.
 
 ## Vocabulary curation (IMPORTANT)
 Tags are constrained to vocab.yaml. The tagging prompt also invites the

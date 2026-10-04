@@ -70,6 +70,9 @@ vellum process [ID...]     # summarize + tag pending (all, or specific docs by i
 # 2. find things
 vellum search "quantum error correction"     # FTS5 keyword
 vellum search "papers arguing against tabula rasa" --semantic
+# filters (on search and "show all"): --kind --category --tag (repeatable)
+vellum show all --kind paper --category ai-papers
+vellum search "attention" --tag transformer --kind paper
 
 # 3. inspect
 vellum show all

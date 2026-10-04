@@ -85,3 +85,9 @@ dialog textarea { width: 100%; font: inherit; padding: .5rem; border: 1px solid 
 .busy { opacity: .5; pointer-events: none; }
 .score { color: var(--muted); font-size: .8rem; }
 mark { background: #f5e6a8; }
+.filters { display: flex; gap: .4rem; align-items: center; flex-wrap: wrap; }
+.filters select, .filters input {
+  border: 1px solid var(--line); background: var(--bg);
+  padding: .35rem .5rem; font-size: .85rem;
+}
+.filters input { width: 13rem; }

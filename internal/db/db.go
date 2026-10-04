@@ -34,7 +34,8 @@ CREATE TABLE IF NOT EXISTS documents(
   added_at TEXT DEFAULT (datetime('now')),
   processed_at TEXT,
   kind TEXT DEFAULT '',
-  summary_source TEXT DEFAULT ''
+  summary_source TEXT DEFAULT '',
+  category TEXT DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS chunks(
@@ -99,6 +100,7 @@ func migrate(conn *sql.DB) error {
 	migrations := []struct{ table, column, ddl string }{
 		{"documents", "kind", "ALTER TABLE documents ADD COLUMN kind TEXT DEFAULT ''"},
 		{"documents", "summary_source", "ALTER TABLE documents ADD COLUMN summary_source TEXT DEFAULT ''"},
+		{"documents", "category", "ALTER TABLE documents ADD COLUMN category TEXT DEFAULT ''"},
 	}
 	for _, m := range migrations {
 		rows, err := conn.Query("PRAGMA table_info(" + m.table + ")")

@@ -45,11 +45,11 @@ file (FTS5). Models served locally by llama.cpp llama-server.
 `
 
 // versionString is reported by --version, /api/status and `vellum agent`.
-const versionString = "0.4.0"
+const versionString = "0.5.0"
 
 // documentColumns is the explicit projection used everywhere (never SELECT *,
 // so the scan order is fixed even if the schema gains columns).
-const documentColumns = "id, path, title, authors, year, summary, status, kind, summary_source"
+const documentColumns = "id, path, title, authors, year, summary, status, kind, summary_source, category"
 
 type document struct {
 	ID            int64  `json:"id"`
@@ -61,17 +61,19 @@ type document struct {
 	Status        string `json:"status"`
 	Kind          string `json:"kind,omitempty"`
 	SummarySource string `json:"summary_source,omitempty"`
+	Category      string `json:"category,omitempty"`
 }
 
 func (d *document) scan(sc scannable) error {
-	var title, authors, year, summary, kind, sumSource sql.NullString
+	var title, authors, year, summary, kind, sumSource, category sql.NullString
 	if err := sc.Scan(&d.ID, &d.Path, &title, &authors, &year, &summary,
-		&d.Status, &kind, &sumSource); err != nil {
+		&d.Status, &kind, &sumSource, &category); err != nil {
 		return err
 	}
 	d.Title, d.Authors, d.Year, d.Summary =
 		title.String, authors.String, year.String, summary.String
-	d.Kind, d.SummarySource = kind.String, sumSource.String
+	d.Kind, d.SummarySource, d.Category =
+		kind.String, sumSource.String, category.String
 	return nil
 }
 
@@ -135,6 +137,8 @@ func main() {
 		cmdEmbed(cfg, args[1:])
 	case "kind":
 		cmdKind(cfg, args[1:])
+	case "category":
+		cmdCategory(cfg, args[1:])
 	case "serve":
 		cmdServe(cfg, args[1:])
 	case "agent", "agents":
@@ -241,6 +245,8 @@ func cmdSearch(cfg *config.Config, args []string) {
 	// the query.
 	semantic := false
 	limit := 20
+	filterKind, filterCategory := "", ""
+	var filterTags []string
 	var positional []string
 	for i := 0; i < len(args); i++ {
 		switch {
@@ -259,6 +265,27 @@ func cmdSearch(cfg *config.Config, args []string) {
 			if n, err := strconv.Atoi(strings.TrimPrefix(args[i], "--limit=")); err == nil {
 				limit = n
 			}
+		case args[i] == "--kind" || args[i] == "-kind":
+			if i+1 < len(args) {
+				filterKind = args[i+1]
+				i++
+			}
+		case strings.HasPrefix(args[i], "--kind="):
+			filterKind = strings.TrimPrefix(args[i], "--kind=")
+		case args[i] == "--category" || args[i] == "-category":
+			if i+1 < len(args) {
+				filterCategory = args[i+1]
+				i++
+			}
+		case strings.HasPrefix(args[i], "--category="):
+			filterCategory = strings.TrimPrefix(args[i], "--category=")
+		case args[i] == "--tag" || args[i] == "-tag":
+			if i+1 < len(args) {
+				filterTags = append(filterTags, strings.ToLower(args[i+1]))
+				i++
+			}
+		case strings.HasPrefix(args[i], "--tag="):
+			filterTags = append(filterTags, strings.ToLower(strings.TrimPrefix(args[i], "--tag=")))
 		default:
 			positional = append(positional, args[i])
 		}
@@ -269,10 +296,20 @@ func cmdSearch(cfg *config.Config, args []string) {
 	query := strings.Join(positional, " ")
 	conn := mustOpen(cfg)
 
+	allowed := allowedDocs(conn, filterKind, filterCategory, filterTags)
 	if semantic {
 		hits, err := search.Semantic(cfg, conn, query, limit)
 		if err != nil {
 			log.Fatalf("search: %s", err)
+		}
+		if allowed != nil {
+			kept := hits[:0]
+			for _, h := range hits {
+				if allowed[h.DocID] {
+					kept = append(kept, h)
+				}
+			}
+			hits = kept
 		}
 		if jsonOut {
 			printJSON(hits)
@@ -295,6 +332,15 @@ func cmdSearch(cfg *config.Config, args []string) {
 	hits, err := search.Keyword(conn, query, limit)
 	if err != nil {
 		log.Fatalf("search: %s", err)
+	}
+	if allowed != nil {
+		kept := hits[:0]
+		for _, h := range hits {
+			if allowed[h.DocID] {
+				kept = append(kept, h)
+			}
+		}
+		hits = kept
 	}
 	if jsonOut {
 		printJSON(hits)
@@ -321,6 +367,38 @@ func cmdShow(cfg *config.Config, args []string) {
 	conn := mustOpen(cfg)
 
 	if args[0] == "all" {
+		filterKind, filterCategory := "", ""
+		var filterTags []string
+		rest2 := args[1:]
+		args = args[:1]
+		for i := 0; i < len(rest2); i++ {
+			switch {
+			case rest2[i] == "--kind" || rest2[i] == "-kind":
+				if i+1 < len(rest2) {
+					filterKind = rest2[i+1]
+					i++
+				}
+			case strings.HasPrefix(rest2[i], "--kind="):
+				filterKind = strings.TrimPrefix(rest2[i], "--kind=")
+			case rest2[i] == "--category" || rest2[i] == "-category":
+				if i+1 < len(rest2) {
+					filterCategory = rest2[i+1]
+					i++
+				}
+			case strings.HasPrefix(rest2[i], "--category="):
+				filterCategory = strings.TrimPrefix(rest2[i], "--category=")
+			case rest2[i] == "--tag" || rest2[i] == "-tag":
+				if i+1 < len(rest2) {
+					filterTags = append(filterTags, strings.ToLower(rest2[i+1]))
+					i++
+				}
+			case strings.HasPrefix(rest2[i], "--tag="):
+				filterTags = append(filterTags, strings.ToLower(strings.TrimPrefix(rest2[i], "--tag=")))
+			default:
+				log.Fatalf("show all: unexpected argument %q", rest2[i])
+			}
+		}
+		allowed := allowedDocs(conn, filterKind, filterCategory, filterTags)
 		rows, err := conn.Query("SELECT " + documentColumns + " FROM documents ORDER BY id")
 		if err != nil {
 			log.Fatalf("show: %s", err)
@@ -335,6 +413,9 @@ func cmdShow(cfg *config.Config, args []string) {
 			var d document
 			if err := d.scan(rows); err != nil {
 				log.Fatalf("show: %s", err)
+			}
+			if allowed != nil && !allowed[d.ID] {
+				continue
 			}
 			all = append(all, docWithTags{document: d,
 				Tags: strings.Split(docTags(conn, d.ID), ", ")})
@@ -517,6 +598,80 @@ GROUP BY t.tag ORDER BY n DESC, t.tag`)
 	default:
 		log.Fatalf("unknown vocab action: %s", action)
 	}
+}
+
+// cmdCategory shows or sets the user-curated category ("shelving").
+func cmdCategory(cfg *config.Config, args []string) {
+	if len(args) < 1 {
+		log.Fatalf("usage: vellum category ID [VALUE]   (no value = show; 'none' clears)")
+	}
+	id, err := strconv.ParseInt(args[0], 10, 64)
+	if err != nil {
+		log.Fatalf("category expects a numeric document id")
+	}
+	conn := mustOpen(cfg)
+	if len(args) < 2 {
+		var cat sql.NullString
+		if err := conn.QueryRow("SELECT category FROM documents WHERE id=?", id).
+			Scan(&cat); err != nil {
+			log.Fatalf("category: %s", err)
+		}
+		if cat.String == "" {
+			fmt.Printf("#%d: uncategorized\n", id)
+		} else {
+			fmt.Printf("#%d: %s\n", id, cat.String)
+		}
+		return
+	}
+	value := strings.ToLower(strings.TrimSpace(args[1]))
+	if value == "none" || value == "-" {
+		value = ""
+	}
+	if _, err := conn.Exec("UPDATE documents SET category=? WHERE id=?", value, id); err != nil {
+		log.Fatalf("category: %s", err)
+	}
+	fmt.Printf("#%d: category set to %q\n", id, value)
+}
+
+// allowedDocs returns the set of document ids matching the filters, or nil
+// when no filter is set (all allowed).
+func allowedDocs(conn *sql.DB, kind, category string, tags []string) map[int64]bool {
+	if kind == "" && category == "" && len(tags) == 0 {
+		return nil
+	}
+	q := "SELECT DISTINCT d.id, d.kind, d.category FROM documents d"
+	args := []any{}
+	if len(tags) > 0 {
+		q += " JOIN doc_tags t ON t.doc_id = d.id AND t.tag IN ("
+		for i, t := range tags {
+			if i > 0 {
+				q += ","
+			}
+			q += "?"
+			args = append(args, t)
+		}
+		q += ") GROUP BY d.id HAVING COUNT(DISTINCT t.tag) = ?"
+		args = append(args, len(tags))
+	}
+	rows, err := conn.Query(q, args...)
+	if err != nil {
+		log.Fatalf("filter: %s", err)
+	}
+	defer rows.Close()
+	out := map[int64]bool{}
+	for rows.Next() {
+		var id int64
+		var k, c sql.NullString
+		rows.Scan(&id, &k, &c)
+		if kind != "" && !strings.EqualFold(k.String, kind) {
+			continue
+		}
+		if category != "" && !strings.EqualFold(c.String, category) {
+			continue
+		}
+		out[id] = true
+	}
+	return out
 }
 
 // cmdKind shows or overrides the detected document kind ("paper", "book",

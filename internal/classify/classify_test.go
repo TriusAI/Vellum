@@ -96,3 +96,67 @@ func TestExtractAbstractMissing(t *testing.T) {
 		t.Fatalf("expected empty, got %q", got)
 	}
 }
+func TestExtractFrontMatter(t *testing.T) {
+	text := `Contents
+The Rain  3
+The Field  17
+
+Preface
+This book grew out of ten years of walking the same muddy lane at dusk.
+I wrote it for the people who stopped to ask what I was looking at, and
+for the ones who did not stop but wondered anyway. The chapters move
+from weather to soil to the small politics of hedgerows, and the preface
+continues at some length here in order to pass the minimum-length check
+for real front-matter sections, since actual book prefaces run several
+pages and we want to reject stray single-line headings but not genuine
+overviews written by the author about the book as a whole.
+
+Chapter One
+The rain began before the road did.
+`
+	fm := ExtractFrontMatter(text)
+	if !strings.Contains(fm, "ten years of walking") {
+		t.Fatalf("front matter not extracted: %q", fm[:200])
+	}
+	if strings.Contains(fm, "The rain began") {
+		t.Fatalf("front matter bled into chapter one: %q", fm)
+	}
+}
+
+func TestExtractFrontMatterPrefersPreface(t *testing.T) {
+	text := `Foreword
+A few words from a friend of the author that go on for quite a while
+about how we met and what this book means to our shared field, which is
+in fact rather a lot to say about a book about mud and lanes and rain.
+
+Preface
+The preface is the author's own overview and should win over the
+foreword because it describes the book's actual argument, which the
+foreword merely gestures at from a friendly distance.
+`
+	fm := ExtractFrontMatter(text)
+	if !strings.Contains(fm, "author's own overview") {
+		t.Fatalf("expected preface to win over foreword: %q", fm[:120])
+	}
+}
+
+func TestExtractTOC(t *testing.T) {
+	text := `Contents
+1 The Rain ..... 3
+2 The Field ..... 17
+Appendix A ..... 231
+
+Preface
+About this book.
+`
+	toc := ExtractTOC(text)
+	if !strings.Contains(toc, "The Rain") || !strings.Contains(toc, "The Field") {
+		t.Fatalf("TOC lines not extracted: %q", toc)
+	}
+	if strings.Contains(toc, "3") && strings.Contains(toc, ".....") {
+		t.Fatalf("TOC dot leaders not stripped: %q", toc)
+	}
+	if strings.Contains(toc, "About this book") {
+		t.Fatalf("TOC bled into preface: %q", toc)
+	}
+}

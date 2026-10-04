@@ -338,7 +338,7 @@ func processOne(cfg *config.Config, conn *sql.DB, v *vocab.Vocabulary,
 				return nil, err
 			}
 			if err := storeProcessed(conn, docID, title, authors, year, tags,
-				abstract, "extracted"); err != nil {
+				abstract, "abstract"); err != nil {
 				return nil, err
 			}
 			log.Printf("done: extracted abstract (%d chars) — tags: %s",
@@ -346,6 +346,38 @@ func processOne(cfg *config.Config, conn *sql.DB, v *vocab.Vocabulary,
 			return tags, nil
 		}
 		// no abstract found: fall through to the generic path
+	}
+
+	// books: the author's own front matter (preface / foreword /
+	// introduction) IS the summary — summarizing an entire book with
+	// map-reduce would be hours of LLM time for a worse result. The
+	// contents listing feeds the tagging call as a topic hint.
+	if kind == "book" {
+		if report := progress; true {
+			if report == nil {
+				report = func(string) {}
+			}
+			report("extracting front matter")
+			if front := classify.ExtractFrontMatter(text); front != "" {
+				report("choosing tags (from front matter + contents)")
+				tagInput := []string{front}
+				if toc := classify.ExtractTOC(text); toc != "" {
+					tagInput = append(tagInput, "Contents:\n"+toc)
+				}
+				tags, terr := summarize.TagDocument(cfg, v, tagInput, nil, front, progress)
+				if terr != nil {
+					return nil, terr
+				}
+				if serr := storeProcessed(conn, docID, title, authors, year, tags,
+					front, "front-matter"); serr != nil {
+					return nil, serr
+				}
+				log.Printf("done: extracted front matter (%d chars) — tags: %s",
+					len(front), strings.Join(tags.Tags, ", "))
+				return tags, nil
+			}
+		}
+		// no front matter found: fall through to the generic path
 	}
 
 	// ---- generic path: map-reduce over the whole document --------------

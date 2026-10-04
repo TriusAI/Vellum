@@ -181,3 +181,80 @@ func ExtractAbstract(text string) string {
 	}
 	return out
 }
+
+// front-matter headings terminate at chapter-like structure.
+var (
+	rePreface      = regexp.MustCompile(`(?im)^[\s]*preface\b`)
+	reForeword     = regexp.MustCompile(`(?im)^[\s]*(foreword|acknowledge?ments?)\b`)
+	reIntro        = regexp.MustCompile(`(?im)^[\s]*(introduction|prologue|about this (book|work))\b`)
+	reChapterStart = regexp.MustCompile(
+		`(?im)^[\s]*(chapter|part|appendix)\b|^[\s]*1\s+[\w(]`)
+)
+
+// ExtractFrontMatter pulls a book's overview from its front matter, in
+// preference order: Preface, then Foreword, then Introduction. This is the
+// author's own description of the book — better than a generated summary,
+// and free. Returns "" when nothing is found (the caller then falls back
+// to full map-reduce summarization).
+func ExtractFrontMatter(text string) string {
+	for _, re := range []*regexp.Regexp{rePreface, reForeword, reIntro} {
+		loc := re.FindStringIndex(text)
+		if loc == nil {
+			continue
+		}
+		rest := text[loc[1]:]
+		if end := reChapterStart.FindStringIndex(rest); end != nil {
+			rest = rest[:end[0]]
+		}
+		if len(rest) > 7000 {
+			rest = rest[:7000]
+		}
+		out := strings.TrimSpace(rest)
+		if len(out) < 400 {
+			continue // stray heading, not a real section
+		}
+		return out
+	}
+	return ""
+}
+
+var reTOCPage = regexp.MustCompile(`(?im)^[\s]*(table of )?contents\b`)
+
+var (
+	reDotLeader = regexp.MustCompile(`[.·—-]{2,}\s*\d+\s*$`)
+	reTrailingN = regexp.MustCompile(`\s+\d+$`)
+)
+
+// ExtractTOC pulls the contents listing (chapter/section titles) out of a
+// book — used as a topic hint for tagging, not as a summary.
+func ExtractTOC(text string) string {
+	loc := reTOCPage.FindStringIndex(text)
+	if loc == nil {
+		return ""
+	}
+	rest := text[loc[1]:]
+	// TOC entries are often numbered lines, so the chapter-start pattern
+	// must NOT be a stop here — stop at the next prose section instead
+	// (a TOC is typically followed by the preface/foreword/introduction).
+	for _, end := range []*regexp.Regexp{rePreface, reForeword, reIntro} {
+		if m := end.FindStringIndex(rest); m != nil {
+			rest = rest[:m[0]]
+		}
+	}
+	if len(rest) > 4000 {
+		rest = rest[:4000]
+	}
+	lines := []string{}
+	for _, line := range strings.Split(rest, "\n") {
+		cleaned := reDotLeader.ReplaceAllString(line, "")
+		cleaned = strings.TrimSpace(reTrailingN.ReplaceAllString(cleaned, ""))
+		if cleaned == "" || len(cleaned) < 3 {
+			continue
+		}
+		lines = append(lines, cleaned)
+		if len(lines) >= 60 {
+			break
+		}
+	}
+	return strings.Join(lines, "\n")
+}

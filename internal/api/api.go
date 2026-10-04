@@ -48,6 +48,7 @@ func (s *Server) Mux() http.Handler {
 	mux.HandleFunc("GET /api/status", s.status)
 	mux.HandleFunc("GET /api/progress", s.getProgress)
 	mux.HandleFunc("GET /api/documents", s.documents)
+	mux.HandleFunc("GET /api/categories", s.categories)
 	mux.HandleFunc("GET /api/documents/{id}", s.document)
 	mux.HandleFunc("GET /api/documents/{id}/file", s.file)
 	mux.HandleFunc("PATCH /api/documents/{id}", s.patchDocument)
@@ -98,6 +99,7 @@ type documentJSON struct {
 	Status        string   `json:"status"`
 	Kind          string   `json:"kind,omitempty"`
 	SummarySource string   `json:"summary_source,omitempty"`
+	Category      string   `json:"category,omitempty"`
 	Tags          []string `json:"tags"`
 	OCRPages      int      `json:"ocr_pages"`
 	NPages        int      `json:"n_pages"`
@@ -107,13 +109,14 @@ type documentJSON struct {
 }
 
 const docColumns = "id, path, title, authors, year, summary, status, " +
-	"kind, summary_source, error, ocr_pages, n_pages, added_at, processed_at"
+	"kind, summary_source, category, error, ocr_pages, n_pages, added_at, processed_at"
 
 type scanDoc struct {
 	id                            int64
 	path, status, addedAt         string
 	title, authors, year, summary sql.NullString
-	kind, summarySource, err      sql.NullString
+	kind, summarySource, category sql.NullString
+	err                           sql.NullString
 	processedAt                   sql.NullString
 	ocrPages, nPages              sql.NullInt64
 }
@@ -121,8 +124,8 @@ type scanDoc struct {
 func scanDocRow(sc interface{ Scan(...any) error }) (scanDoc, error) {
 	var d scanDoc
 	err := sc.Scan(&d.id, &d.path, &d.title, &d.authors, &d.year, &d.summary,
-		&d.status, &d.kind, &d.summarySource, &d.err, &d.ocrPages, &d.nPages,
-		&d.addedAt, &d.processedAt)
+		&d.status, &d.kind, &d.summarySource, &d.category, &d.err, &d.ocrPages,
+		&d.nPages, &d.addedAt, &d.processedAt)
 	return d, err
 }
 
@@ -132,6 +135,7 @@ func (d scanDoc) toJSON() documentJSON {
 		Title: d.title.String, Authors: d.authors.String,
 		Year: d.year.String, Summary: d.summary.String, Status: d.status,
 		Kind: d.kind.String, SummarySource: d.summarySource.String,
+		Category: d.category.String,
 		OCRPages: int(d.ocrPages.Int64), NPages: int(d.nPages.Int64),
 		Error: d.err.String, AddedAt: d.addedAt,
 		ProcessedAt: d.processedAt.String, Tags: []string{},
@@ -198,6 +202,51 @@ var version = "dev"
 // SetVersion lets cmd/vellum inject the build version.
 func SetVersion(v string) { version = v }
 
+// filters from query params: kind, category, repeated tag
+type docFilter struct {
+	kind, category string
+	tags           []string
+}
+
+func parseFilter(r *http.Request) docFilter {
+	q := r.URL.Query()
+	return docFilter{
+		kind:     q.Get("kind"),
+		category: q.Get("category"),
+		tags:     q["tag"],
+	}
+}
+
+// empty reports whether any filter is set.
+func (f docFilter) empty() bool {
+	return f.kind == "" && f.category == "" && len(f.tags) == 0
+}
+
+// match checks a document against the filter (kind/category compare
+// case-insensitively; a document matches the tag filter only if it has ALL
+// the requested tags).
+func (f docFilter) match(d documentJSON) bool {
+	if f.kind != "" && !strings.EqualFold(d.Kind, f.kind) {
+		return false
+	}
+	if f.category != "" && !strings.EqualFold(d.Category, f.category) {
+		return false
+	}
+	for _, want := range f.tags {
+		have := false
+		for _, t := range d.Tags {
+			if strings.EqualFold(t, want) {
+				have = true
+				break
+			}
+		}
+		if !have {
+			return false
+		}
+	}
+	return true
+}
+
 func (s *Server) documents(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.conn.Query("SELECT " + docColumns + " FROM documents ORDER BY id")
 	if err != nil {
@@ -207,6 +256,7 @@ func (s *Server) documents(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 
 	tags := s.tagsByDoc(-1) // all documents
+	filter := parseFilter(r)
 	docs := []documentJSON{}
 	for rows.Next() {
 		d, err := scanDocRow(rows)
@@ -219,9 +269,57 @@ func (s *Server) documents(w http.ResponseWriter, r *http.Request) {
 		if doc.Tags == nil {
 			doc.Tags = []string{}
 		}
+		if !filter.empty() && !filter.match(doc) {
+			continue
+		}
 		docs = append(docs, doc)
 	}
 	writeJSON(w, 200, docs)
+}
+
+// allDocuments returns every document with tags attached (personal-library
+// scale: a few thousand rows is nothing).
+func (s *Server) allDocuments() ([]documentJSON, error) {
+	rows, err := s.conn.Query("SELECT " + docColumns + " FROM documents ORDER BY id")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	tags := s.tagsByDoc(-1)
+	var docs []documentJSON
+	for rows.Next() {
+		d, err := scanDocRow(rows)
+		if err != nil {
+			return nil, err
+		}
+		doc := d.toJSON()
+		doc.Tags = tags[doc.ID]
+		if doc.Tags == nil {
+			doc.Tags = []string{}
+		}
+		docs = append(docs, doc)
+	}
+	return docs, rows.Err()
+}
+
+// categories lists the distinct user categories with document counts.
+func (s *Server) categories(w http.ResponseWriter, r *http.Request) {
+	rows, err := s.conn.Query(`
+SELECT category, COUNT(*) FROM documents
+WHERE category != '' GROUP BY category ORDER BY category`)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	defer rows.Close()
+	out := []map[string]any{}
+	for rows.Next() {
+		var cat string
+		var n int
+		rows.Scan(&cat, &n)
+		out = append(out, map[string]any{"category": cat, "documents": n})
+	}
+	writeJSON(w, 200, out)
 }
 
 func (s *Server) document(w http.ResponseWriter, r *http.Request) {
@@ -284,7 +382,7 @@ func (s *Server) patchDocument(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		Title, Authors, Year, Summary, Kind *string
+		Title, Authors, Year, Summary, Kind, Category *string
 	}
 	if err := decodeBody(r, &body); err != nil {
 		writeErr(w, 400, "bad JSON body: "+err.Error())
@@ -292,8 +390,8 @@ func (s *Server) patchDocument(w http.ResponseWriter, r *http.Request) {
 	}
 	set := map[string]string{}
 	for col, p := range map[string]*string{
-		"title": body.Title, "authors": body.Authors,
-		"year": body.Year, "summary": body.Summary, "kind": body.Kind} {
+		"title": body.Title, "authors": body.Authors, "year": body.Year,
+		"summary": body.Summary, "kind": body.Kind, "category": body.Category} {
 		if p != nil {
 			set[col] = *p
 		}
@@ -474,11 +572,36 @@ func (s *Server) search(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	filter := parseFilter(r)
+	var allowed map[int64]bool
+	if !filter.empty() {
+		docs, err := s.allDocuments()
+		if err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+		allowed = map[int64]bool{}
+		for _, d := range docs {
+			if filter.match(d) {
+				allowed[d.ID] = true
+			}
+		}
+	}
+
 	if mode == "semantic" {
 		hits, err := search.Semantic(s.cfg, s.conn, q, limit)
 		if err != nil {
 			writeErr(w, 500, err.Error())
 			return
+		}
+		if allowed != nil {
+			kept := hits[:0]
+			for _, h := range hits {
+				if allowed[h.DocID] {
+					kept = append(kept, h)
+				}
+			}
+			hits = kept
 		}
 		out := []map[string]any{}
 		for _, h := range hits {
@@ -499,6 +622,15 @@ func (s *Server) search(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeErr(w, 500, err.Error())
 		return
+	}
+	if allowed != nil {
+		kept := hits[:0]
+		for _, h := range hits {
+			if allowed[h.DocID] {
+				kept = append(kept, h)
+			}
+		}
+		hits = kept
 	}
 	out := []map[string]any{}
 	for _, h := range hits {

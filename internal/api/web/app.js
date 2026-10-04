@@ -32,6 +32,45 @@ const isPdf = (path) => /\.pdf$/i.test(path);
 let allDocs = [];
 let vocabNames = [];
 
+const filterParams = () => {
+  const p = new URLSearchParams();
+  if ($("#f-kind").value) p.set("kind", $("#f-kind").value);
+  if ($("#f-category").value) p.set("category", $("#f-category").value);
+  for (const t of $("#f-tags").value.split(",").map((s) => s.trim().toLowerCase()).filter(Boolean))
+    p.append("tag", t);
+  return p;
+};
+
+const hasFilters = () => {
+  const p = filterParams();
+  return p.toString() !== "";
+};
+
+async function loadDocs() {
+  const p = filterParams();
+  allDocs = await api("/api/documents" + (p.toString() ? "?" + p : ""));
+  renderList(allDocs);
+}
+
+async function loadCategories() {
+  const cats = await api("/api/categories");
+  const sel = $("#f-category");
+  const cur = sel.value;
+  sel.replaceChildren(el("option", { value: "" }, "any category"));
+  for (const c of cats)
+    sel.append(el("option", { value: c.category },
+      `${c.category} (${c.documents})`));
+  sel.value = cur;
+  const dl = $("#category-list");
+  if (dl) { dl.replaceChildren(); for (const c of cats) dl.append(el("option", { value: c.category })); }
+}
+
+for (const id of ["#f-kind", "#f-category"])
+  $(id).addEventListener("change", () => { if (!$("#q").value.trim()) loadDocs(); });
+$("#f-tags").addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !$("#q").value.trim()) loadDocs();
+});
+
 async function refresh() {
   const status = await api("/api/status");
   $("#pending-n").textContent = status.pending ? `(${status.pending})` : "";
@@ -69,8 +108,9 @@ function docCard(d) {
   if (d.summary) row.append(el("div", { class: "summary" }, esc(d.summary)));
   const chips = el("div", { class: "chips" });
   if (d.kind) chips.append(el("span", { class: "chip status" }, esc(d.kind)));
-  if (d.summary_source === "extracted")
-    chips.append(el("span", { class: "chip" }, "abstract"));
+  if (d.category) chips.append(el("span", { class: "chip sug" }, esc(d.category)));
+  if (d.summary_source)
+    chips.append(el("span", { class: "chip" }, esc(d.summary_source)));
   for (const t of d.tags) chips.append(el("span", { class: "chip" }, esc(t)));
   row.append(chips);
   // per-document process: don't wait for the whole batch
@@ -190,8 +230,9 @@ function detailContent(tab) {
   const body = el("div", {},
     el("h2", {}, esc(d.title || d.path.split("/").pop())),
     el("div", { class: "hint" }, esc(d.path)),
-    d.summary_source === "extracted" ? el("div", { class: "hint" },
-      "summary: extracted abstract (the authors' own words — not model-generated)") : null);
+    d.summary_source ? el("div", { class: "hint" },
+      "summary: extracted from the document (" + esc(d.summary_source) +
+      " — the author's own words, not model-generated)") : null);
   if (d.status !== "done")
     body.append(el("div", { class: "hint" },
       `status: ${esc(d.status)} ${d.error ? "— " + esc(d.error) : ""}`));
@@ -208,6 +249,9 @@ function detailContent(tab) {
   body.append(el("label", {}, "kind (paper/book/gallery/course/reference/custom; drives the processing path)"));
   const inKind = el("input", { value: d.kind || "", placeholder: "not detected" });
   body.append(inKind);
+  body.append(el("label", {}, "category (your own shelving, e.g. ai-papers)"));
+  const inCategory = el("input", { value: d.category || "", placeholder: "uncategorized", list: "category-list" });
+  body.append(inCategory);
   body.append(el("label", {}, "summary"));
   const inSummary = el("textarea", {}, d.summary || "");
   body.append(inSummary);
@@ -220,11 +264,13 @@ function detailContent(tab) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           title: inTitle.value, authors: inAuthors.value,
-          year: inYear.value, summary: inSummary.value, kind: inKind.value,
+          year: inYear.value, summary: inSummary.value,
+          kind: inKind.value, category: inCategory.value,
         }),
       });
       notice("Saved.");
       await loadDocs();
+      await loadCategories();
     },
   }, "Save metadata"));
   saveRow.append(el("button", { class: "plain", onclick: () => processIds([id]) },
@@ -283,7 +329,9 @@ async function doSearch() {
   if (!q) { loadDocs(); return; }
   notice("");
   try {
-    const hits = await api(`/api/search?q=${encodeURIComponent(q)}&mode=${mode}&limit=25`);
+    const fp = filterParams();
+    const hits = await api(`/api/search?q=${encodeURIComponent(q)}&mode=${mode}&limit=25`
+      + (fp.toString() ? "&" + fp : ""));
     if (mode === "semantic") {
       const list = $("#list");
       list.replaceChildren();
@@ -426,6 +474,7 @@ $("#vocab-add").onclick = async () => {
     const st = await api("/api/status");
     if (!st.llm_up) notice("Model server is not running — search still works, but summarize/tag/semantic need the llama-servers (start via vellum.sh).");
     await loadDocs();
+    await loadCategories();
   } catch (e) {
     notice("API error: " + e.message);
   }

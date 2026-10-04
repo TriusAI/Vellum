@@ -291,6 +291,31 @@ func TestE2E(t *testing.T) {
 		t.Fatalf("metadata title not extracted, got %q", title)
 	}
 
+	// ---- book fixture: front matter (preface) + TOC + chapters
+	bookText := `Contents
+The Rain 3
+The Field 17
+Appendix A 231
+
+Preface
+This book grew out of ten years of walking the same muddy lane at dusk
+and writing down what the weather did to it. I wrote it for the people
+who stopped to ask what I was looking at, and for the ones who did not
+stop but wondered anyway. The chapters move from weather to soil to the
+small politics of hedgerows, and the preface is long enough to pass the
+minimum-length check for real front matter, since genuine book prefaces
+run several pages while stray single-line headings should be rejected.
+
+All rights reserved. Published by Lane Press.
+
+Chapter One
+The rain began before the road did, and the field kept its own counsel.
+`
+	bookPath := filepath.Join(lib, "a_book.md")
+	if err := os.WriteFile(bookPath, []byte(bookText), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
 	// ---- LLM part (skipped without servers or launch paths)
 	llmURL, embedURL := startLLaMAServers(t)
 	if llmURL == "" {
@@ -322,11 +347,26 @@ func TestE2E(t *testing.T) {
 		Scan(&paperSummary, &sumSource); err != nil {
 		t.Fatal(err)
 	}
-	if sumSource != "extracted" {
+	if sumSource != "abstract" {
 		t.Fatalf("paper did not take the abstract fast path (summary_source=%q)", sumSource)
 	}
 	if !strings.Contains(paperSummary, "sensorimotor") {
 		t.Fatalf("summary is not the abstract: %q", paperSummary[:200])
+	}
+
+	// ingest the book, verify kind detection
+	stBook, err := ingest.Ingest(cfg, conn, []string{bookPath}, false)
+	if err != nil || stBook.Added != 1 {
+		t.Fatalf("book not ingested: %+v (%v)", stBook, err)
+	}
+	var bookKind string
+	if err := conn.QueryRow(
+		"SELECT kind FROM documents WHERE path LIKE '%a_book%'").
+		Scan(&bookKind); err != nil {
+		t.Fatal(err)
+	}
+	if bookKind != "book" {
+		t.Fatalf("book fixture not classified as book, got %q", bookKind)
 	}
 
 	// ---- long-document regression: a ~35k-char doc must not blow the
@@ -348,6 +388,21 @@ func TestE2E(t *testing.T) {
 		if strings.Contains(r.Path, "long_document") && r.Status != "done" {
 			t.Fatalf("long document processing failed: %s", r.Error)
 		}
+	}
+
+	// ---- book fast path (the book was processed in this pass): the
+	// summary must be the EXTRACTED front matter, not a map-reduce
+	var bookSource, bookSummary string
+	if err := conn.QueryRow(
+		"SELECT summary, summary_source FROM documents WHERE path LIKE '%a_book%'").
+		Scan(&bookSummary, &bookSource); err != nil {
+		t.Fatal(err)
+	}
+	if bookSource != "front-matter" {
+		t.Fatalf("book did not take the front-matter fast path (summary_source=%q)", bookSource)
+	}
+	if !strings.Contains(bookSummary, "muddy lane") {
+		t.Fatalf("summary is not the preface: %q", bookSummary[:200])
 	}
 	var longSummary string
 	if err := conn.QueryRow(
