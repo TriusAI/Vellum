@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Vellum</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <h1>vellum</h1>
+  <div class="searchbar">
+    <input id="q" type="search" placeholder='search the library… ("what argues against tabula rasa")' autofocus>
+    <label class="mode"><input type="checkbox" id="semantic"> semantic</label>
+    <button id="btn-search">Search</button>
+  </div>
+  <div class="actions">
+    <button id="btn-ingest">Ingest…</button>
+    <button id="btn-process">Process pending <span id="pending-n"></span></button>
+    <button id="btn-vocab">Vocabulary</button>
+  </div>
+</header>
+
+<div id="notice"></div>
+
+<main>
+  <section id="list"></section>
+  <aside id="detail" class="hidden">
+    <button id="detail-close" class="plain">✕ close</button>
+    <div id="detail-body"></div>
+  </aside>
+</main>
+
+<dialog id="dlg-ingest">
+  <h2>Ingest files or directories</h2>
+  <p class="hint">One path per line. Absolute paths recommended (files are indexed in place).</p>
+  <textarea id="ingest-paths" rows="6" placeholder="/home/me/books
+/home/me/papers/that-scan.pdf"></textarea>
+  <div class="row">
+    <label><input type="checkbox" id="ingest-reprocess"> re-extract unchanged files</label>
+  </div>
+  <div class="row right">
+    <button class="plain" id="ingest-cancel">Cancel</button>
+    <button id="ingest-go">Ingest</button>
+  </div>
+  <pre id="ingest-result" class="result hidden"></pre>
+</dialog>
+
+<dialog id="dlg-vocab">
+  <h2>Controlled vocabulary</h2>
+  <div id="vocab-suggestions"></div>
+  <div id="vocab-list"></div>
+  <div class="row">
+    <input id="vocab-name" placeholder="tag-name">
+    <input id="vocab-desc" placeholder="description shown to the LLM">
+    <button id="vocab-add">Add / promote</button>
+  </div>
+  <div class="row right"><button class="plain" id="vocab-close">Close</button></div>
+</dialog>
+
+<script src="app.js"></script>
+</body>
+</html>

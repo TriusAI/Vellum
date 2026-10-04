@@ -80,7 +80,28 @@ vellum vocab list
 vellum vocab review                          # what the LLM suggested beyond the vocabulary
 vellum vocab promote marine-biology "Study of ocean life"   # adopt a suggestion
 vellum vocab add my-new-tag "what it covers"
+
+# 5. browse: local web UI (search, read summaries/chunks, edit metadata,
+#    curate tags, trigger ingest/process — all in the browser)
+vellum serve --open
 ```
+
+Add `--json` to any command for machine-readable output; `vellum agent`
+prints the full AI-agent instruction sheet (commands, JSON schemas, the
+`/api/` JSON surface, workflows, gotchas).
+
+## AI agents
+
+Vellum is agent-friendly out of the box, in the spirit of lark-cli:
+
+- `vellum agent` — the authoritative instruction sheet, shipped inside
+  the binary so it can never go stale relative to the installed version.
+- `--json` on every command (works anywhere in the argument list).
+- a local JSON API with the same operations as the CLI when
+  `vellum serve` is running (`/api/...`, documented by `vellum agent`).
+- an installable skill at `skills/vellum/` — copy it into your agent's
+  skills directory (e.g. `~/.claude/skills/` or `~/.codex/skills/`),
+  and the agent will know when and how to drive Vellum.
 
 ## Download pack (one folder, everything included)
 
@@ -171,9 +192,12 @@ Vellum/
 │   ├── summarize/       # map-reduce summaries + constrained tagging
 │   ├── vocab/           # vocabulary load/save
 │   ├── search/          # FTS5 + cosine semantic search
+│   ├── api/             # JSON API + embedded web UI (vellum serve)
 │   └── db/              # SQLite schema + FTS5 triggers
-├── tests/               # e2e test + a minimal test-only PDF writer
+├── tests/               # e2e + API tests, self-generated fixtures
 ├── testdata/            # scan stand-in image for the OCR path
+├── skills/vellum/       # installable AI-agent skill (see `vellum agent`)
+├── templates/           # qwen3 no-think chat template (shipped in the pack)
 ├── pack/                # portable pack + Docker image build scripts
 ├── tessdata/            # tesseract .traineddata (project-local)
 ├── config.yaml          # dev config

@@ -16,11 +16,11 @@ import (
 
 // KeywordHit is one FTS5 match.
 type KeywordHit struct {
-	DocID   int64
-	Title   string
-	Path    string
-	Page    int
-	Snippet string
+	DocID   int64  `json:"doc_id"`
+	Title   string `json:"title"`
+	Path    string `json:"path"`
+	Page    int    `json:"page"`
+	Snippet string `json:"snippet"`
 }
 
 // Keyword runs an FTS5 query. Queries that aren't valid FTS5 syntax
@@ -61,17 +61,17 @@ LIMIT ?`
 
 // SemanticHit is one document-grouped semantic result.
 type SemanticHit struct {
-	DocID    int64
-	Title    string
-	Path     string
-	Snippets []SemSnippet
+	DocID    int64        `json:"doc_id"`
+	Title    string       `json:"title"`
+	Path     string       `json:"path"`
+	Snippets []SemSnippet `json:"snippets"`
 }
 
 // SemSnippet is one matching chunk.
 type SemSnippet struct {
-	Page  int
-	Text  string
-	Score float64
+	Page  int     `json:"page"`
+	Text  string  `json:"text"`
+	Score float64 `json:"score"`
 }
 
 // Semantic embeds the query and ranks chunks by cosine similarity, grouping

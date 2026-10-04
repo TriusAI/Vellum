@@ -1,5 +1,7 @@
 // Package ingest indexes files (text extraction + OCR fallback) and runs the
-// LLM processing pass (summarize + constrained tagging).
+// LLM processing pass (summarize + constrained tagging). Results are
+// structured (per-file, per-document) so the CLI and the web API can both
+// report them — to humans and to agents.
 package ingest
 
 import (
@@ -26,22 +28,57 @@ import (
 // followed by a second one ("1998", "2010-2012").
 var yearRE = regexp.MustCompile(`^\d{4}(-\d{4})?$`)
 
+// FileResult is the outcome for one ingested file.
+type FileResult struct {
+	Path   string `json:"path"`
+	Action string `json:"action"` // added | updated | skipped | failed
+	Error  string `json:"error,omitempty"`
+}
+
 // Stats summarizes an ingest run.
 type Stats struct {
 	Added, Updated, Skipped, Failed int
+	Files                           []FileResult `json:"files"`
+}
+
+func (st *Stats) count(action string) {
+	switch action {
+	case "added":
+		st.Added++
+	case "updated":
+		st.Updated++
+	case "skipped":
+		st.Skipped++
+	case "failed":
+		st.Failed++
+	}
+}
+
+// ProcessResult is the outcome for one processed document.
+type ProcessResult struct {
+	DocID     int64    `json:"id"`
+	Path      string   `json:"path"`
+	Status    string   `json:"status"` // done | error
+	Tags      []string `json:"tags,omitempty"`
+	TagsOther []string `json:"tags_other,omitempty"`
+	Error     string   `json:"error,omitempty"`
 }
 
 // Ingest walks the paths and indexes every supported file, with sha256-based
 // change detection.
 func Ingest(cfg *config.Config, conn *sql.DB, paths []string, reprocess bool) (*Stats, error) {
-	st := &Stats{}
+	st := &Stats{Files: []FileResult{}}
 
-	files := collectFiles(paths)
-	for _, path := range files {
-		if err := ingestOne(cfg, conn, path, reprocess, st); err != nil {
+	for _, path := range collectFiles(paths) {
+		action, err := ingestOne(cfg, conn, path, reprocess)
+		if err != nil {
 			log.Printf("failed to ingest %s: %s", path, err)
-			st.Failed++
+			action = "failed"
+			st.Files = append(st.Files, FileResult{Path: path, Action: action, Error: err.Error()})
+		} else {
+			st.Files = append(st.Files, FileResult{Path: path, Action: action})
 		}
+		st.count(action)
 	}
 	return st, nil
 }
@@ -82,14 +119,14 @@ func sha256file(path string) (string, error) {
 	return fmt.Sprintf("%x", h.Sum(nil)), nil
 }
 
-func ingestOne(cfg *config.Config, conn *sql.DB, path string, reprocess bool, st *Stats) error {
+func ingestOne(cfg *config.Config, conn *sql.DB, path string, reprocess bool) (string, error) {
 	abs, err := filepath.Abs(path)
 	if err != nil {
-		return err
+		return "failed", err
 	}
 	digest, err := sha256file(abs)
 	if err != nil {
-		return err
+		return "failed", err
 	}
 
 	var docID int64
@@ -98,14 +135,13 @@ func ingestOne(cfg *config.Config, conn *sql.DB, path string, reprocess bool, st
 		Scan(&docID, &oldDigest)
 	known := err == nil
 	if known && oldDigest == digest && !reprocess {
-		st.Skipped++
-		return nil
+		return "skipped", nil
 	}
 
 	t0 := time.Now()
 	res, err := extract.Extract(abs, cfg)
 	if err != nil {
-		return err
+		return "failed", err
 	}
 	hasText := false
 	for _, c := range res.Chunks {
@@ -115,58 +151,47 @@ func ingestOne(cfg *config.Config, conn *sql.DB, path string, reprocess bool, st
 		}
 	}
 	if !hasText {
-		return fmt.Errorf("no text extracted")
+		return "failed", fmt.Errorf("no text extracted")
 	}
 
+	action := "updated"
 	if known {
 		if _, err := conn.Exec(
 			"UPDATE documents SET sha256=?, status='ingested', error=NULL, processed_at=NULL WHERE id=?",
 			digest, docID); err != nil {
-			return err
+			return "failed", err
 		}
-		st.Updated++
 	} else {
 		result, err := conn.Exec(
 			"INSERT INTO documents(path, sha256, title, authors, year, ocr_pages, status) VALUES(?,?,?,?,?,?,'ingested')",
 			abs, digest, res.Title, res.Authors, "", res.OCRPages)
 		if err != nil {
-			return err
+			return "failed", err
 		}
 		docID, err = result.LastInsertId()
 		if err != nil {
-			return err
+			return "failed", err
 		}
-		st.Added++
+		action = "added"
 	}
 
 	if err := db.ReplaceDocumentText(conn, docID, res.Chunks); err != nil {
-		return err
+		return "failed", err
 	}
 	log.Printf("%s: %d chunks (%d OCR pages) in %.1fs",
 		filepath.Base(abs), len(res.Chunks), res.OCRPages, time.Since(t0).Seconds())
-	return nil
-}
-
-// cleanMetaValue drops junk placeholder values ("unknown", LLM hedging like
-// "not specified") — they are worse than nothing.
-func cleanMetaValue(s string) string {
-	switch strings.ToLower(strings.TrimSpace(s)) {
-	case "", "unknown", "untitled", "unspecified", "anonymous", "none",
-		"n/a", "na", "null", "not specified", "not available":
-		return ""
-	}
-	return strings.TrimSpace(s)
+	return action, nil
 }
 
 // ProcessPending summarizes and tags all documents with status 'ingested'.
-func ProcessPending(cfg *config.Config, conn *sql.DB, v *vocab.Vocabulary, limit int) (int, error) {
+func ProcessPending(cfg *config.Config, conn *sql.DB, v *vocab.Vocabulary, limit int) ([]ProcessResult, error) {
 	q := "SELECT id, path, title, authors, year FROM documents WHERE status='ingested' ORDER BY id"
 	if limit > 0 {
 		q += fmt.Sprintf(" LIMIT %d", limit)
 	}
 	rows, err := conn.Query(q)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 	type docRow struct {
 		id                         int64
@@ -177,43 +202,47 @@ func ProcessPending(cfg *config.Config, conn *sql.DB, v *vocab.Vocabulary, limit
 		var d docRow
 		if err := rows.Scan(&d.id, &d.path, &d.title, &d.authors, &d.year); err != nil {
 			rows.Close()
-			return 0, err
+			return nil, err
 		}
 		docs = append(docs, d)
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
-		return 0, err
+		return nil, err
 	}
 
-	done := 0
+	results := []ProcessResult{}
 	for _, d := range docs {
 		log.Printf("processing %s", d.path)
-		err := processOne(cfg, conn, v, d.id, d.title, d.authors, d.year)
+		res, err := processOne(cfg, conn, v, d.id, d.title, d.authors, d.year)
 		if err != nil {
 			log.Printf("processing failed for %s: %s", d.path, err)
 			conn.Exec("UPDATE documents SET status='error', error=? WHERE id=?",
 				err.Error(), d.id)
+			results = append(results, ProcessResult{
+				DocID: d.id, Path: d.path, Status: "error", Error: err.Error()})
 			continue
 		}
-		done++
+		results = append(results, ProcessResult{
+			DocID: d.id, Path: d.path, Status: "done",
+			Tags: res.Tags, TagsOther: res.TagsOther})
 	}
-	return done, nil
+	return results, nil
 }
 
 func processOne(cfg *config.Config, conn *sql.DB, v *vocab.Vocabulary,
-	docID int64, title, authors, year string) error {
+	docID int64, title, authors, year string) (*summarize.TagResult, error) {
 	text, err := db.DocumentText(conn, docID)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	summary, err := summarize.Summarize(cfg, text)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	tags, err := summarize.TagDocument(cfg, v, text)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	newTitle := title
@@ -238,7 +267,7 @@ func processOne(cfg *config.Config, conn *sql.DB, v *vocab.Vocabulary,
 	if _, err := conn.Exec(
 		"UPDATE documents SET summary=?, title=?, authors=?, year=?, status='done', processed_at=datetime('now') WHERE id=?",
 		summary, newTitle, newAuthors, newYear, docID); err != nil {
-		return err
+		return nil, err
 	}
 	pairs := make([][2]string, 0, len(tags.Tags)+len(tags.TagsOther))
 	for _, t := range tags.Tags {
@@ -248,7 +277,7 @@ func processOne(cfg *config.Config, conn *sql.DB, v *vocab.Vocabulary,
 		pairs = append(pairs, [2]string{t, "suggested"})
 	}
 	if err := db.SetTags(conn, docID, pairs); err != nil {
-		return err
+		return nil, err
 	}
 	log.Printf("done: tags: %s%s", strings.Join(tags.Tags, ", "),
 		func() string {
@@ -257,5 +286,16 @@ func processOne(cfg *config.Config, conn *sql.DB, v *vocab.Vocabulary,
 			}
 			return ""
 		}())
-	return nil
+	return tags, nil
+}
+
+// cleanMetaValue drops junk placeholder values ("unknown", LLM hedging like
+// "not specified") — they are worse than nothing.
+func cleanMetaValue(s string) string {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "", "unknown", "untitled", "unspecified", "anonymous", "none",
+		"n/a", "na", "null", "not specified", "not available":
+		return ""
+	}
+	return strings.TrimSpace(s)
 }

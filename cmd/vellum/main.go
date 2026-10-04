@@ -5,6 +5,7 @@ package main
 
 import (
 	"database/sql"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
@@ -23,7 +24,7 @@ import (
 const usage = `vellum — small local-model library manager
 
 Usage:
-  vellum [--config FILE] [-v] <command> [args]
+  vellum [--config FILE] [-v] [--json] <command> [args]
 
 Commands:
   ingest PATH...        index files/directories (text extraction + OCR fallback)
@@ -34,23 +35,30 @@ Commands:
   vocab list|add|remove|review|promote
                         manage the controlled tag vocabulary
   embed                 embed chunks lacking embeddings
+  serve [--listen ADDR] [--open]
+                        local web UI + JSON API (default 127.0.0.1:8090)
+  agent                 print AI-agent instructions (commands, JSON, API)
 
+--json switches command output to machine-readable JSON (anywhere in args).
 Config: $VELLUM_CONFIG or ./config.yaml (see README). Storage: one SQLite
-file (FTS5). Models served locally by Ollama.
+file (FTS5). Models served locally by llama.cpp llama-server.
 `
+
+// versionString is reported by --version, /api/status and `vellum agent`.
+const versionString = "0.2.0"
 
 // documentColumns is the explicit projection used everywhere (never SELECT *,
 // so the scan order is fixed even if the schema gains columns).
 const documentColumns = "id, path, title, authors, year, summary, status"
 
 type document struct {
-	ID      int64
-	Path    string
-	Title   string
-	Authors string
-	Year    string
-	Summary string
-	Status  string
+	ID      int64  `json:"id"`
+	Path    string `json:"path"`
+	Title   string `json:"title"`
+	Authors string `json:"authors"`
+	Year    string `json:"year"`
+	Summary string `json:"summary"`
+	Status  string `json:"status"`
 }
 
 func (d *document) scan(sc scannable) error {
@@ -72,9 +80,10 @@ func main() {
 	log.SetFlags(0)
 	log.SetOutput(os.Stderr)
 
-	// split global flags (--config, -v) from the rest, wherever they appear
-	var cfgPath string
+	// extract global flags (--config, -v, --json) wherever they appear
+	cfgPath := ""
 	verbose := false
+	jsonOut = false
 	var args []string
 	rest := os.Args[1:]
 	for i := 0; i < len(rest); i++ {
@@ -88,6 +97,8 @@ func main() {
 			cfgPath = strings.TrimPrefix(rest[i], "--config=")
 		case rest[i] == "-v" || rest[i] == "--verbose":
 			verbose = true
+		case rest[i] == "--json" || rest[i] == "-json":
+			jsonOut = true
 		default:
 			args = append(args, rest[i])
 		}
@@ -119,12 +130,30 @@ func main() {
 		cmdVocab(cfg, args[1:])
 	case "embed":
 		cmdEmbed(cfg, args[1:])
+	case "serve":
+		cmdServe(cfg, args[1:])
+	case "agent", "agents":
+		cmdAgent(cfg, args[1:])
 	case "-h", "-help", "--help", "help":
 		fmt.Print(usage)
+	case "-V", "--version":
+		fmt.Printf("vellum %s (AGPL-3.0)\n", versionString)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: %s\n\n", args[0])
 		fmt.Fprint(os.Stderr, usage)
 		os.Exit(2)
+	}
+}
+
+// jsonOut is set by the --json global flag: commands print machine-readable
+// JSON instead of their human formatting.
+var jsonOut bool
+
+func printJSON(v any) {
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(v); err != nil {
+		log.Fatalf("json: %s", err)
 	}
 }
 
@@ -139,6 +168,10 @@ func cmdIngest(cfg *config.Config, args []string) {
 	st, err := ingest.Ingest(cfg, conn, fs.Args(), *reprocess)
 	if err != nil {
 		log.Fatalf("ingest: %s", err)
+	}
+	if jsonOut {
+		printJSON(st)
+		return
 	}
 	fmt.Printf("added=%d updated=%d skipped=%d failed=%d\n",
 		st.Added, st.Updated, st.Skipped, st.Failed)
@@ -161,11 +194,21 @@ func cmdProcess(cfg *config.Config, args []string) {
 			cfg.Tools.LLMURL, cfg.Models.LLM, portOf(cfg.Tools.LLMURL))
 	}
 	conn := mustOpen(cfg)
-	n, err := ingest.ProcessPending(cfg, conn, v, *limit)
+	results, err := ingest.ProcessPending(cfg, conn, v, *limit)
 	if err != nil {
 		log.Fatalf("process: %s", err)
 	}
-	fmt.Printf("processed %d document(s)\n", n)
+	if jsonOut {
+		printJSON(results)
+		return
+	}
+	done := 0
+	for _, r := range results {
+		if r.Status == "done" {
+			done++
+		}
+	}
+	fmt.Printf("processed %d document(s)\n", done)
 }
 
 func cmdSearch(cfg *config.Config, args []string) {
@@ -208,6 +251,10 @@ func cmdSearch(cfg *config.Config, args []string) {
 		if err != nil {
 			log.Fatalf("search: %s", err)
 		}
+		if jsonOut {
+			printJSON(hits)
+			return
+		}
 		if len(hits) == 0 {
 			fmt.Println("no matches")
 			return
@@ -225,6 +272,10 @@ func cmdSearch(cfg *config.Config, args []string) {
 	hits, err := search.Keyword(conn, query, limit)
 	if err != nil {
 		log.Fatalf("search: %s", err)
+	}
+	if jsonOut {
+		printJSON(hits)
+		return
 	}
 	if len(hits) == 0 {
 		fmt.Println("no matches")
@@ -252,11 +303,29 @@ func cmdShow(cfg *config.Config, args []string) {
 			log.Fatalf("show: %s", err)
 		}
 		defer rows.Close()
+		type docWithTags struct {
+			document
+			Tags []string `json:"tags"`
+		}
+		var all []docWithTags
 		for rows.Next() {
 			var d document
 			if err := d.scan(rows); err != nil {
 				log.Fatalf("show: %s", err)
 			}
+			all = append(all, docWithTags{document: d,
+				Tags: strings.Split(docTags(conn, d.ID), ", ")})
+		}
+		for i := range all {
+			if len(all[i].Tags) == 1 && all[i].Tags[0] == "" {
+				all[i].Tags = nil
+			}
+		}
+		if jsonOut {
+			printJSON(all)
+			return
+		}
+		for _, d := range all {
 			head := fmt.Sprintf("#%d %s", d.ID, or(d.Title, d.Path))
 			if d.Status != "done" {
 				head += fmt.Sprintf("  [%s]", d.Status)
@@ -265,8 +334,8 @@ func cmdShow(cfg *config.Config, args []string) {
 			if d.Authors != "" || d.Year != "" {
 				fmt.Println("    " + strings.TrimSpace(d.Authors+" "+d.Year))
 			}
-			if tags := docTags(conn, d.ID); tags != "" {
-				fmt.Println("    tags: " + tags)
+			if d.Tags != nil {
+				fmt.Println("    tags: " + strings.Join(d.Tags, ", "))
 			}
 			if d.Summary != "" {
 				fmt.Println(wrap(d.Summary, "    ", 80))
@@ -288,6 +357,18 @@ func cmdShow(cfg *config.Config, args []string) {
 	}
 	if err != nil {
 		log.Fatalf("show: %s", err)
+	}
+	tags := strings.Split(docTags(conn, id), ", ")
+	if len(tags) == 1 && tags[0] == "" {
+		tags = nil
+	}
+	if jsonOut {
+		type docWithTags struct {
+			document
+			Tags []string `json:"tags"`
+		}
+		printJSON(docWithTags{document: d, Tags: tags})
+		return
 	}
 	printKV := func(k, v string) {
 		if v != "" {
@@ -316,6 +397,18 @@ func cmdVocab(cfg *config.Config, args []string) {
 
 	switch action {
 	case "list":
+		if jsonOut {
+			type item struct {
+				Name        string `json:"name"`
+				Description string `json:"description"`
+			}
+			out := []item{}
+			for _, k := range v.SortedKeys() {
+				out = append(out, item{Name: k, Description: v.Tags[k]})
+			}
+			printJSON(out)
+			return
+		}
 		for _, k := range v.SortedKeys() {
 			fmt.Printf("%s: %s\n", k, v.Tags[k])
 		}
@@ -353,15 +446,28 @@ GROUP BY t.tag ORDER BY n DESC, t.tag`)
 			log.Fatalf("vocab review: %s", err)
 		}
 		defer rows.Close()
+		type suggestion struct {
+			Tag     string `json:"tag"`
+			Count   int    `json:"count"`
+			Example string `json:"example"`
+		}
+		var all []suggestion
 		any := false
 		for rows.Next() {
-			var tag, example string
+			var tag, example sql.NullString
 			var n int
 			if err := rows.Scan(&tag, &n, &example); err != nil {
 				log.Fatalf("vocab review: %s", err)
 			}
 			any = true
-			fmt.Printf("  %s  ×%d  (e.g. %s)\n", tag, n, example)
+			all = append(all, suggestion{Tag: tag.String, Count: n, Example: example.String})
+			if !jsonOut {
+				fmt.Printf("  %s  ×%d  (e.g. %s)\n", tag.String, n, example.String)
+			}
+		}
+		if jsonOut {
+			printJSON(all)
+			return
 		}
 		if any {
 			fmt.Println("\npromote the keepers:  " +
