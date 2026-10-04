@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"vellum/internal/config"
 	"vellum/internal/db"
@@ -52,6 +53,104 @@ func requireMutool(t *testing.T) string {
 		t.Skip("mutool not found — set MUTOOL=<path> to run this test")
 	}
 	return mutool
+}
+
+// startLLaMAServers starts llama-server instances for the chat and embedding
+// models (llama.cpp serves one model per process). Uses env vars:
+//
+//	LLAMA_SERVER_BIN  path to the llama-server binary
+//	QWEN_GGUF         chat model GGUF
+//	NOMIC_GGUF        embedding model GGUF
+//
+// Returns the URLs (and they are killed at test cleanup). If llama-servers
+// are already up at the default ports, those are used instead.
+func startLLaMAServers(t *testing.T) (llmURL, embedURL string) {
+	t.Helper()
+
+	// already running? (e.g. the portable pack or docker entrypoint did it)
+	for _, cand := range [][2]string{
+		{"http://127.0.0.1:8081", "http://127.0.0.1:8082"},
+	} {
+		if llm.Available(cand[0]) && llm.Available(cand[1]) {
+			return cand[0], cand[1]
+		}
+	}
+
+	bin := os.Getenv("LLAMA_SERVER_BIN")
+	qwen := os.Getenv("QWEN_GGUF")
+	nomic := os.Getenv("NOMIC_GGUF")
+	if bin == "" || qwen == "" || nomic == "" {
+		t.Log("NOTE: no llama-servers up and LLAMA_SERVER_BIN/QWEN_GGUF/NOMIC_GGUF not set — LLM part skipped")
+		return "", ""
+	}
+
+	repoRoot, _ := os.Getwd()
+	repoRoot = filepath.Dir(repoRoot)
+
+	llmURL = "http://127.0.0.1:18081"
+	embedURL = "http://127.0.0.1:18082"
+	logs, _ := os.MkdirTemp("", "vellum-llama-*")
+
+	// prefill template that disables Qwen3's think pass (the embedded
+	// template in the ollama-provenance GGUF ignores enable_thinking)
+	tmpl := filepath.Join(repoRoot, "templates", "qwen3-nothink.jinja")
+
+	start := func(serverBin, port, model, logName string, extra ...string) *exec.Cmd {
+		f, err := os.Create(filepath.Join(logs, logName))
+		if err != nil {
+			t.Fatal(err)
+		}
+		args := []string{"-m", model, "--host", "127.0.0.1", "--port", port, "-np", "1"}
+		if strings.Contains(logName, "embed") {
+			// embeddings mode; nomic has a 2048-token context: no -c override
+			args = append(args, "--embeddings")
+		} else {
+			args = append(args, "-c", "8192", "--jinja", "--chat-template-file", tmpl)
+		}
+		args = append(args, extra...)
+		cmd := exec.Command(serverBin, args...)
+		// the official prebuilts keep their shared libs next to the binary
+		// (RUNPATH $ORIGIN), and the vulkan build dlopens the loader from
+		// the usual places — running with cwd = bin dir keeps it simple
+		cmd.Dir = filepath.Dir(serverBin)
+		cmd.Stdout = f
+		cmd.Stderr = f
+		if err := cmd.Start(); err != nil {
+			t.Fatal(err)
+		}
+		return cmd
+	}
+
+	llmBin := bin
+	// chat: as configured (GPU-capable build if given); embed: CPU build —
+	// on small GPUs both models on the device exhaust VRAM, and the tiny
+	// embed model is fast on CPU anyway.
+	embedBin := os.Getenv("EMBED_SERVER_BIN")
+	if embedBin == "" {
+		embedBin = strings.Replace(llmBin, "llama-server-vulkan", "llama-server-cpu", 1)
+	}
+
+	llmCmd := start(llmBin, "18081", qwen, "llm.log")
+	embedCmd := start(embedBin, "18082", nomic, "embed.log")
+	t.Cleanup(func() {
+		llmCmd.Process.Kill()
+		embedCmd.Process.Kill()
+		llmCmd.Wait()
+		embedCmd.Wait()
+	})
+
+	waitUp := func(url string, what string) {
+		for i := 0; i < 300; i++ {
+			if llm.Available(url) {
+				return
+			}
+			time.Sleep(1 * time.Second)
+		}
+		t.Fatalf("%s server did not come up (see %s)", what, logs)
+	}
+	waitUp(llmURL, "chat")
+	waitUp(embedURL, "embed")
+	return llmURL, embedURL
 }
 
 func TestE2E(t *testing.T) {
@@ -147,12 +246,13 @@ func TestE2E(t *testing.T) {
 		t.Fatalf("metadata title not extracted, got %q", title)
 	}
 
-	// ---- LLM part (skipped without a live server + model)
-	if !llm.Available(cfg.Tools.OllamaURL) ||
-		!llm.HasModel(cfg.Tools.OllamaURL, cfg.Models.LLM) {
-		t.Log("NOTE: ollama/" + cfg.Models.LLM + " not available — LLM part skipped")
+	// ---- LLM part (skipped without servers or launch paths)
+	llmURL, embedURL := startLLaMAServers(t)
+	if llmURL == "" {
 		return
 	}
+	cfg.Tools.LLMURL = llmURL
+	cfg.Tools.EmbedURL = embedURL
 	v, err := vocab.Load(cfg.VocabPath)
 	if err != nil {
 		t.Fatal(err)

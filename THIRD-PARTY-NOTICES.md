@@ -12,10 +12,17 @@ pack additionally contains these third-party components:
   harfbuzz, jbig2dec, openjpeg, zlib, ...) whose notices are in the
   corresponding source tree under `thirdparty/`.
 
-## Ollama — MIT
-- Copyright Ollama
+## llama.cpp (llama-server) — MIT
+- Copyright the llama.cpp authors
+- Source: https://github.com/ggml-org/llama.cpp
+- Built from the release tag pinned in `pack/build-llamacpp.sh` (no
+  modifications; CPU-only build flags).
+
+## Ollama (model provenance only) — MIT
+- The bundled GGUF files were obtained from the Ollama registry during the
+  pack build (or are downloaded directly from Hugging Face); the Ollama
+- software itself is NOT part of the pack.
 - Source: https://github.com/ollama/ollama
-- Bundled unmodified from the official linux release.
 
 ## Tesseract OCR — Apache-2.0
 - Copyright Google LLC / contributors

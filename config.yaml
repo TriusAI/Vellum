@@ -4,13 +4,13 @@
 library_dir: ~/VellumLibrary
 db: library.db
 
+# informational: which GGUF each llama-server hosts.
 models:
-  llm: qwen3:4b            # summarization + tagging (Ollama, local)
-  embed: nomic-embed-text  # semantic search embeddings (Ollama, local)
+  llm: qwen3-4b.gguf
+  embed: nomic-embed-text-v1.5.gguf
 
 llm:
   think: false             # qwen3 thinking mode: better, much slower on CPU
-  num_ctx: 8192
   temperature: 0.3
 
 ocr:
@@ -29,4 +29,6 @@ tools:
   # mutool: /path/to/mutool
   # tesseract: /path/to/tesseract
   # tessdata: /path/to/tessdata
-  ollama_url: http://localhost:11434
+  # llama.cpp serves one model per process: two small servers, chat + embed.
+  llm_url: http://127.0.0.1:8081
+  embed_url: http://127.0.0.1:8082

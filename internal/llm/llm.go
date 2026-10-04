@@ -1,9 +1,13 @@
-// Package llm is a minimal client for the local Ollama server.
+// Package llm is a minimal client for llama.cpp's llama-server — the only
+// backend Vellum needs.
 //
 // Structured output is the load-bearing feature here: the JSON schema sent
-// with /api/chat is enforced via grammar-constrained decoding. An enum in
-// the schema makes it *impossible* for the model to emit a tag outside the
-// vocabulary — that's how Vellum avoids tag drift.
+// as response_format is enforced via GBNF grammar-constrained decoding. An
+// enum in the schema makes it *impossible* for the model to emit a tag
+// outside the vocabulary — that's how Vellum avoids tag drift.
+//
+// The server hosts exactly one GGUF per process, so the pack runs two small
+// servers: the chat model (llm_url) and the embedding model (embed_url).
 package llm
 
 import (
@@ -21,79 +25,78 @@ type Message struct {
 	Content string `json:"content"`
 }
 
-type chatRequest struct {
-	Model    string    `json:"model"`
-	Messages []Message `json:"messages"`
-	Format   any       `json:"format"`
-	Think    bool      `json:"think"`
-	Options  options   `json:"options"`
-	Stream   bool      `json:"stream"`
+type responseFormat struct {
+	Type       string       `json:"type"`
+	JSONSchema *jsonSchema_ `json:"json_schema,omitempty"`
 }
 
-type options struct {
-	NumCtx      int     `json:"num_ctx"`
-	Temperature float64 `json:"temperature"`
+type jsonSchema_ struct {
+	Name   string         `json:"name"`
+	Schema map[string]any `json:"schema"`
+}
+
+type chatRequest struct {
+	Messages       []Message       `json:"messages"`
+	ResponseFormat *responseFormat `json:"response_format,omitempty"`
+	Temperature    float64         `json:"temperature"`
+	MaxTokens      int             `json:"max_tokens"`
+	Stream         bool            `json:"stream"`
+	// llama.cpp (--jinja) passes these to the chat template; Qwen3 uses
+	// enable_thinking to toggle its reasoning pass.
+	ChatTemplateKwargs map[string]any `json:"chat_template_kwargs,omitempty"`
 }
 
 type chatResponse struct {
-	Message struct {
-		Content string `json:"content"`
-	} `json:"message"`
+	Choices []struct {
+		Message struct {
+			Content          string `json:"content"`
+			ReasoningContent string `json:"reasoning_content"`
+		} `json:"message"`
+	} `json:"choices"`
+	Error *struct {
+		Message string `json:"message"`
+		Type    string `json:"type"`
+	} `json:"error"`
 }
 
-type embedRequest struct {
-	Model string   `json:"model"`
+type embeddingsRequest struct {
 	Input []string `json:"input"`
 }
 
-type embedResponse struct {
-	Embeddings [][]float32 `json:"embeddings"`
+type embeddingsResponse struct {
+	Data []struct {
+		Embedding []float32 `json:"embedding"`
+		Index     int       `json:"index"`
+	} `json:"data"`
 }
 
-// Available reports whether the Ollama server is reachable.
+// Available reports whether a llama-server is reachable and healthy.
 func Available(baseURL string) bool {
 	client := &http.Client{Timeout: 2 * time.Second}
-	resp, err := client.Get(strings.TrimSuffix(baseURL, "/") + "/api/tags")
-	return err == nil && resp.StatusCode == 200
-}
-
-// HasModel reports whether a model is present on the server.
-func HasModel(baseURL, model string) bool {
-	client := &http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Get(strings.TrimSuffix(baseURL, "/") + "/api/tags")
+	resp, err := client.Get(strings.TrimSuffix(baseURL, "/") + "/health")
 	if err != nil {
 		return false
 	}
 	defer resp.Body.Close()
-	var out struct {
-		Models []struct {
-			Name string `json:"name"`
-		} `json:"models"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return false
-	}
-	for _, m := range out.Models {
-		if m.Name == model || strings.SplitN(m.Name, ":", 2)[0] == model {
-			return true
-		}
-	}
-	return false
+	return resp.StatusCode == 200
 }
 
 // ChatJSON runs one chat call with a JSON-schema-constrained response and
 // decodes the JSON object.
-func ChatJSON(baseURL, model string, messages []Message, schema map[string]any,
-	think bool, numCtx int, temperature float64) (map[string]any, error) {
+func ChatJSON(baseURL string, messages []Message, schema map[string]any,
+	think bool, temperature float64) (map[string]any, error) {
 	req := chatRequest{
-		Model:    model,
 		Messages: messages,
-		Format:   schema,
-		Think:    think,
-		Options:  options{NumCtx: numCtx, Temperature: temperature},
-		Stream:   false,
+		ResponseFormat: &responseFormat{Type: "json_schema",
+			JSONSchema: &jsonSchema_{Name: "vellum", Schema: schema}},
+		Temperature: temperature,
+		MaxTokens:   2048,
+		Stream:      false,
 	}
-	body, err := post(baseURL+"/api/chat", req)
+	if !think {
+		req.ChatTemplateKwargs = map[string]any{"enable_thinking": false}
+	}
+	body, err := post(baseURL+"/v1/chat/completions", req)
 	if err != nil {
 		return nil, err
 	}
@@ -101,22 +104,44 @@ func ChatJSON(baseURL, model string, messages []Message, schema map[string]any,
 	if err := json.Unmarshal(body, &resp); err != nil {
 		return nil, fmt.Errorf("bad chat response: %w", err)
 	}
-	return decodeJSONObject(resp.Message.Content)
+	if resp.Error != nil {
+		return nil, fmt.Errorf("chat error: %s", resp.Error.Message)
+	}
+	if len(resp.Choices) == 0 {
+		return nil, fmt.Errorf("chat response has no choices: %s",
+			strings.TrimSpace(string(body)))
+	}
+	content := resp.Choices[0].Message.Content
+	if content == "" && resp.Choices[0].Message.ReasoningContent != "" {
+		// reasoning produced, answer empty (shouldn't happen with a
+		// grammar attached, but never trust a model fully)
+		content = resp.Choices[0].Message.ReasoningContent
+	}
+	return decodeJSONObject(stripThink(content))
 }
 
-// Embed calls /api/embed for a batch of texts (server-side batching handled
-// by the caller).
-func Embed(baseURL, model string, texts []string) ([][]float32, error) {
-	req := embedRequest{Model: model, Input: texts}
-	body, err := post(baseURL+"/api/embed", req)
+// Embed calls /v1/embeddings for a batch of texts.
+func Embed(baseURL string, texts []string) ([][]float32, error) {
+	body, err := post(baseURL+"/v1/embeddings", embeddingsRequest{Input: texts})
 	if err != nil {
 		return nil, err
 	}
-	var resp embedResponse
+	var resp embeddingsResponse
 	if err := json.Unmarshal(body, &resp); err != nil {
-		return nil, fmt.Errorf("bad embed response: %w", err)
+		return nil, fmt.Errorf("bad embeddings response: %w", err)
 	}
-	return resp.Embeddings, nil
+	if len(resp.Data) != len(texts) {
+		return nil, fmt.Errorf("expected %d embeddings, got %d",
+			len(texts), len(resp.Data))
+	}
+	out := make([][]float32, len(texts))
+	for _, d := range resp.Data {
+		if d.Index < 0 || d.Index >= len(out) {
+			return nil, fmt.Errorf("embedding index out of range: %d", d.Index)
+		}
+		out[d.Index] = d.Embedding
+	}
+	return out, nil
 }
 
 func post(url string, payload any) ([]byte, error) {
@@ -134,10 +159,21 @@ func post(url string, payload any) ([]byte, error) {
 		return nil, err
 	}
 	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("ollama %s: %s", resp.Status,
+		return nil, fmt.Errorf("llama-server %s: %s", resp.Status,
 			strings.TrimSpace(string(body)))
 	}
 	return body, nil
+}
+
+// stripThink removes a <think>...</think> block in case the model's
+// reasoning leaked into content (llama-server normally separates it).
+func stripThink(s string) string {
+	if i := strings.Index(s, "<think>"); i >= 0 {
+		if j := strings.Index(s, "</think>"); j >= i {
+			return strings.TrimSpace(s[:i] + s[j+len("</think>"):])
+		}
+	}
+	return s
 }
 
 // decodeJSONObject parses the model's JSON output; with a schema attached

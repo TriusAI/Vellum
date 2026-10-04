@@ -78,9 +78,9 @@ func tagSchema(enum []string) map[string]any {
 }
 
 func chat(cfg *config.Config, prompt string, schema map[string]any) (map[string]any, error) {
-	return llm.ChatJSON(cfg.Tools.OllamaURL, cfg.Models.LLM,
+	return llm.ChatJSON(cfg.Tools.LLMURL,
 		[]llm.Message{{Role: "user", Content: prompt}},
-		schema, cfg.LLM.Think, cfg.LLM.NumCtx, cfg.LLM.Temperature)
+		schema, cfg.LLM.Think, cfg.LLM.Temperature)
 }
 
 // chunkText splits on paragraph boundaries close to the target size.

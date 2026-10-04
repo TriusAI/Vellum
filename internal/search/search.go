@@ -81,7 +81,7 @@ func Semantic(cfg *config.Config, conn *sql.DB, query string, k int) ([]Semantic
 	if _, err := EmbedPending(cfg, conn); err != nil {
 		return nil, err
 	}
-	vecs, err := llm.Embed(cfg.Tools.OllamaURL, cfg.Models.Embed, []string{query})
+	vecs, err := llm.Embed(cfg.Tools.EmbedURL, []string{query})
 	if err != nil {
 		return nil, err
 	}
@@ -183,10 +183,10 @@ WHERE c.embedding IS NOT NULL`)
 	return results, nil
 }
 
-// EmbedPending embeds all chunks lacking embeddings. If the configured model
-// changed since last time, stale vectors are cleared.
+// EmbedPending embeds all chunks lacking embeddings. If the embedding
+// server URL changed since last time, stale vectors are cleared.
 func EmbedPending(cfg *config.Config, conn *sql.DB) (int, error) {
-	model := cfg.Models.Embed
+	model := cfg.Tools.EmbedURL
 	if stored := db.MetaGet(conn, "embed_model"); stored != "" && stored != model {
 		if _, err := conn.Exec("UPDATE chunks SET embedding=NULL"); err != nil {
 			return 0, err
@@ -236,7 +236,7 @@ func EmbedPending(cfg *config.Config, conn *sql.DB) (int, error) {
 				texts = append(texts, r.text)
 			}
 		}
-		vecs, err := llm.Embed(cfg.Tools.OllamaURL, cfg.Models.Embed, texts)
+		vecs, err := llm.Embed(cfg.Tools.EmbedURL, texts)
 		if err != nil {
 			return done, err
 		}

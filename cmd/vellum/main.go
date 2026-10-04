@@ -155,13 +155,10 @@ func cmdProcess(cfg *config.Config, args []string) {
 		log.Fatalf("vocab.yaml is empty — add tags first with `vellum vocab add`. " +
 			"Tagging needs a controlled vocabulary to constrain the LLM.")
 	}
-	if !llm.Available(cfg.Tools.OllamaURL) {
-		log.Fatalf("ollama is not running at %s — start it with `ollama serve`",
-			cfg.Tools.OllamaURL)
-	}
-	if !llm.HasModel(cfg.Tools.OllamaURL, cfg.Models.LLM) {
-		log.Fatalf("model %s is not present — run: ollama pull %s",
-			cfg.Models.LLM, cfg.Models.LLM)
+	if !llm.Available(cfg.Tools.LLMURL) {
+		log.Fatalf("no llama-server at %s — start it with the vellum launcher, or:\n"+
+			"  llama-server -m %s --host 127.0.0.1 --port %s --jinja",
+			cfg.Tools.LLMURL, cfg.Models.LLM, portOf(cfg.Tools.LLMURL))
 	}
 	conn := mustOpen(cfg)
 	n, err := ingest.ProcessPending(cfg, conn, v, *limit)
@@ -466,6 +463,16 @@ func pageOrChunk(page int) string {
 		return fmt.Sprintf("p.%d", page)
 	}
 	return "chunk"
+}
+
+// portOf extracts the port from a URL for the startup hint message.
+func portOf(url string) string {
+	if i := strings.LastIndex(url, ":"); i >= 0 {
+		if p := url[i+1:]; p != "" {
+			return p
+		}
+	}
+	return "8081"
 }
 
 func mustOpen(cfg *config.Config) *sql.DB {

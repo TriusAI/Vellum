@@ -18,13 +18,14 @@ type Config struct {
 	DB         string `yaml:"db"`
 
 	Models struct {
+		// informational only: which GGUF each server should host (the
+		// launcher reads these as file names in models/).
 		LLM   string `yaml:"llm"`
 		Embed string `yaml:"embed"`
 	} `yaml:"models"`
 
 	LLM struct {
 		Think       bool    `yaml:"think"`
-		NumCtx      int     `yaml:"num_ctx"`
 		Temperature float64 `yaml:"temperature"`
 	} `yaml:"llm"`
 
@@ -47,8 +48,9 @@ type Config struct {
 	Tools struct {
 		Mutool    string `yaml:"mutool"`
 		Tesseract string `yaml:"tesseract"`
-		Tessdata  string `yaml:"tessdata"` // optional explicit tessdata dir
-		OllamaURL string `yaml:"ollama_url"`
+		Tessdata  string `yaml:"tessdata"`  // optional explicit tessdata dir
+		LLMURL    string `yaml:"llm_url"`   // llama-server hosting the chat model
+		EmbedURL  string `yaml:"embed_url"` // llama-server hosting the embedding model
 	} `yaml:"tools"`
 
 	// computed at load time
@@ -57,16 +59,14 @@ type Config struct {
 	VocabPath string `yaml:"-"`
 }
 
-// Default returns a Config with all defaults filled in (same values as the
-// Python version).
+// Default returns a Config with all defaults filled in.
 func Default() *Config {
 	c := &Config{}
 	c.LibraryDir = "~/VellumLibrary"
 	c.DB = "library.db"
-	c.Models.LLM = "qwen3:4b"
-	c.Models.Embed = "nomic-embed-text"
+	c.Models.LLM = "qwen3-4b.gguf"
+	c.Models.Embed = "nomic-embed-text-v1.5.gguf"
 	c.LLM.Think = false
-	c.LLM.NumCtx = 8192
 	c.LLM.Temperature = 0.3
 	c.OCR.Langs = "eng+chi_sim+fin"
 	c.OCR.DPI = 300
@@ -77,7 +77,8 @@ func Default() *Config {
 	c.Embed.Batch = 32
 	c.Tools.Mutool = "mutool"
 	c.Tools.Tesseract = "tesseract"
-	c.Tools.OllamaURL = "http://localhost:11434"
+	c.Tools.LLMURL = "http://127.0.0.1:8081"
+	c.Tools.EmbedURL = "http://127.0.0.1:8082"
 	return c
 }
 
