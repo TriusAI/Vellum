@@ -190,12 +190,23 @@ func pdfString(out, key string) string {
 			rest := strings.TrimSpace(line[i+len(key):])
 			if strings.HasPrefix(rest, "(") {
 				if j := strings.Index(rest[1:], ")"); j >= 0 {
-					return rest[1 : 1+j]
+					return cleanMetaValue(rest[1 : 1+j])
 				}
 			}
 		}
 	}
 	return ""
+}
+
+// cleanMetaValue drops junk placeholder values that PDF producers commonly
+// emit ("unknown", "untitled", ...) — they are worse than nothing.
+func cleanMetaValue(s string) string {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "", "unknown", "untitled", "unspecified", "anonymous", "none",
+		"n/a", "na", "null":
+		return ""
+	}
+	return strings.TrimSpace(s)
 }
 
 // ocrPagesIn OCRs the given pages in parallel, filling chunks in place.

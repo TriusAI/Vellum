@@ -10,6 +10,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -20,6 +21,10 @@ import (
 	"vellum/internal/summarize"
 	"vellum/internal/vocab"
 )
+
+// yearRE: a credible publication year is a 4-digit number, optionally
+// followed by a second one ("1998", "2010-2012").
+var yearRE = regexp.MustCompile(`^\d{4}(-\d{4})?$`)
 
 // Stats summarizes an ingest run.
 type Stats struct {
@@ -142,6 +147,17 @@ func ingestOne(cfg *config.Config, conn *sql.DB, path string, reprocess bool, st
 	return nil
 }
 
+// cleanMetaValue drops junk placeholder values ("unknown", LLM hedging like
+// "not specified") — they are worse than nothing.
+func cleanMetaValue(s string) string {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "", "unknown", "untitled", "unspecified", "anonymous", "none",
+		"n/a", "na", "null", "not specified", "not available":
+		return ""
+	}
+	return strings.TrimSpace(s)
+}
+
 // ProcessPending summarizes and tags all documents with status 'ingested'.
 func ProcessPending(cfg *config.Config, conn *sql.DB, v *vocab.Vocabulary, limit int) (int, error) {
 	q := "SELECT id, path, title, authors, year FROM documents WHERE status='ingested' ORDER BY id"
@@ -211,6 +227,12 @@ func processOne(cfg *config.Config, conn *sql.DB, v *vocab.Vocabulary,
 	newYear := year
 	if newYear == "" {
 		newYear = tags.Year
+	}
+	// never trust an LLM (or a PDF producer) fully: junk stays out of the index
+	newTitle = cleanMetaValue(newTitle)
+	newAuthors = cleanMetaValue(newAuthors)
+	if !yearRE.MatchString(newYear) {
+		newYear = ""
 	}
 
 	if _, err := conn.Exec(
