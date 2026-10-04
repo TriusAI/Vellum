@@ -12,6 +12,6 @@ __pycache__/
 build/
 pack/stage/
 pack/bin/
-pack/docker/vellum
+pack/docker/
 pack/*.tar.gz
 *.test

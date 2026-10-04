@@ -51,8 +51,9 @@ go test ./tests/   # e2e; MUTOOL/LLAMA_SERVER_BIN/QWEN_GGUF/NOMIC_GGUF to test t
 llama.cpp serves one model per process — two small servers:
 
 ```bash
-llama-server -m qwen3-4b.gguf --port 8081 -c 8192 --jinja &        # chat: summarize + tag
-llama-server -m nomic-embed-text-v1.5.gguf --port 8082 --embeddings &  # semantic search
+llama-server -m qwen3-4b.gguf --port 8081 -c 8192 -np 1 --jinja \
+    --chat-template-file templates/qwen3-nothink.jinja &   # chat: summarize + tag
+llama-server -m nomic-embed-text-v1.5.gguf --port 8082 -np 1 --embeddings &  # semantic search
 ```
 
 Tesseract language data lives in `tessdata/` (project-local, so adding
@@ -84,9 +85,9 @@ vellum vocab add my-new-tag "what it covers"
 ## Download pack (one folder, everything included)
 
 `pack/build.sh` assembles a portable, self-contained folder —
-Go binary + mutool + tesseract (+ libs) + traineddata + llama-server
-(a single ~10 MB binary) + the two GGUF models (~2.8 GB, dominated by
-qwen3-4b):
+Go binary + mutool + tesseract (+ libs) + traineddata + llama.cpp's
+llama-server (official prebuilts: CPU 44MB + Vulkan 86MB, auto-selected
+with CPU fallback) + the two GGUF models (~2.8 GB, dominated by qwen3-4b):
 
 ```bash
 pack/build-mutool.sh      # builds mutool from the pinned MuPDF tag
