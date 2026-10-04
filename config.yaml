@@ -12,6 +12,9 @@ models:
 llm:
   think: false             # qwen3 thinking mode: better, much slower on CPU
   temperature: 0.3
+  # The chat server's -c value — must match how it's started (pack launcher
+  # and docker entrypoint use the same number). Bigger = safer for long docs.
+  num_ctx: 8192
 
 ocr:
   langs: eng+chi_sim+fin   # Tesseract language codes; data lives in ./tessdata
@@ -32,3 +35,8 @@ tools:
   # llama.cpp serves one model per process: two small servers, chat + embed.
   llm_url: http://127.0.0.1:8081
   embed_url: http://127.0.0.1:8082
+embed:
+  batch: 32
+  # nomic-embed-text-v1.5 has a 2048-token context; chunk inputs are
+  # trimmed to this cap before embedding
+  max_tokens: 1500

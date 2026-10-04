@@ -61,3 +61,8 @@ server.
 - zsh: no word-splitting of unquoted `$VARS` in command lines; avoid
   pkill patterns that match your own shell; `rm -f dir/glob*` fails when
   no match — use explicit names.
+- Stale llama-servers (or a leftover `vellum serve`) on fixed ports make
+  new servers fail to bind SILENTLY — clients then talk to the stale one
+  (wrong flags, wrong model). Before runs/after manual probes: `ss -tln |
+  grep -E '808[12]|1808[12]|8090'` and kill leftovers. The e2e helper now
+  uses ephemeral ports and a process-liveness check by design.

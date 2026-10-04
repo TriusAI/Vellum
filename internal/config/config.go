@@ -27,6 +27,11 @@ type Config struct {
 	LLM struct {
 		Think       bool    `yaml:"think"`
 		Temperature float64 `yaml:"temperature"`
+		// NumCtx is the chat server's context window (its -c flag). The
+		// client uses it to budget requests; it must match how the server
+		// is actually started (the pack launcher and docker entrypoint
+		// use the same value).
+		NumCtx int `yaml:"num_ctx"`
 	} `yaml:"llm"`
 
 	OCR struct {
@@ -42,7 +47,8 @@ type Config struct {
 	} `yaml:"summarize"`
 
 	Embed struct {
-		Batch int `yaml:"batch"`
+		Batch     int `yaml:"batch"`
+		MaxTokens int `yaml:"max_tokens"` // per-chunk embedding input cap
 	} `yaml:"embed"`
 
 	Tools struct {
@@ -68,6 +74,10 @@ func Default() *Config {
 	c.Models.Embed = "nomic-embed-text-v1.5.gguf"
 	c.LLM.Think = false
 	c.LLM.Temperature = 0.3
+	// chat server: context sized to fit GPU VRAM; the client tokenizes and
+	// trims its inputs to llm.num_ctx, so long documents never error out.
+	// raise num_ctx (and -c) if you have the memory for less trimming.
+	c.LLM.NumCtx = 8192
 	c.OCR.Langs = "eng+chi_sim+fin"
 	c.OCR.DPI = 300
 	c.OCR.MinCharsPerPage = 50
@@ -75,6 +85,9 @@ func Default() *Config {
 	c.Summarize.ChunkChars = 6000
 	c.Summarize.MaxTags = 8
 	c.Embed.Batch = 32
+	// nomic-embed-text-v1.5 has a 2048-token context: chunk embedding
+	// inputs are trimmed to this cap (the head of each chunk)
+	c.Embed.MaxTokens = 1500
 	c.Tools.Mutool = "mutool"
 	c.Tools.Tesseract = "tesseract"
 	c.Tools.LLMURL = "http://127.0.0.1:8081"

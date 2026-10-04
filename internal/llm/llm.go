@@ -81,6 +81,66 @@ func Available(baseURL string) bool {
 	return resp.StatusCode == 200
 }
 
+// CountTokens returns how many tokens the server's tokenizer sees in text.
+// Used to budget requests against the context window.
+func CountTokens(baseURL, text string) (int, error) {
+	body, err := post(baseURL+"/tokenize", map[string]any{"content": text})
+	if err != nil {
+		return 0, err
+	}
+	var out struct {
+		Tokens []int `json:"tokens"`
+	}
+	if err := json.Unmarshal(body, &out); err != nil {
+		return 0, fmt.Errorf("bad tokenize response: %w", err)
+	}
+	return len(out.Tokens), nil
+}
+
+// TrimToTokenBudget trims text so prompt (text + overhead) fits in ctx.
+// It estimates rather than tokenize-checks every candidate string: first a
+// characters-per-token heuristic, then verifies with the tokenizer.
+func TrimToTokenBudget(baseURL, text string, budgetTokens, overheadTokens int) (string, error) {
+	if budgetTokens <= 0 {
+		budgetTokens = 4096
+	}
+	effective := budgetTokens - overheadTokens
+	if effective < 512 {
+		effective = 512
+	}
+	n, err := CountTokens(baseURL, text)
+	if err != nil || n <= effective {
+		return text, err
+	}
+	// estimate a cut point, then verify
+	for {
+		// ~3.5 chars/token is a safe lower bound for English prose
+		cut := int(float64(effective) * 3.5)
+		if cut >= len(text) {
+			cut = len(text) - 1
+		}
+		cut = strings.LastIndex(text[:cut], "\n\n")
+		if cut <= 0 {
+			cut = int(float64(effective) * 3.5)
+		}
+		candidate := text[:cut]
+		n, err := CountTokens(baseURL, candidate)
+		if err != nil {
+			return candidate, err
+		}
+		if n <= effective {
+			return candidate, nil
+		}
+		// still too long: scale down by the measured ratio and retry
+		ratio := float64(n) / float64(len(candidate))
+		newLen := int(float64(effective) / ratio)
+		if newLen >= len(candidate) {
+			newLen = len(candidate) / 2
+		}
+		text = text[:newLen]
+	}
+}
+
 // ChatJSON runs one chat call with a JSON-schema-constrained response and
 // decodes the JSON object.
 func ChatJSON(baseURL string, messages []Message, schema map[string]any,

@@ -9,7 +9,10 @@ import (
 	"encoding/json"
 	"io/fs"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
+	"strings"
 
 	"vellum/internal/config"
 	"vellum/internal/db"
@@ -40,6 +43,7 @@ func (s *Server) Mux() http.Handler {
 	mux.HandleFunc("GET /api/status", s.status)
 	mux.HandleFunc("GET /api/documents", s.documents)
 	mux.HandleFunc("GET /api/documents/{id}", s.document)
+	mux.HandleFunc("GET /api/documents/{id}/file", s.file)
 	mux.HandleFunc("PATCH /api/documents/{id}", s.patchDocument)
 	mux.HandleFunc("PUT /api/documents/{id}/tags", s.putTags)
 	mux.HandleFunc("POST /api/ingest", s.postIngest)
@@ -356,7 +360,8 @@ func (s *Server) postIngest(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) postProcess(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Limit int `json:"limit"`
+		IDs   []int64 `json:"ids"`
+		Limit int     `json:"limit"`
 	}
 	if r.ContentLength > 0 {
 		if err := decodeBody(r, &body); err != nil {
@@ -378,12 +383,49 @@ func (s *Server) postProcess(w http.ResponseWriter, r *http.Request) {
 			" — start it with the vellum launcher")
 		return
 	}
-	results, err := ingest.ProcessPending(s.cfg, s.conn, v, body.Limit)
+	results, err := ingest.ProcessPending(s.cfg, s.conn, v, body.IDs, body.Limit)
 	if err != nil {
 		writeErr(w, 500, err.Error())
 		return
 	}
 	writeJSON(w, 200, results)
+}
+
+// file serves the original document file. PDFs render inline in the
+// browser (the UI embeds them as a preview); ?dl=1 forces download.
+func (s *Server) file(w http.ResponseWriter, r *http.Request) {
+	id, err := pathID(r)
+	if err != nil {
+		writeErr(w, 400, "bad document id")
+		return
+	}
+	var path string
+	if err := s.conn.QueryRow("SELECT path FROM documents WHERE id=?", id).
+		Scan(&path); err != nil {
+		writeErr(w, 404, "no such document")
+		return
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		writeErr(w, 410, "file no longer readable: "+err.Error())
+		return
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	disposition := "inline"
+	if r.URL.Query().Get("dl") != "" {
+		disposition = "attachment"
+	}
+	w.Header().Set("Content-Disposition",
+		disposition+`; filename="`+filepath.Base(path)+`"`)
+	if strings.EqualFold(filepath.Ext(path), ".pdf") {
+		w.Header().Set("Content-Type", "application/pdf")
+	}
+	http.ServeContent(w, r, filepath.Base(path), fi.ModTime(), f)
 }
 
 func (s *Server) search(w http.ResponseWriter, r *http.Request) {

@@ -121,6 +121,7 @@ models:
 llm:
   think: false             # qwen3 thinking mode: better, much slower on CPU
   temperature: 0.3
+  num_ctx: 8192
 
 ocr:
   langs: eng+chi_sim+fin
@@ -209,6 +210,7 @@ start_embed_server() { # $1 port  $2 gguf  $3 logname
     # CPU and leaves the GPU (if any) entirely to the chat model
     "$ROOT/llm/cpu/llama-server" -m "$ROOT/models/$2" \
         --host 127.0.0.1 --port "$1" -np 1 --embeddings \
+        --ubatch-size 2048 \
         > "$ROOT/$3" 2>&1 &
     pid=$!
     i=0
@@ -220,7 +222,7 @@ start_embed_server() { # $1 port  $2 gguf  $3 logname
 }
 
 if ! up "$LLM_PORT"; then
-    # chat server: full 8192 context, qwen3 no-think template
+    # chat server: full context window, qwen3 no-think template
     start_llm_server "$LLM_PORT" "$LLM_GGUF" "llm-server.log" \
         -c 8192 --jinja --chat-template-file "$TEMPLATE"
     echo "vellum: started chat server on :$LLM_PORT"

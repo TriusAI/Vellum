@@ -8,10 +8,12 @@ package tests
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -84,16 +86,27 @@ func startLLaMAServers(t *testing.T) (llmURL, embedURL string) {
 		return "", ""
 	}
 
-	repoRoot, _ := os.Getwd()
-	repoRoot = filepath.Dir(repoRoot)
+	// ephemeral ports: fixed ports silently reuse whatever stale server
+	// happens to be listening — a leftover from a previous run then
+	// masquerades as ours (wrong flags, wrong model). Pick free ports and
+	// fail loudly if our process dies instead of answering.
+	freePort := func() string {
+		l, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer l.Close()
+		_, port, _ := net.SplitHostPort(l.Addr().String())
+		return port
+	}
+	llmPort, embedPort := freePort(), freePort()
 
-	llmURL = "http://127.0.0.1:18081"
-	embedURL = "http://127.0.0.1:18082"
 	logs, _ := os.MkdirTemp("", "vellum-llama-*")
 
 	// prefill template that disables Qwen3's think pass (the embedded
 	// template in the ollama-provenance GGUF ignores enable_thinking)
-	tmpl := filepath.Join(repoRoot, "templates", "qwen3-nothink.jinja")
+	wd, _ := os.Getwd()
+	tmpl := filepath.Join(filepath.Dir(wd), "templates", "qwen3-nothink.jinja")
 
 	start := func(serverBin, port, model, logName string, extra ...string) *exec.Cmd {
 		f, err := os.Create(filepath.Join(logs, logName))
@@ -103,7 +116,7 @@ func startLLaMAServers(t *testing.T) (llmURL, embedURL string) {
 		args := []string{"-m", model, "--host", "127.0.0.1", "--port", port, "-np", "1"}
 		if strings.Contains(logName, "embed") {
 			// embeddings mode; nomic has a 2048-token context: no -c override
-			args = append(args, "--embeddings")
+			args = append(args, "--embeddings", "--ubatch-size", "2048")
 		} else {
 			args = append(args, "-c", "8192", "--jinja", "--chat-template-file", tmpl)
 		}
@@ -130,8 +143,12 @@ func startLLaMAServers(t *testing.T) (llmURL, embedURL string) {
 		embedBin = strings.Replace(llmBin, "llama-server-vulkan", "llama-server-cpu", 1)
 	}
 
-	llmCmd := start(llmBin, "18081", qwen, "llm.log")
-	embedCmd := start(embedBin, "18082", nomic, "embed.log")
+	llmCmd := start(llmBin, llmPort, qwen, "llm.log")
+	embedCmd := start(embedBin, embedPort, nomic, "embed.log")
+	alive := func(cmd *exec.Cmd) bool {
+		return cmd.Process == nil ||
+			cmd.Process.Signal(syscall.Signal(0)) == nil
+	}
 	t.Cleanup(func() {
 		llmCmd.Process.Kill()
 		embedCmd.Process.Kill()
@@ -139,18 +156,23 @@ func startLLaMAServers(t *testing.T) (llmURL, embedURL string) {
 		embedCmd.Wait()
 	})
 
-	waitUp := func(url string, what string) {
+	waitUp := func(url string, what string, cmd *exec.Cmd) {
 		for i := 0; i < 300; i++ {
 			if llm.Available(url) {
 				return
+			}
+			if !alive(cmd) {
+				t.Fatalf("%s server process exited early (see %s/ logs)",
+					what, logs)
 			}
 			time.Sleep(1 * time.Second)
 		}
 		t.Fatalf("%s server did not come up (see %s)", what, logs)
 	}
-	waitUp(llmURL, "chat")
-	waitUp(embedURL, "embed")
-	return llmURL, embedURL
+	waitUp("http://127.0.0.1:"+llmPort, "chat", llmCmd)
+	waitUp("http://127.0.0.1:"+embedPort, "embed", embedCmd)
+
+	return "http://127.0.0.1:" + llmPort, "http://127.0.0.1:" + embedPort
 }
 
 func TestE2E(t *testing.T) {
@@ -257,7 +279,7 @@ func TestE2E(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ingest.ProcessPending(cfg, conn, v, 0); err != nil {
+	if _, err := ingest.ProcessPending(cfg, conn, v, nil, 0); err != nil {
 		t.Fatal(err)
 	}
 
@@ -268,6 +290,45 @@ func TestE2E(t *testing.T) {
 	defer rows.Close()
 	if rows.Next() {
 		t.Fatal("not all documents reached status=done")
+	}
+
+	// ---- long-document regression: a ~35k-char doc must not blow the
+	// context window (token-budgeted requests + hierarchical reduce)
+	longText := strings.Repeat(strings.Repeat(lorem, 3), 6)
+	longPath := filepath.Join(lib, "long_document.md")
+	if err := os.WriteFile(longPath, []byte(longText), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	st2, err := ingest.Ingest(cfg, conn, []string{longPath}, false)
+	if err != nil || st2.Added != 1 {
+		t.Fatalf("long doc not ingested: %+v (%v)", st2, err)
+	}
+	longResults, err := ingest.ProcessPending(cfg, conn, v, nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range longResults {
+		if strings.Contains(r.Path, "long_document") && r.Status != "done" {
+			t.Fatalf("long document processing failed: %s", r.Error)
+		}
+	}
+	var longSummary string
+	if err := conn.QueryRow(
+		"SELECT summary FROM documents WHERE path LIKE '%long_document%'").
+		Scan(&longSummary); err != nil {
+		t.Fatal(err)
+	}
+	if len(longSummary) < 200 {
+		t.Fatalf("long-document summary suspiciously short: %d chars", len(longSummary))
+	}
+
+	// ---- per-id processing: re-run one document by id
+	one, err := ingest.ProcessPending(cfg, conn, v, []int64{1}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(one) != 1 || one[0].DocID != 1 || one[0].Status != "done" {
+		t.Fatalf("process-by-id failed: %+v", one)
 	}
 
 	// constrained tags only: every emitted tag must be in the vocabulary

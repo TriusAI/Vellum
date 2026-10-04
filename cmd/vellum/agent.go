@@ -22,7 +22,8 @@ Everything is local; no network calls except the local model servers.
 
 ## Quick start
     vellum ingest PATH...        # index files/dirs (fast; no LLM needed)
-    vellum process               # summarize + tag pending docs (LLM, slow on CPU)
+    vellum process               # summarize + tag ALL pending docs (LLM, slow on CPU)
+    vellum process ID [ID...]    # ...or specific documents, by id
     vellum search QUERY           # FTS5 keyword search
     vellum search QUERY --semantic
     vellum show all | ID          # inspect
@@ -33,11 +34,25 @@ Add --json to ingest/process/search/show/vocab for machine-readable output.
 Configuration is read from ./config.yaml (or --config PATH / $VELLUM_CONFIG).
 
 ## Model servers
-The chat server (llm_url, default 127.0.0.1:8081) is needed for
-ingest-less commands only: process. The embed server (embed_url, :8082) is
-needed for --semantic search (chunks are embedded lazily on first use).
-If they are not running: with the portable pack, invoke ./vellum.sh (it
-starts them); otherwise start them per README ("Build from source").
+The chat server (llm_url, default 127.0.0.1:8081) is needed for process;
+the embed server (embed_url, :8082) for --semantic search (chunks are
+embedded lazily on first use). If they are not running: with the portable
+pack, invoke ./vellum.sh (it starts them); otherwise start them per README
+("Build from source"). The chat server must be started with -c matching
+llm.num_ctx in the config (pack default: 8192; raise it — and the server -c — if you have the memory) — the client budgets its
+requests against that value and tokenizes via /tokenize to prevent
+exceeds-context errors on large documents.
+
+## Performance
+process cost scales with document length (map over ~6000-char chunks).
+Very long documents use a hierarchical reduce and are tagged from their
+summaries + opening text, not a huge raw prefix. To go faster:
+- swap the chat model for a smaller one (e.g. qwen3-1.7b): drop the GGUF in
+  the pack's models/ and set models.llm (+ VELLUM_LLM_GGUF for vellum.sh,
+  or start llama-server with -m qwen3-1.7b.gguf yourself). No rebuild needed.
+- raise summarize.chunk_chars for fewer, coarser map calls (lower fidelity).
+- process documents individually (vellum process ID) — results appear per
+  document, don't batch-wait.
 
 ## Workflows
 
@@ -45,9 +60,11 @@ Add documents:      vellum ingest --json /path/to/dir
   -> {"added":N,"updated":N,"skipped":N,"failed":N,"files":[...]}
   (unchanged files are skipped via sha256; --reprocess forces re-extract)
 
-Then process:       vellum process --json
+Then process:       vellum process --json [ID...]
   -> [{"id":N,"path":"...","status":"done","tags":["..."],"tags_other":[...]},...]
-  SLOW on CPU (minutes per document) — batch it, don't loop one-by-one.
+  SLOW on CPU (minutes per document). Prefer per-id processing for
+  incremental work; a failed document keeps status "error" (its "error"
+  field says why) and can be re-processed with vellum process ID.
 
 Find documents:     vellum search "query" --json [--semantic] [--limit N]
   keyword  -> [{"doc_id":N,"title":"...","page":N,"snippet":"..."},...]
@@ -58,9 +75,10 @@ Inspect:            vellum show all --json
        "summary":"...","status":"done","tags":["..."],"ocr_pages":N,...},...]
 
 ## Vocabulary curation (IMPORTANT)
-Tags are constrained to vocab.yaml. When a document matches a topic
-outside it, the LLM names it in tags_other (stored with source
-"suggested"). Review and promote good ones:
+Tags are constrained to vocab.yaml. The tagging prompt also invites the
+model to PROPOSE new tags when a document's central topic isn't covered:
+these land in tags_other (stored with source "suggested"). Review and
+promote good ones:
     vellum vocab review --json      # -> [{"tag":"...","count":N,"example":"..."}]
     vellum vocab promote NAME "description shown to the LLM"
     vellum vocab add NAME "description"    # add directly
@@ -71,13 +89,14 @@ Editing vocab.yaml by hand is also fine (name: description, YAML map).
     GET  /api/status                 # counts, server availability
     GET  /api/documents             # all documents (with tags)
     GET  /api/documents/{id}        # + chunks, tag_sources
+    GET  /api/documents/{id}/file    # the original file (?dl=1 to download)
     PATCH /api/documents/{id}       # {"title":..,"authors":..,"year":..,"summary":..}
     PUT  /api/documents/{id}/tags   # {"tags":[...]} (replaces; source=manual)
     POST /api/ingest                # {"paths":[...],"reprocess":false} -> stats
-    POST /api/process               # {"limit":0} -> per-document results (slow)
+    POST /api/process               # {"ids":[...]} or {} for all pending -> results
     GET  /api/search?q=&mode=keyword|semantic&limit=N
     GET  /api/vocab                 # [{"name":..,"description":..}]
-    GET  /api/vocab/suggestions     # LLM-suggested tags for review
+    GET  /api/vocab/suggestions     # LLM-proposed tags for review
     POST /api/vocab                 # {"name":..,"description":..} add/promote
     DELETE /api/vocab/{name}
 Errors: {"error":"..."} with 4xx/5xx status codes.

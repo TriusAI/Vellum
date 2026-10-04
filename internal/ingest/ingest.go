@@ -183,32 +183,54 @@ func ingestOne(cfg *config.Config, conn *sql.DB, path string, reprocess bool) (s
 	return action, nil
 }
 
-// ProcessPending summarizes and tags all documents with status 'ingested'.
-func ProcessPending(cfg *config.Config, conn *sql.DB, v *vocab.Vocabulary, limit int) ([]ProcessResult, error) {
-	q := "SELECT id, path, title, authors, year FROM documents WHERE status='ingested' ORDER BY id"
-	if limit > 0 {
-		q += fmt.Sprintf(" LIMIT %d", limit)
-	}
-	rows, err := conn.Query(q)
-	if err != nil {
-		return nil, err
-	}
+// ProcessPending summarizes and tags documents. With ids empty it takes all
+// pending ('ingested') documents, limited by limit (0 = no limit); with ids
+// it processes exactly those, whatever their status (a 'done' document gets
+// a fresh summary and tags).
+func ProcessPending(cfg *config.Config, conn *sql.DB, v *vocab.Vocabulary,
+	ids []int64, limit int) ([]ProcessResult, error) {
 	type docRow struct {
 		id                         int64
 		path, title, authors, year string
 	}
 	var docs []docRow
-	for rows.Next() {
-		var d docRow
-		if err := rows.Scan(&d.id, &d.path, &d.title, &d.authors, &d.year); err != nil {
-			rows.Close()
+
+	if len(ids) > 0 {
+		for _, id := range ids {
+			var d docRow
+			err := conn.QueryRow(
+				"SELECT id, path, title, authors, year FROM documents WHERE id=?", id).
+				Scan(&d.id, &d.path, &d.title, &d.authors, &d.year)
+			if err == sql.ErrNoRows {
+				log.Printf("process: no document #%d", id)
+				continue
+			}
+			if err != nil {
+				return nil, err
+			}
+			docs = append(docs, d)
+		}
+	} else {
+		q := "SELECT id, path, title, authors, year FROM documents WHERE status='ingested' ORDER BY id"
+		if limit > 0 {
+			q += fmt.Sprintf(" LIMIT %d", limit)
+		}
+		rows, err := conn.Query(q)
+		if err != nil {
 			return nil, err
 		}
-		docs = append(docs, d)
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return nil, err
+		for rows.Next() {
+			var d docRow
+			if err := rows.Scan(&d.id, &d.path, &d.title, &d.authors, &d.year); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			docs = append(docs, d)
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
 	}
 
 	results := []ProcessResult{}
@@ -236,11 +258,18 @@ func processOne(cfg *config.Config, conn *sql.DB, v *vocab.Vocabulary,
 	if err != nil {
 		return nil, err
 	}
-	summary, err := summarize.Summarize(cfg, text)
+	// one map phase feeds both the summary and the tagging call —
+	// long documents are tagged from summaries + opening text, not by
+	// re-sending a huge raw-text prefix
+	summaries, chunks, err := summarize.MapSummaries(cfg, text)
 	if err != nil {
 		return nil, err
 	}
-	tags, err := summarize.TagDocument(cfg, v, text)
+	summary, err := summarize.SummarizeFrom(cfg, chunks, summaries)
+	if err != nil {
+		return nil, err
+	}
+	tags, err := summarize.TagDocument(cfg, v, chunks, summaries, summary)
 	if err != nil {
 		return nil, err
 	}

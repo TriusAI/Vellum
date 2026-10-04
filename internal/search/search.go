@@ -184,7 +184,10 @@ WHERE c.embedding IS NOT NULL`)
 }
 
 // EmbedPending embeds all chunks lacking embeddings. If the embedding
-// server URL changed since last time, stale vectors are cleared.
+// server URL changed since last time, stale vectors are cleared. Chunk
+// inputs are trimmed to embed.max_tokens (the embed model's context is
+// 2048 tokens — inputs beyond that are not embeddable, the head carries
+// the topical signal).
 func EmbedPending(cfg *config.Config, conn *sql.DB) (int, error) {
 	model := cfg.Tools.EmbedURL
 	if stored := db.MetaGet(conn, "embed_model"); stored != "" && stored != model {
@@ -230,11 +233,21 @@ func EmbedPending(cfg *config.Config, conn *sql.DB) (int, error) {
 		}
 		texts := make([]string, 0, end-i)
 		for _, r := range pending[i:end] {
-			if strings.TrimSpace(r.text) == "" {
+			t := r.text
+			if strings.TrimSpace(t) == "" {
 				texts = append(texts, " ")
-			} else {
-				texts = append(texts, r.text)
+				continue
 			}
+			trimmed, err := llm.TrimToTokenBudget(cfg.Tools.EmbedURL, t,
+				cfg.Embed.MaxTokens, 100)
+			if err != nil {
+				// tokenizer unavailable: conservative character cap
+				trimmed = t
+				if max := cfg.Embed.MaxTokens * 4; max > 0 && len(t) > max {
+					trimmed = t[:max]
+				}
+			}
+			texts = append(texts, trimmed)
 		}
 		vecs, err := llm.Embed(cfg.Tools.EmbedURL, texts)
 		if err != nil {

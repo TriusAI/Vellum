@@ -1,6 +1,12 @@
 // Package summarize implements map-reduce summarization and constrained
-// tagging against the controlled vocabulary. Prompts mirror the retired
-// Python version so output behavior stays consistent.
+// tagging against the controlled vocabulary.
+//
+// Requests are token-budgeted against the server's context window
+// (llm.NumCtx): the client asks the server's tokenizer (/tokenize) how big
+// an input is and trims at paragraph boundaries, so "request exceeds
+// context" errors cannot happen for arbitrarily large documents. For very
+// long documents the reduce phase is hierarchical: chunk summaries are
+// reduced in batches until one final summary fits.
 package summarize
 
 import (
@@ -46,13 +52,16 @@ document substantively addresses the topic, not if it merely mentions it):
 {descriptions}
 Rules:
 - Choose the most relevant tags, usually 2-6, at most {max_tags}.
-- If the document clearly and substantively belongs to a topic that is missing
-  from the allowed list, put ONE short lowercase-hyphenated English label for
-  it in tags_other (e.g. "marine-biology"). Otherwise leave tags_other empty.
+- The vocabulary grows over time: if the document's central topic is NOT
+  well covered by the allowed list, PROPOSE up to two new tags in
+  tags_other — short, lowercase, hyphenated English labels (e.g.
+  "marine-biology", "austen-studies"). Only propose a new tag when it is
+  genuinely better than anything allowed; do not duplicate allowed tags,
+  and do not propose vague labels ("misc", "other", "science").
 - If you can confidently infer the document's title, authors, or publication
   year from the text, fill them in; otherwise leave them empty ("" / []).
 
-Document text (possibly truncated):
+Document:
 {text}`
 
 var summarySchema = map[string]any{
@@ -109,33 +118,121 @@ func chunkText(text string, chunkChars int) []string {
 	return out
 }
 
+// promptOverhead is the token head-room reserved for instructions + the
+// assistant's reply when budgeting inputs (deliberately generous).
+const promptOverhead = 1400
+
+// budgeted returns text trimmed (at a paragraph boundary) to fit the
+// server's context window, minus overhead. Falls back to a conservative
+// character cap if the tokenizer is unreachable.
+func budgeted(cfg *config.Config, text string) string {
+	out, err := llm.TrimToTokenBudget(cfg.Tools.LLMURL, text,
+		cfg.LLM.NumCtx, promptOverhead)
+	if err != nil {
+		// tokenizer unavailable: conservative chars-based cap (~3.5 chars/token)
+		limit := int(float64(cfg.LLM.NumCtx-promptOverhead) * 3.5)
+		if limit > 0 && len(text) > limit {
+			return text[:limit]
+		}
+		return text
+	}
+	return out
+}
+
+// MapSummaries runs the map phase: one summary per chunk. Returns
+// (summaries, chunks); for single-chunk documents the map phase is skipped
+// and summaries is nil.
+func MapSummaries(cfg *config.Config, text string) ([]string, []string, error) {
+	chunks := chunkText(text, cfg.Summarize.ChunkChars)
+	if len(chunks) <= 1 {
+		return nil, chunks, nil
+	}
+	log.Printf("map phase: %d chunks", len(chunks))
+	summaries := make([]string, 0, len(chunks))
+	for _, c := range chunks {
+		out, err := chat(cfg, strings.ReplaceAll(mapPrompt, "{text}", c), summarySchema)
+		if err != nil {
+			return nil, nil, err
+		}
+		summaries = append(summaries, strings.TrimSpace(str(out["summary"])))
+	}
+	return summaries, chunks, nil
+}
+
 // Summarize produces one paragraph via map-reduce; short documents get a
 // single direct pass.
 func Summarize(cfg *config.Config, text string) (string, error) {
-	chunks := chunkText(text, cfg.Summarize.ChunkChars)
+	summaries, chunks, err := MapSummaries(cfg, text)
+	if err != nil {
+		return "", err
+	}
+	return SummarizeFrom(cfg, chunks, summaries)
+}
 
-	var prompt string
-	if len(chunks) <= 1 {
-		limit := cfg.Summarize.ChunkChars * 3
-		body := text
-		if len(body) > limit {
-			body = body[:limit]
+// SummarizeFrom finishes the summarization: direct pass for short documents,
+// hierarchical reduce for long ones (chunk summaries are merged in batches
+// until one final call fits the context window).
+func SummarizeFrom(cfg *config.Config, chunks, summaries []string) (string, error) {
+	if summaries == nil {
+		// short document: single direct pass over the (budgeted) text
+		body := budgeted(cfg, strings.Join(chunks, "\n\n"))
+		out, err := chat(cfg, strings.ReplaceAll(directPrompt, "{text}", body), summarySchema)
+		if err != nil {
+			return "", err
 		}
-		prompt = strings.ReplaceAll(directPrompt, "{text}", body)
-	} else {
-		log.Printf("map phase: %d chunks", len(chunks))
-		summaries := make([]string, 0, len(chunks))
-		for _, c := range chunks {
-			out, err := chat(cfg, strings.ReplaceAll(mapPrompt, "{text}", c), summarySchema)
+		return strings.TrimSpace(str(out["summary"])), nil
+	}
+
+	// ~3.5 chars/token: batch summaries so each reduce call fits
+	budgetChars := int(float64(cfg.LLM.NumCtx-promptOverhead) * 3.5)
+	level := 0
+	for {
+		total := 0
+		for i, s := range summaries {
+			total += len(s)
+			if i > 0 {
+				total += 5
+			}
+		}
+		if len(summaries) <= 1 || total <= budgetChars {
+			return reduceCall(cfg, summaries)
+		}
+
+		// pack into batches that each fit the budget
+		var batches [][]string
+		var cur []string
+		size := 0
+		for _, s := range summaries {
+			if size+len(s)+5 > budgetChars && len(cur) > 1 {
+				batches = append(batches, cur)
+				cur, size = nil, 0
+			}
+			cur = append(cur, s)
+			size += len(s) + 5
+		}
+		if len(cur) > 0 {
+			batches = append(batches, cur)
+		}
+		if len(batches) <= 1 {
+			return reduceCall(cfg, summaries)
+		}
+		level++
+		log.Printf("reduce level %d: %d batches of summaries", level, len(batches))
+		next := make([]string, 0, len(batches))
+		for _, b := range batches {
+			out, err := reduceCall(cfg, b)
 			if err != nil {
 				return "", err
 			}
-			summaries = append(summaries, strings.TrimSpace(str(out["summary"])))
+			next = append(next, out)
 		}
-		log.Printf("reduce phase")
-		prompt = strings.ReplaceAll(reducePrompt, "{summaries}", strings.Join(summaries, "\n---\n"))
+		summaries = next
 	}
+}
 
+func reduceCall(cfg *config.Config, summaries []string) (string, error) {
+	prompt := strings.ReplaceAll(reducePrompt, "{summaries}",
+		strings.Join(summaries, "\n---\n"))
 	out, err := chat(cfg, prompt, summarySchema)
 	if err != nil {
 		return "", err
@@ -155,15 +252,35 @@ type TagResult struct {
 // TagDocument runs the constrained tagging call. The schema enum is built
 // from the vocabulary, so tags outside it are impossible to emit; anything
 // returned is still validated against the vocabulary (defense in depth).
-func TagDocument(cfg *config.Config, v *vocab.Vocabulary, text string) (*TagResult, error) {
-	limit := cfg.Summarize.ChunkChars * 3
-	if len(text) > limit {
-		text = text[:limit]
+//
+// Long documents are tagged from their summary + section summaries + the
+// opening text (title pages carry the bibliographic metadata) instead of a
+// raw-text prefix — cheaper and enough signal for topic tagging.
+func TagDocument(cfg *config.Config, v *vocab.Vocabulary,
+	chunks, summaries []string, finalSummary string) (*TagResult, error) {
+
+	var input string
+	if len(summaries) > 0 {
+		var b strings.Builder
+		b.WriteString("Summary of the document:\n" + finalSummary + "\n\n")
+		opening := chunks[0]
+		if len(chunks) > 1 {
+			opening = opening + "\n\n[...]\n\n" + chunks[1]
+		}
+		if len(opening) > 6000 {
+			opening = opening[:6000]
+		}
+		b.WriteString("Opening text:\n" + opening + "\n\n")
+		b.WriteString("Section summaries:\n" + strings.Join(summaries, "\n---\n"))
+		input = b.String()
+	} else {
+		input = strings.Join(chunks, "\n\n")
 	}
+	input = budgeted(cfg, input)
 
 	prompt := strings.ReplaceAll(tagPrompt, "{descriptions}", v.DescriptionsBlock())
 	prompt = strings.ReplaceAll(prompt, "{max_tags}", fmt.Sprint(cfg.Summarize.MaxTags))
-	prompt = strings.ReplaceAll(prompt, "{text}", text)
+	prompt = strings.ReplaceAll(prompt, "{text}", input)
 
 	out, err := chat(cfg, prompt, tagSchema(v.SortedKeys()))
 	if err != nil {
@@ -191,7 +308,10 @@ func TagDocument(cfg *config.Config, v *vocab.Vocabulary, text string) (*TagResu
 			"n/a", "na", "null", "other", "misc", "miscellaneous":
 			continue // LLM hedging is not a suggestion
 		}
-		if len(res.TagsOther) < 3 {
+		if vocabSet[t] {
+			continue // suggestions must extend the vocabulary, not duplicate it
+		}
+		if len(res.TagsOther) < 2 {
 			res.TagsOther = append(res.TagsOther, t)
 		}
 	}

@@ -25,6 +25,8 @@ const esc = (s) =>
 
 function notice(msg) { $("#notice").textContent = msg || ""; }
 
+const isPdf = (path) => /\.pdf$/i.test(path);
+
 /* ------------------------------------------------------------------ list */
 
 let allDocs = [];
@@ -33,7 +35,6 @@ let vocabNames = [];
 async function refresh() {
   const status = await api("/api/status");
   $("#pending-n").textContent = status.pending ? `(${status.pending})` : "";
-  document.body.classList.toggle("busy", false);
   return status;
 }
 
@@ -55,35 +56,120 @@ function renderList(docs) {
 
 function docCard(d) {
   const title = d.title || d.path.split("/").pop();
-  const card = el("div", { class: "doc", onclick: () => showDetail(d.id) },
-    el("h3", {}, esc(title)),
-    el("div", { class: "meta" },
-      [d.authors, d.year, `#${d.id}`].filter(Boolean).map(esc).join(" · ")),
+  const card = el("div", { class: "doc" },
+    el("div", { onclick: () => showDetail(d.id) },
+      el("h3", {}, esc(title)),
+      el("div", { class: "meta" },
+        [d.authors, d.year, `#${d.id}`].filter(Boolean).map(esc).join(" · ")),
+    ),
   );
+  const row = card.firstChild;
   if (d.status !== "done")
-    card.append(el("span", { class: "chip status" }, esc(d.status)));
-  if (d.summary) card.append(el("div", { class: "summary" }, esc(d.summary)));
+    row.append(el("span", { class: "chip status" }, esc(d.status)));
+  if (d.summary) row.append(el("div", { class: "summary" }, esc(d.summary)));
   const chips = el("div", { class: "chips" });
   for (const t of d.tags) chips.append(el("span", { class: "chip" }, esc(t)));
-  card.append(chips);
+  row.append(chips);
+  // per-document process: don't wait for the whole batch
+  if (d.status !== "done" || d.tags.length === 0) {
+    card.append(el("div", { class: "row" },
+      el("button", { class: "small", onclick: () => processIds([d.id], card) },
+        "Summarize + tag this document"),
+    ));
+  }
   return card;
+}
+
+async function processIds(ids, card) {
+  if (card) card.classList.add("busy");
+  notice(`Processing ${ids.length} document(s) — slow on CPU, keep the tab open…`);
+  try {
+    const results = await api("/api/process", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ids }),
+    });
+    const done = results.filter((r) => r.status === "done");
+    const failed = results.filter((r) => r.status === "error");
+    let msg = `Processed ${done.length} document(s)`;
+    for (const r of done) if (r.tags_other?.length) msg += ` — suggested new tags: ${r.tags_other.join(", ")}`;
+    if (failed.length) msg += `; ${failed.length} failed (status chip shows why)`;
+    notice(msg);
+    await loadDocs();
+    await refresh();
+  } catch (e) { notice("process: " + e.message); }
+  if (card) card.classList.remove("busy");
 }
 
 /* ---------------------------------------------------------------- detail */
 
-async function showDetail(id) {
+let currentDetail = null;
+
+async function showDetail(id, tab = "summary") {
   const data = await api(`/api/documents/${id}`);
   const d = data.document;
+  currentDetail = { id, data };
   $("#detail").classList.remove("hidden");
-  const body = $("#detail-body");
-  body.replaceChildren();
+  renderDetailTabs(tab);
+}
 
-  body.append(el("h2", {}, esc(d.title || d.path.split("/").pop())));
-  body.append(el("div", { class: "hint" }, esc(d.path)));
+function renderDetailTabs(active) {
+  const d = currentDetail.data.document;
+  const tabs = el("div", { class: "tabs" });
+  const mk = (id, label) => el("div", {
+    class: "tab" + (active === id ? " active" : ""),
+    onclick: () => renderDetailTabs(id),
+  }, label);
+  tabs.append(mk("summary", "Summary"));
+  tabs.append(mk("preview", "Preview" + (isPdf(d.path) ? "" : " (file)")));
+  tabs.append(mk("text", `Text (${currentDetail.data.chunks.length})`));
+  $("#detail-body").replaceChildren(tabs, detailContent(active));
+}
+
+function detailContent(tab) {
+  const { data, id } = currentDetail;
+  const d = data.document;
+
+  if (tab === "preview") {
+    if (isPdf(d.path)) {
+      const wrap = el("div", {},
+        el("p", { class: "hint" },
+          "Original file, rendered by the browser. Click a chunk under Text to jump to its page."),
+        el("iframe", { class: "preview-frame",
+          src: `/api/documents/${id}/file#page=${currentDetail.page || 1}` }));
+      return wrap;
+    }
+    return el("p", { class: "hint" },
+      `No inline preview for this file type — download: /api/documents/${id}/file?dl=1`);
+  }
+
+  if (tab === "text") {
+    const wrap = el("div", {});
+    for (const c of data.chunks) {
+      const loc = c.page > 0 ? `page ${c.page}` : `chunk ${c.seq}`;
+      const open = () => {
+        if (isPdf(d.path) && c.page > 0) {
+          currentDetail.page = c.page;
+          renderDetailTabs("preview");
+          return;
+        }
+        div.classList.toggle("open");
+      };
+      const div = el("div", { class: "chunk", onclick: open },
+        el("span", { class: "loc" }, esc(loc)), " ", esc(c.text.slice(0, 240) + (c.text.length > 240 ? "…" : "")));
+      wrap.append(div);
+    }
+    return wrap;
+  }
+
+  // summary tab: metadata editing + tags
+  const body = el("div", {},
+    el("h2", {}, esc(d.title || d.path.split("/").pop())),
+    el("div", { class: "hint" }, esc(d.path)));
   if (d.status !== "done")
-    body.append(el("div", { class: "hint" }, `status: ${esc(d.status)} ${d.error ? "— " + esc(d.error) : ""}`));
+    body.append(el("div", { class: "hint" },
+      `status: ${esc(d.status)} ${d.error ? "— " + esc(d.error) : ""}`));
 
-  // editable metadata
   body.append(el("label", {}, "title"));
   const inTitle = el("input", { value: d.title });
   body.append(inTitle);
@@ -96,7 +182,9 @@ async function showDetail(id) {
   body.append(el("label", {}, "summary"));
   const inSummary = el("textarea", {}, d.summary || "");
   body.append(inSummary);
-  body.append(el("button", {
+
+  const saveRow = el("div", { class: "row" });
+  saveRow.append(el("button", {
     onclick: async () => {
       await api(`/api/documents/${id}`, {
         method: "PATCH",
@@ -110,10 +198,21 @@ async function showDetail(id) {
       await loadDocs();
     },
   }, "Save metadata"));
+  saveRow.append(el("button", { class: "plain", onclick: () => processIds([id]) },
+    "Re-run summarize + tag"));
+  body.append(saveRow);
 
   // tags
-  body.append(el("label", {}, "tags (edit freely — manual tags are marked)"));
+  body.append(el("label", {}, "tags (edit freely — manual tags replace the LLM's)"));
   const chips = el("div", { class: "chips" });
+  const saveTags = async () => {
+    await api(`/api/documents/${id}/tags`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ tags: Object.keys(data.tag_sources) }),
+    });
+    await loadDocs();
+  };
   const renderChips = () => {
     chips.replaceChildren();
     for (const [t, src] of Object.entries(data.tag_sources)) {
@@ -123,46 +222,26 @@ async function showDetail(id) {
         title: "remove",
         onclick: async () => {
           delete data.tag_sources[t];
-          await saveTags(Object.keys(data.tag_sources));
+          await saveTags();
           renderChips();
         },
       }, "✕"));
       chips.append(chip);
     }
   };
-  const tagInput = el("input", { placeholder: "add a tag…" });
+  const tagInput = el("input", { placeholder: "add a tag…", list: "tag-list" });
   tagInput.addEventListener("keydown", async (e) => {
     if (e.key === "Enter" && tagInput.value.trim()) {
       const t = tagInput.value.trim().toLowerCase();
       if (!data.tag_sources[t]) data.tag_sources[t] = "manual";
-      await saveTags(Object.keys(data.tag_sources));
+      await saveTags();
       tagInput.value = "";
       renderChips();
     }
   });
-  const saveTags = async (tags) => {
-    await api(`/api/documents/${id}/tags`, {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ tags }),
-    });
-    await loadDocs();
-  };
-  const datalist = el("datalist", { id: "tag-list" });
-  body.append(datalist);
-  tagInput.setAttribute("list", "tag-list");
   renderChips();
   body.append(chips, tagInput);
-
-  // chunks
-  body.append(el("label", {}, `text (${data.chunks.length} chunks)`));
-  for (const c of data.chunks) {
-    const loc = c.page > 0 ? `page ${c.page}` : `chunk ${c.seq}`;
-    const div = el("div", { class: "chunk", onclick: () => {
-      div.style.maxHeight = div.style.maxHeight ? "" : "none";
-    }}, el("span", { class: "loc" }, esc(loc)), " ", esc(c.text.slice(0, 240) + (c.text.length > 240 ? "…" : "")));
-    body.append(div);
-  }
+  return body;
 }
 
 $("#detail-close").onclick = () => $("#detail").classList.add("hidden");
@@ -180,37 +259,26 @@ async function doSearch() {
       const list = $("#list");
       list.replaceChildren();
       if (!hits.length) { list.append(el("p", { class: "hint" }, "no matches")); return; }
-      const byDoc = new Map();
       for (const h of hits) {
         const d = allDocs.find((x) => x.id === h.doc_id) ||
           { id: h.doc_id, title: h.title, path: h.path, tags: [] };
-        byDoc.set(h.doc_id, d);
-        list.append(el("div", {
-          class: "doc",
-          onclick: () => showDetail(h.doc_id),
-        },
+        list.append(el("div", { class: "doc", onclick: () => showDetail(h.doc_id) },
           el("h3", {}, esc(d.title || h.path.split("/").pop())),
           el("span", { class: "score" }, `cosine ${h.snippets[0].score.toFixed(3)}`),
           el("div", { class: "summary" },
-            ...renderSemSnippets(h.snippets, q)),
+            ...h.snippets.slice(0, 2).map((s) =>
+              el("div", {}, esc((s.page > 0 ? `p.${s.page}: ` : "") + s.text + "…")))),
         ));
       }
     } else {
       if (!allDocs.length) await loadDocs();
       const ids = [...new Set(hits.map((h) => h.doc_id))];
-      renderList(allDocs.filter((d) => ids.includes(d.id)));
-      // highlight snippets in order they appear
-      for (const h of hits) {
-        const card = [...document.querySelectorAll(".doc")]
-          .find((c) => c.dataset.id == h.doc_id);
-      }
+      const order = new Map(ids.map((id, i) => [id, i]));
+      const docs = allDocs.filter((d) => ids.includes(d.id));
+      docs.sort((a, b) => order.get(a.id) - order.get(b.id));
+      renderList(docs);
     }
   } catch (e) { notice("search: " + e.message); }
-}
-
-function renderSemSnippets(snippets, q) {
-  return snippets.slice(0, 2).map((s) =>
-    el("div", { class: "summary" }, esc((s.page > 0 ? `p.${s.page}: ` : "") + s.text + "…")));
 }
 
 $("#btn-search").onclick = doSearch;
@@ -249,23 +317,7 @@ $("#ingest-go").onclick = async () => {
 
 /* --------------------------------------------------------------- process */
 
-$("#btn-process").onclick = async () => {
-  notice("Processing pending documents — this is slow on CPU, keep the tab open…");
-  $("#btn-process").textContent = "Processing…";
-  try {
-    const results = await api("/api/process", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({}),
-    });
-    const done = results.filter((r) => r.status === "done").length;
-    const failed = results.filter((r) => r.status === "error").length;
-    notice(`Processed ${done} document(s)` + (failed ? `, ${failed} failed — see status chips` : "") + ". Suggested tags may need review: open Vocabulary.");
-  } catch (e) { notice("process: " + e.message); }
-  $("#btn-process").textContent = "Process pending ";
-  await loadDocs();
-  await refresh();
-};
+$("#btn-process").onclick = () => processIds([]);
 
 /* ------------------------------------------------------------------ vocab */
 
@@ -343,7 +395,7 @@ $("#vocab-add").onclick = async () => {
   try {
     await refresh();
     const st = await api("/api/status");
-    if (!st.llm_up) notice("Model server is not running — search still works, but process/semantic need the llama-servers (start via vellum.sh).");
+    if (!st.llm_up) notice("Model server is not running — search still works, but summarize/tag/semantic need the llama-servers (start via vellum.sh).");
     await loadDocs();
   } catch (e) {
     notice("API error: " + e.message);

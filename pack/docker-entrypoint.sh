@@ -9,7 +9,7 @@ set -e
     --chat-template-file /templates/qwen3-nothink.jinja \
     > /tmp/llm-server.log 2>&1 &
 /llm/cpu/llama-server -m /models/nomic-embed-text-v1.5.gguf \
-    --host 127.0.0.1 --port 8082 -np 1 --embeddings \
+    --host 127.0.0.1 --port 8082 -np 1 --embeddings --ubatch-size 2048 \
     > /tmp/embed-server.log 2>&1 &
 
 up() { curl -fsS -o /dev/null "http://127.0.0.1:$1/health" 2>/dev/null; }
@@ -41,6 +41,7 @@ models:
 llm:
   think: false
   temperature: 0.3
+  num_ctx: 8192
 
 ocr:
   langs: eng+chi_sim+fin

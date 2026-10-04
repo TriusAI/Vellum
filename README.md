@@ -65,7 +65,7 @@ To add a language, drop its `.traineddata` there and extend `ocr.langs`.
 ```bash
 # 1. index things
 vellum ingest ~/papers/that-scan.pdf ~/books/
-vellum process            # summarize + tag everything pending (slow on CPU — batch it)
+vellum process [ID...]     # summarize + tag pending (all, or specific docs by id)
 
 # 2. find things
 vellum search "quantum error correction"     # FTS5 keyword
@@ -78,7 +78,7 @@ vellum show 42
 # 4. curate the vocabulary
 vellum vocab list
 vellum vocab review                          # what the LLM suggested beyond the vocabulary
-vellum vocab promote marine-biology "Study of ocean life"   # adopt a suggestion
+vellum vocab promote marine-biology "Study of ocean life"   # adopt a suggested tag
 vellum vocab add my-new-tag "what it covers"
 
 # 5. browse: local web UI (search, read summaries/chunks, edit metadata,
@@ -164,8 +164,22 @@ The SQLite schema is identical to the retired Python prototype's, so a
 
 - **CPU speed**: Qwen3-4B runs at a few tokens/s on a typical 8-core CPU.
   A 20-page paper takes a few minutes; a 300-page book considerably longer.
-  Ingest/OCR/FTS never touch the LLM and are fast. On a GPU later: set
-  `llm.think: true`, and rebuild llama-server without `-DGGML_CUDA=OFF`.
+  Ingest/OCR/FTS never touch the LLM and are fast. Long documents use a
+  hierarchical reduce; tagging reads the computed summaries plus the
+  opening text, not a huge raw prefix. To speed up further: process
+  documents individually (`vellum process ID`, per-doc button in the web
+  UI), raise `summarize.chunk_chars` (coarser map calls), or swap in a
+  smaller model — drop `qwen3-1.7b.gguf` into the pack's `models/`, set
+  `models.llm` (and `VELLUM_LLM_GGUF` for `vellum.sh`), restart the
+  launcher. No rebuild needed.
+- **Context window**: the client tokenizes inputs (llama-server `/tokenize`)
+  and trims to fit `llm.num_ctx` (pack default 8192; raise it and the server -c if you have the memory), so arbitrarily
+  large documents can't produce exceeds-context errors; the chat server
+  must be started with a matching `-c`.
+- **Vocabulary growth**: the tagging prompt invites the model to propose
+  new tags (`tags_other`, surfaced by the Vocabulary dialog and
+  `vellum vocab review`); promote the keepers and the vocabulary grows
+  with your library instead of staying stagnant.
 - **Server lifecycle**: llama.cpp serves one model per process, so the
   launcher runs two small llama-servers (chat :8081, embeddings :8082) and
   reuses them if they're already up.

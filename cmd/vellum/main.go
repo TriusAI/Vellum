@@ -45,7 +45,7 @@ file (FTS5). Models served locally by llama.cpp llama-server.
 `
 
 // versionString is reported by --version, /api/status and `vellum agent`.
-const versionString = "0.2.0"
+const versionString = "0.3.0"
 
 // documentColumns is the explicit projection used everywhere (never SELECT *,
 // so the scan order is fixed even if the schema gains columns).
@@ -180,7 +180,7 @@ func cmdIngest(cfg *config.Config, args []string) {
 
 func cmdProcess(cfg *config.Config, args []string) {
 	fs := flag.NewFlagSet("process", flag.ExitOnError)
-	limit := fs.Int("limit", 0, "max documents to process")
+	limit := fs.Int("limit", 0, "max documents to process (when no ids given)")
 	fs.Parse(args)
 
 	v := mustLoadVocab(cfg)
@@ -190,11 +190,22 @@ func cmdProcess(cfg *config.Config, args []string) {
 	}
 	if !llm.Available(cfg.Tools.LLMURL) {
 		log.Fatalf("no llama-server at %s — start it with the vellum launcher, or:\n"+
-			"  llama-server -m %s --host 127.0.0.1 --port %s --jinja",
-			cfg.Tools.LLMURL, cfg.Models.LLM, portOf(cfg.Tools.LLMURL))
+			"  llama-server -m %s --host 127.0.0.1 --port %s -c %d --jinja",
+			cfg.Tools.LLMURL, cfg.Models.LLM, portOf(cfg.Tools.LLMURL), cfg.LLM.NumCtx)
 	}
+
+	// positional ids: process specific documents (any status)
+	var ids []int64
+	for _, a := range fs.Args() {
+		id, err := strconv.ParseInt(a, 10, 64)
+		if err != nil {
+			log.Fatalf("process: not a document id: %q", a)
+		}
+		ids = append(ids, id)
+	}
+
 	conn := mustOpen(cfg)
-	results, err := ingest.ProcessPending(cfg, conn, v, *limit)
+	results, err := ingest.ProcessPending(cfg, conn, v, ids, *limit)
 	if err != nil {
 		log.Fatalf("process: %s", err)
 	}
@@ -208,7 +219,13 @@ func cmdProcess(cfg *config.Config, args []string) {
 			done++
 		}
 	}
-	fmt.Printf("processed %d document(s)\n", done)
+	if len(ids) == 0 {
+		fmt.Printf("processed %d document(s)\n", done)
+		return
+	}
+	for _, r := range results {
+		fmt.Printf("#%d %s — %s\n", r.DocID, r.Path, r.Status)
+	}
 }
 
 func cmdSearch(cfg *config.Config, args []string) {
