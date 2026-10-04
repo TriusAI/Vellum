@@ -225,7 +225,7 @@ if ! up "$LLM_PORT"; then
     # chat server: full context window, qwen3 no-think template
     start_llm_server "$LLM_PORT" "$LLM_GGUF" "llm-server.log" \
         -c 8192 --jinja --chat-template-file "$TEMPLATE"
-    echo "vellum: started chat server on :$LLM_PORT"
+    echo "vellum: chat server on :$LLM_PORT ($LLM_GGUF; backend: $backend)"
 fi
 if ! up "$EMBED_PORT"; then
     start_embed_server "$EMBED_PORT" "$EMBED_GGUF" "embed-server.log"

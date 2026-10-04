@@ -13,6 +13,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"vellum/internal/config"
 	"vellum/internal/db"
@@ -30,6 +32,9 @@ var webFS embed.FS
 type Server struct {
 	cfg  *config.Config
 	conn *sql.DB
+
+	mu       sync.Mutex
+	progress map[string]any // live processing state (single-user tool)
 }
 
 // New creates a Server.
@@ -41,6 +46,7 @@ func New(cfg *config.Config, conn *sql.DB) *Server {
 func (s *Server) Mux() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/status", s.status)
+	mux.HandleFunc("GET /api/progress", s.getProgress)
 	mux.HandleFunc("GET /api/documents", s.documents)
 	mux.HandleFunc("GET /api/documents/{id}", s.document)
 	mux.HandleFunc("GET /api/documents/{id}/file", s.file)
@@ -383,7 +389,18 @@ func (s *Server) postProcess(w http.ResponseWriter, r *http.Request) {
 			" — start it with the vellum launcher")
 		return
 	}
-	results, err := ingest.ProcessPending(s.cfg, s.conn, v, body.IDs, body.Limit)
+	s.mu.Lock()
+	s.progress = map[string]any{"running": true, "message": "starting", "updated": time.Now().Format(time.RFC3339)}
+	s.mu.Unlock()
+	results, err := ingest.ProcessPending(s.cfg, s.conn, v, body.IDs, body.Limit,
+		func(msg string) {
+			s.mu.Lock()
+			s.progress = map[string]any{"running": true, "message": msg, "updated": time.Now().Format(time.RFC3339)}
+			s.mu.Unlock()
+		})
+	s.mu.Lock()
+	s.progress = map[string]any{"running": false, "message": "", "updated": time.Now().Format(time.RFC3339)}
+	s.mu.Unlock()
 	if err != nil {
 		writeErr(w, 500, err.Error())
 		return
@@ -426,6 +443,18 @@ func (s *Server) file(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/pdf")
 	}
 	http.ServeContent(w, r, filepath.Base(path), fi.ModTime(), f)
+}
+
+// getProgress reports the live processing state (polled by the UI while
+// a process request is in flight).
+func (s *Server) getProgress(w http.ResponseWriter, r *http.Request) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	st := s.progress
+	if st == nil {
+		st = map[string]any{"running": false, "message": ""}
+	}
+	writeJSON(w, 200, st)
 }
 
 func (s *Server) search(w http.ResponseWriter, r *http.Request) {

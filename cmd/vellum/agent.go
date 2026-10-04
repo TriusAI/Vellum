@@ -46,10 +46,12 @@ exceeds-context errors on large documents.
 ## Performance
 process cost scales with document length (map over ~6000-char chunks).
 Very long documents use a hierarchical reduce and are tagged from their
-summaries + opening text, not a huge raw prefix. To go faster:
-- swap the chat model for a smaller one (e.g. qwen3-1.7b): drop the GGUF in
-  the pack's models/ and set models.llm (+ VELLUM_LLM_GGUF for vellum.sh,
-  or start llama-server with -m qwen3-1.7b.gguf yourself). No rebuild needed.
+summaries + opening text, not a huge raw prefix. A 30-page paper is
+~10-15 sections = several minutes even on GPU — progress is reported
+live (CLI lines, /api/progress in the web UI). To go faster:
+- swap the chat model for qwen3-1.7b (ships in the pack's models/):
+  VELLUM_LLM_GGUF=qwen3-1.7b.gguf ./vellum.sh serve   — roughly 2x
+  faster (smaller model, constrained tagging verified identical).
 - raise summarize.chunk_chars for fewer, coarser map calls (lower fidelity).
 - process documents individually (vellum process ID) — results appear per
   document, don't batch-wait.

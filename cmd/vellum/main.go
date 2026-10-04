@@ -205,7 +205,8 @@ func cmdProcess(cfg *config.Config, args []string) {
 	}
 
 	conn := mustOpen(cfg)
-	results, err := ingest.ProcessPending(cfg, conn, v, ids, *limit)
+	results, err := ingest.ProcessPending(cfg, conn, v, ids, *limit,
+		func(msg string) { log.Printf("  %s", msg) })
 	if err != nil {
 		log.Fatalf("process: %s", err)
 	}

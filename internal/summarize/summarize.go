@@ -11,7 +11,6 @@ package summarize
 
 import (
 	"fmt"
-	"log"
 	"strings"
 
 	"vellum/internal/config"
@@ -142,14 +141,23 @@ func budgeted(cfg *config.Config, text string) string {
 // MapSummaries runs the map phase: one summary per chunk. Returns
 // (summaries, chunks); for single-chunk documents the map phase is skipped
 // and summaries is nil.
-func MapSummaries(cfg *config.Config, text string) ([]string, []string, error) {
+// ProgressFunc receives live human-readable progress updates; nil is fine.
+type ProgressFunc func(message string)
+
+func report(cb ProgressFunc, format string, args ...any) {
+	if cb != nil {
+		cb(fmt.Sprintf(format, args...))
+	}
+}
+
+func MapSummaries(cfg *config.Config, text string, cb ProgressFunc) ([]string, []string, error) {
 	chunks := chunkText(text, cfg.Summarize.ChunkChars)
 	if len(chunks) <= 1 {
 		return nil, chunks, nil
 	}
-	log.Printf("map phase: %d chunks", len(chunks))
 	summaries := make([]string, 0, len(chunks))
-	for _, c := range chunks {
+	for i, c := range chunks {
+		report(cb, "summarizing section %d/%d", i+1, len(chunks))
 		out, err := chat(cfg, strings.ReplaceAll(mapPrompt, "{text}", c), summarySchema)
 		if err != nil {
 			return nil, nil, err
@@ -162,19 +170,20 @@ func MapSummaries(cfg *config.Config, text string) ([]string, []string, error) {
 // Summarize produces one paragraph via map-reduce; short documents get a
 // single direct pass.
 func Summarize(cfg *config.Config, text string) (string, error) {
-	summaries, chunks, err := MapSummaries(cfg, text)
+	summaries, chunks, err := MapSummaries(cfg, text, nil)
 	if err != nil {
 		return "", err
 	}
-	return SummarizeFrom(cfg, chunks, summaries)
+	return SummarizeFrom(cfg, chunks, summaries, nil)
 }
 
 // SummarizeFrom finishes the summarization: direct pass for short documents,
 // hierarchical reduce for long ones (chunk summaries are merged in batches
 // until one final call fits the context window).
-func SummarizeFrom(cfg *config.Config, chunks, summaries []string) (string, error) {
+func SummarizeFrom(cfg *config.Config, chunks, summaries []string, cb ProgressFunc) (string, error) {
 	if summaries == nil {
 		// short document: single direct pass over the (budgeted) text
+		report(cb, "summarizing document")
 		body := budgeted(cfg, strings.Join(chunks, "\n\n"))
 		out, err := chat(cfg, strings.ReplaceAll(directPrompt, "{text}", body), summarySchema)
 		if err != nil {
@@ -194,6 +203,7 @@ func SummarizeFrom(cfg *config.Config, chunks, summaries []string) (string, erro
 				total += 5
 			}
 		}
+		report(cb, "reducing %d section summaries", len(summaries))
 		if len(summaries) <= 1 || total <= budgetChars {
 			return reduceCall(cfg, summaries)
 		}
@@ -217,7 +227,7 @@ func SummarizeFrom(cfg *config.Config, chunks, summaries []string) (string, erro
 			return reduceCall(cfg, summaries)
 		}
 		level++
-		log.Printf("reduce level %d: %d batches of summaries", level, len(batches))
+		report(cb, "reduce level %d: %d batches", level, len(batches))
 		next := make([]string, 0, len(batches))
 		for _, b := range batches {
 			out, err := reduceCall(cfg, b)
@@ -257,7 +267,7 @@ type TagResult struct {
 // opening text (title pages carry the bibliographic metadata) instead of a
 // raw-text prefix — cheaper and enough signal for topic tagging.
 func TagDocument(cfg *config.Config, v *vocab.Vocabulary,
-	chunks, summaries []string, finalSummary string) (*TagResult, error) {
+	chunks, summaries []string, finalSummary string, cb ProgressFunc) (*TagResult, error) {
 
 	var input string
 	if len(summaries) > 0 {
@@ -278,6 +288,7 @@ func TagDocument(cfg *config.Config, v *vocab.Vocabulary,
 	}
 	input = budgeted(cfg, input)
 
+	report(cb, "choosing tags")
 	prompt := strings.ReplaceAll(tagPrompt, "{descriptions}", v.DescriptionsBlock())
 	prompt = strings.ReplaceAll(prompt, "{max_tags}", fmt.Sprint(cfg.Summarize.MaxTags))
 	prompt = strings.ReplaceAll(prompt, "{text}", input)

@@ -187,8 +187,12 @@ func ingestOne(cfg *config.Config, conn *sql.DB, path string, reprocess bool) (s
 // pending ('ingested') documents, limited by limit (0 = no limit); with ids
 // it processes exactly those, whatever their status (a 'done' document gets
 // a fresh summary and tags).
+// ProcessPending summarizes and tags documents. progress (may be nil)
+// receives live updates. With ids empty it takes all pending
+// ('ingested') documents, limited by limit (0 = no limit); with ids it
+// processes exactly those, whatever their status.
 func ProcessPending(cfg *config.Config, conn *sql.DB, v *vocab.Vocabulary,
-	ids []int64, limit int) ([]ProcessResult, error) {
+	ids []int64, limit int, progress func(string)) ([]ProcessResult, error) {
 	type docRow struct {
 		id                         int64
 		path, title, authors, year string
@@ -234,9 +238,12 @@ func ProcessPending(cfg *config.Config, conn *sql.DB, v *vocab.Vocabulary,
 	}
 
 	results := []ProcessResult{}
-	for _, d := range docs {
+	for i, d := range docs {
+		if progress != nil {
+			progress(fmt.Sprintf("document %d/%d: %s", i+1, len(docs), filepath.Base(d.path)))
+		}
 		log.Printf("processing %s", d.path)
-		res, err := processOne(cfg, conn, v, d.id, d.title, d.authors, d.year)
+		res, err := processOne(cfg, conn, v, d.id, d.title, d.authors, d.year, progress)
 		if err != nil {
 			log.Printf("processing failed for %s: %s", d.path, err)
 			conn.Exec("UPDATE documents SET status='error', error=? WHERE id=?",
@@ -253,7 +260,7 @@ func ProcessPending(cfg *config.Config, conn *sql.DB, v *vocab.Vocabulary,
 }
 
 func processOne(cfg *config.Config, conn *sql.DB, v *vocab.Vocabulary,
-	docID int64, title, authors, year string) (*summarize.TagResult, error) {
+	docID int64, title, authors, year string, progress func(string)) (*summarize.TagResult, error) {
 	text, err := db.DocumentText(conn, docID)
 	if err != nil {
 		return nil, err
@@ -261,15 +268,15 @@ func processOne(cfg *config.Config, conn *sql.DB, v *vocab.Vocabulary,
 	// one map phase feeds both the summary and the tagging call —
 	// long documents are tagged from summaries + opening text, not by
 	// re-sending a huge raw-text prefix
-	summaries, chunks, err := summarize.MapSummaries(cfg, text)
+	summaries, chunks, err := summarize.MapSummaries(cfg, text, progress)
 	if err != nil {
 		return nil, err
 	}
-	summary, err := summarize.SummarizeFrom(cfg, chunks, summaries)
+	summary, err := summarize.SummarizeFrom(cfg, chunks, summaries, progress)
 	if err != nil {
 		return nil, err
 	}
-	tags, err := summarize.TagDocument(cfg, v, chunks, summaries, summary)
+	tags, err := summarize.TagDocument(cfg, v, chunks, summaries, summary, progress)
 	if err != nil {
 		return nil, err
 	}

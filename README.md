@@ -168,10 +168,11 @@ The SQLite schema is identical to the retired Python prototype's, so a
   hierarchical reduce; tagging reads the computed summaries plus the
   opening text, not a huge raw prefix. To speed up further: process
   documents individually (`vellum process ID`, per-doc button in the web
-  UI), raise `summarize.chunk_chars` (coarser map calls), or swap in a
-  smaller model — drop `qwen3-1.7b.gguf` into the pack's `models/`, set
-  `models.llm` (and `VELLUM_LLM_GGUF` for `vellum.sh`), restart the
-  launcher. No rebuild needed.
+  UI), raise `summarize.chunk_chars` (coarser map calls), or swap in the
+  bundled smaller model: `VELLUM_LLM_GGUF=qwen3-1.7b.gguf ./vellum.sh serve`
+  (it ships in the pack's `models/` and is roughly 2× faster). Progress
+  is reported live — per-section lines in the CLI, a live status line in
+  the web UI. No rebuild needed.
 - **Context window**: the client tokenizes inputs (llama-server `/tokenize`)
   and trims to fit `llm.num_ctx` (pack default 8192; raise it and the server -c if you have the memory), so arbitrarily
   large documents can't produce exceeds-context errors; the chat server

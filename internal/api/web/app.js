@@ -80,9 +80,28 @@ function docCard(d) {
   return card;
 }
 
+let progressTimer = null;
+
+function startProgressPolling(prefix) {
+  const poll = async () => {
+    try {
+      const p = await api("/api/progress");
+      if (p.running && p.message)
+        notice(`${prefix} — ${p.message}…`);
+    } catch (e) { /* transient */ }
+  };
+  progressTimer = setInterval(poll, 2000);
+}
+
+function stopProgressPolling() {
+  if (progressTimer) { clearInterval(progressTimer); progressTimer = null; }
+}
+
 async function processIds(ids, card) {
   if (card) card.classList.add("busy");
-  notice(`Processing ${ids.length} document(s) — slow on CPU, keep the tab open…`);
+  const prefix = ids.length === 1 ? "Processing document" : `Processing ${ids.length} documents`;
+  notice(`${prefix} — live progress below; this is slow, keep the tab open…`);
+  startProgressPolling(prefix);
   try {
     const results = await api("/api/process", {
       method: "POST",
@@ -95,9 +114,11 @@ async function processIds(ids, card) {
     for (const r of done) if (r.tags_other?.length) msg += ` — suggested new tags: ${r.tags_other.join(", ")}`;
     if (failed.length) msg += `; ${failed.length} failed (status chip shows why)`;
     notice(msg);
+    stopProgressPolling();
     await loadDocs();
     await refresh();
   } catch (e) { notice("process: " + e.message); }
+  stopProgressPolling();
   if (card) card.classList.remove("busy");
 }
 

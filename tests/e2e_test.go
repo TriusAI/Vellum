@@ -279,7 +279,7 @@ func TestE2E(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ingest.ProcessPending(cfg, conn, v, nil, 0); err != nil {
+	if _, err := ingest.ProcessPending(cfg, conn, v, nil, 0, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -303,7 +303,7 @@ func TestE2E(t *testing.T) {
 	if err != nil || st2.Added != 1 {
 		t.Fatalf("long doc not ingested: %+v (%v)", st2, err)
 	}
-	longResults, err := ingest.ProcessPending(cfg, conn, v, nil, 0)
+	longResults, err := ingest.ProcessPending(cfg, conn, v, nil, 0, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -323,7 +323,7 @@ func TestE2E(t *testing.T) {
 	}
 
 	// ---- per-id processing: re-run one document by id
-	one, err := ingest.ProcessPending(cfg, conn, v, []int64{1}, 0)
+	one, err := ingest.ProcessPending(cfg, conn, v, []int64{1}, 0, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
