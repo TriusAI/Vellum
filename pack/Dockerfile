@@ -6,9 +6,13 @@
 # Run (library lives in the mounted /data):
 #   docker run --rm -v "$PWD:/data" vellum ingest /data/library
 #   docker run --rm -v "$PWD:/data" vellum search "epistemic humility" --semantic
-FROM ollama/ollama:latest AS ollama
+# Optional registry prefix for restricted networks, e.g. Google's official
+# Docker Hub mirror:  docker build --build-arg REGISTRY_PREFIX=mirror.gcr.io/
+# (docker.io is the default and needs no prefix)
+ARG REGISTRY_PREFIX=""
+FROM ${REGISTRY_PREFIX}ollama/ollama:latest AS ollama
 
-FROM ubuntu:24.04
+FROM ${REGISTRY_PREFIX}ubuntu:24.04
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         mupdf-tools tesseract-ocr \

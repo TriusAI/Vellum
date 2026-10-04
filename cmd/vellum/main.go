@@ -44,14 +44,24 @@ file (FTS5). Models served locally by Ollama.
 const documentColumns = "id, path, title, authors, year, summary, status"
 
 type document struct {
-	ID                    int64
-	Path, Title, Authors  string
-	Year, Summary, Status string
+	ID      int64
+	Path    string
+	Title   string
+	Authors string
+	Year    string
+	Summary string
+	Status  string
 }
 
 func (d *document) scan(sc scannable) error {
-	return sc.Scan(&d.ID, &d.Path, &d.Title, &d.Authors, &d.Year,
-		&d.Summary, &d.Status)
+	var title, authors, year, summary sql.NullString
+	if err := sc.Scan(&d.ID, &d.Path, &title, &authors, &year, &summary,
+		&d.Status); err != nil {
+		return err
+	}
+	d.Title, d.Authors, d.Year, d.Summary =
+		title.String, authors.String, year.String, summary.String
+	return nil
 }
 
 type scannable interface {
@@ -162,18 +172,42 @@ func cmdProcess(cfg *config.Config, args []string) {
 }
 
 func cmdSearch(cfg *config.Config, args []string) {
-	fs := flag.NewFlagSet("search", flag.ExitOnError)
-	semantic := fs.Bool("semantic", false, "cosine similarity over chunk embeddings")
-	limit := fs.Int("limit", 20, "max results")
-	fs.Parse(args)
-	if fs.NArg() < 1 {
+	// Go's flag package requires flags before positionals, but "search
+	// QUERY --semantic" is the natural order (and what the README shows).
+	// Pull the known flags from anywhere in the args, then treat the rest as
+	// the query.
+	semantic := false
+	limit := 20
+	var positional []string
+	for i := 0; i < len(args); i++ {
+		switch {
+		case args[i] == "--semantic" || args[i] == "-semantic":
+			semantic = true
+		case args[i] == "--semantic=false":
+			semantic = false
+		case args[i] == "--limit" || args[i] == "-limit":
+			if i+1 < len(args) {
+				if n, err := strconv.Atoi(args[i+1]); err == nil {
+					limit = n
+					i++
+				}
+			}
+		case strings.HasPrefix(args[i], "--limit="):
+			if n, err := strconv.Atoi(strings.TrimPrefix(args[i], "--limit=")); err == nil {
+				limit = n
+			}
+		default:
+			positional = append(positional, args[i])
+		}
+	}
+	if len(positional) < 1 {
 		log.Fatalf("search needs a query")
 	}
-	query := strings.Join(fs.Args(), " ")
+	query := strings.Join(positional, " ")
 	conn := mustOpen(cfg)
 
-	if *semantic {
-		hits, err := search.Semantic(cfg, conn, query, *limit)
+	if semantic {
+		hits, err := search.Semantic(cfg, conn, query, limit)
 		if err != nil {
 			log.Fatalf("search: %s", err)
 		}
@@ -191,7 +225,7 @@ func cmdSearch(cfg *config.Config, args []string) {
 		return
 	}
 
-	hits, err := search.Keyword(conn, query, *limit)
+	hits, err := search.Keyword(conn, query, limit)
 	if err != nil {
 		log.Fatalf("search: %s", err)
 	}

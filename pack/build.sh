@@ -67,6 +67,21 @@ else
     OLLAMA="$STAGE/dl/bin/ollama"
 fi
 cp "$OLLAMA" "$STAGE/bin/ollama"
+
+# Inference runtime: newer Ollama runs models via a separate llama-server
+# binary with RUNPATH $ORIGIN — it must sit in the same directory as its
+# shared libs. Ollama looks for it relative to its own executable, and
+# "<bindir>/llama-server" is the first path searched, so everything goes in
+# bin/. CUDA/Vulkan variants are skipped: this is a CPU pack.
+OLLAMA_LIB="$(dirname "$(dirname "$OLLAMA")")/lib/ollama"
+if [ -d "$OLLAMA_LIB" ]; then
+    for f in "$OLLAMA_LIB"/*; do
+        case "$f" in
+            *cuda*|*vulkan) ;; # skip GPU backends (~2 GB)
+            *) cp -L "$f" "$STAGE/bin/" 2>/dev/null || true ;;
+        esac
+    done
+fi
 rm -rf "$STAGE/dl"
 
 echo "==> models"
@@ -115,13 +130,17 @@ cat > "$STAGE/vellum.sh" <<'EOF'
 #!/bin/sh
 # Vellum portable launcher: starts the bundled ollama if none is running,
 # then hands off to the vellum binary. Everything stays inside this folder.
+# Set OLLAMA_HOST to use a non-default port (and set tools.ollama_url in
+# config.yaml to match).
 set -e
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 export OLLAMA_MODELS="$ROOT/models"
 export LD_LIBRARY_PATH="$ROOT/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 export TESSDATA_PREFIX="$ROOT/tessdata"
+: "${OLLAMA_HOST:=127.0.0.1:11434}"
+export OLLAMA_HOST
 
-up() { curl -fsS -o /dev/null http://localhost:11434/api/tags 2>/dev/null; }
+up() { curl -fsS -o /dev/null "http://$OLLAMA_HOST/api/tags" 2>/dev/null; }
 
 if ! up; then
     "$ROOT/bin/ollama" serve >/dev/null 2>&1 &
