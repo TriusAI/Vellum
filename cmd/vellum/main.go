@@ -48,7 +48,7 @@ file (FTS5). Models served locally by llama.cpp llama-server.
 `
 
 // versionString is reported by --version, /api/status and `vellum agent`.
-const versionString = "0.9.0"
+const versionString = "0.10.0"
 
 // documentColumns is the explicit projection used everywhere (never SELECT *,
 // so the scan order is fixed even if the schema gains columns).
@@ -146,6 +146,8 @@ func main() {
 		cmdReextract(cfg, args[1:])
 	case "backends":
 		cmdBackends(cfg, args[1:])
+	case "regenerate":
+		cmdRegenerate(cfg, args[1:])
 	case "serve":
 		cmdServe(cfg, args[1:])
 	case "agent", "agents":
@@ -892,6 +894,41 @@ func cmdReextract(cfg *config.Config, args []string) {
 	fmt.Printf("#%d: re-extracted (%d chunks, %d OCR pages) — status back to pending;\n"+
 		"process it again to refresh summary/tags: vellum process %d\n",
 		id, len(res.Chunks), res.OCRPages, id)
+}
+
+// cmdRegenerate rebuilds individual metadata fields in place, without a
+// full reprocess: meta (title/authors/year), summary, tags, category,
+// kind. Default (no fields) regenerates the LLM-derived set.
+func cmdRegenerate(cfg *config.Config, args []string) {
+	if len(args) < 1 {
+		log.Fatalf("usage: vellum regenerate ID [meta|summary|tags|category|kind ...]")
+	}
+	id, err := strconv.ParseInt(args[0], 10, 64)
+	if err != nil {
+		log.Fatalf("regenerate expects a numeric document id")
+	}
+	fields := args[1:]
+	if len(fields) == 0 {
+		fields = []string{"meta", "summary", "tags", "category"}
+	}
+	conn := mustOpen(cfg)
+	v, err := vocab.Load(cfg.VocabPath)
+	if err != nil {
+		log.Fatalf("regenerate: %s", err)
+	}
+	if len(v.Tags) == 0 {
+		log.Fatalf("vocab.yaml is empty — add tags first")
+	}
+	if !llm.AvailableFor(cfg.LLM.Backend, cfg.Tools.LLMURL) {
+		log.Fatalf("no chat backend at %s (llm.backend=%s) — start ollama/the vellum launcher or your own llama-server",
+			cfg.Tools.LLMURL, cfg.LLM.Backend)
+	}
+	applied, err := ingest.Regenerate(cfg, conn, v, id, fields,
+		func(msg string) { fmt.Println("  …", msg) })
+	if err != nil {
+		log.Fatalf("regenerate: %s", err)
+	}
+	fmt.Printf("#%d: regenerated %v\n", id, applied)
 }
 
 // cmdBackends prints the per-channel backend decision for the shell

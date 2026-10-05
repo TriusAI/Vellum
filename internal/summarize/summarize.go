@@ -403,3 +403,40 @@ func strSlice(v any) []string {
 	}
 	return out
 }
+
+// ---------------------------------------------------------------------------
+// Individual metadata regeneration (per-field, cheap single calls)
+
+const metaPrompt = `From the following opening text of a document, identify its
+bibliographic metadata: the document's title, the author(s) as listed, and the
+publication year (4 digits) if confidently inferable.
+
+Opening text:
+{text}`
+
+func metaSchema() map[string]any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"title":   map[string]any{"type": "string"},
+			"authors": map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+			"year":    map[string]any{"type": "string"},
+		},
+		"required": []string{"title", "authors", "year"},
+	}
+}
+
+// RegenMeta reconstructs title/authors/year from the opening text with
+// one constrained call — the per-field repair for bad metadata.
+func RegenMeta(cfg *config.Config, opening string) (*TagResult, error) {
+	out, err := chat(cfg, strings.ReplaceAll(metaPrompt, "{text}", opening),
+		metaSchema())
+	if err != nil {
+		return nil, err
+	}
+	return &TagResult{
+		Title:   str(out["title"]),
+		Authors: strSlice(out["authors"]),
+		Year:    str(out["year"]),
+	}, nil
+}

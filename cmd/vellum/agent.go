@@ -102,6 +102,24 @@ text. The heavy work happens in process:
 So after ingesting scans, just run process and watch the progress
 line; ingest "hang" on big scans is fixed.
 
+## Regenerate individual metadata
+Per-field rebuilds WITHOUT a full reprocess ("meta" = title/authors/year
+via one cheap call; "summary" = the kind's fast path; "tags"/"category"
+= one tag call applied to that field; "kind" = deterministic
+reclassify on current text — user-kind pins LIFT only when the user
+explicitly re-generates kind/category):
+    vellum regenerate ID [meta|summary|tags|category|kind ...]
+    POST /api/documents/{id}/regenerate {"fields":["summary","tags"]}
+
+## Settings API (live config)
+    GET /api/config                 # editable subset (api keys masked)
+    PUT /api/config {...}           # applied IMMEDIATELY + saved to yaml
+Sections: llm {backend, model, external, think, temperature, num_ctx,
+url}, embed {...}, ocr {langs, dpi, workers, min_chars_per_page},
+summarize {chunk_chars, max_tags}, ask {...}. Absent fields keep their
+current settings. NOTE: server lifecycle (starting/stopping the
+bundled llama-servers) still needs a launcher rerun.
+
 ## Ask an LLM (about one document)
 A freeform streaming chat per document, powered by an EXTERNAL model
 (config: ask: {provider: none|openai|anthropic|ollama, model, api_key,

@@ -219,6 +219,26 @@ func TestAPI(t *testing.T) {
 	request("POST", fmt.Sprintf("/api/documents/%d/reextract", mdID),
 		`{}`, &reex, 200)
 
+	// ---- config: shape + live effect
+	var cfgJSON map[string]any
+	request("GET", "/api/config", "", &cfgJSON, 200)
+	if _, ok := cfgJSON["llm"].(map[string]any)["backend"]; !ok {
+		t.Fatal("config missing llm.backend")
+	}
+	request("PUT", "/api/config", `{"summarize":{"max_tags":6}}`, &cfgJSON, 200)
+	if cfgJSON["summarize"].(map[string]any)["max_tags"].(float64) != 6 {
+		t.Fatalf("config max_tags not applied: %v", cfgJSON["summarize"])
+	}
+	// out-of-range values are rejected by clamping to current
+	request("PUT", "/api/config", `{"summarize":{"max_tags":99}}`, &cfgJSON, 200)
+	if cfgJSON["summarize"].(map[string]any)["max_tags"].(float64) != 6 {
+		t.Fatalf("config clamping broken: %v", cfgJSON["summarize"])
+	}
+
+	// ---- regenerate: field validation
+	request("POST", fmt.Sprintf("/api/documents/%d/regenerate", mdID),
+		`{"fields":[]}`, nil, 400)
+
 	// documents list
 	var docs []map[string]any
 	request("GET", "/api/documents", "", &docs, 200)

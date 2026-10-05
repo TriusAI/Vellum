@@ -154,6 +154,19 @@ docker run --rm -v "$PWD:/data" vellum search "tabula rasa" --semantic
 `config.yaml`, `vocab.yaml`, `library.db`, and the `library/` folder all
 live in the mounted `/data`.
 
+## Settings in the UI (live)
+"Settings…" in the top bar edits the active configuration — backends,
+models, OCR parameters, asking provider — applying immediately and
+persisting to config.yaml. (Starting or stopping the bundled
+llama-servers is a launcher concern: rerun ./vellum.sh, it is
+idempotent.)
+
+## Per-field regeneration
+`vellum regenerate ID [meta|summary|tags|category|kind ...]` (or the
+buttons in the detail pane) rebuilds individual metadata without a
+full reprocess — the cheap per-field repair when the model got one of
+them wrong.
+
 ## Backends: bundled, your own llama.cpp, or Ollama
 The pipeline (summarize + grammar-constrained tagging + embeddings)
 talks to any of:

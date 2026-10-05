@@ -99,35 +99,48 @@ function renderList(docs, flat) {
       el("summary", {}, "matches", el("span", { class: "count" }, String(docs.length))), ul));
     return;
   }
-  // item tree: grouped by category first; named shelves in user order
-  // (alphabetical), uncategorized items at the end
-  const groups = new Map();
+  // item tree: grouped by category first. Categories are SLASHED PATHS
+  // ("ai/transformers") so subcategories nest as subgroups; uncategorized
+  // items form the trailing "uncategorized" group.
+  const newNode = () => ({ docs: [], children: new Map(), total: 0 });
+  const root = newNode();
   for (const d of docs) {
-    const cat = d.category || "";
-    if (!groups.has(cat)) groups.set(cat, []);
-    groups.get(cat).push(d);
+    const parts = (d.category || "").split("/").filter(Boolean);
+    let node = root;
+    node.total++;
+    for (const p of parts) {
+      if (!node.children.has(p)) node.children.set(p, newNode());
+      node = node.children.get(p);
+      node.total++;
+    }
+    node.docs.push(d);
   }
-  const named = [...groups.entries()]
-    .filter(([c]) => c !== "").sort((a, b) => a[0].localeCompare(b[0]));
-  const uncategorized = groups.get("");
-  for (const [cat, items] of named) {
-    list.append(groupBlock(cat, items, false));
+  const renderGroup = (node, name, plain) => {
+    const ul = el("ul", { class: "cat-items" });
+    for (const d of node.docs) ul.append(docRow(d));
+    const kids = [...node.children.entries()].sort((a, b) =>
+      a[0].localeCompare(b[0]));
+    for (const [child, childNode] of kids) {
+      ul.append(renderGroup(childNode, child, false));
+    }
+    const det = el("details", { class: "group" + (plain ? " group-plain" : ""), open: true },
+      el("summary", {}, name,
+        el("span", { class: "count" },
+          node.children.size
+            ? `${node.docs.length} + ${node.total - node.docs.length} nested`
+            : String(node.total))),
+      ul);
+    return det;
+  };
+  let uncategorized = null;
+  if (root.children.has("")) {
+    uncategorized = root.children.get("");
+    root.children.delete("");
   }
-  if (uncategorized && uncategorized.length) {
-    list.append(groupBlock("uncategorized", uncategorized, true));
+  for (const [cat, node] of [...root.children.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
+    list.append(renderGroup(node, cat, false));
   }
-}
-
-// groupBlock is one collapsible category group.
-function groupBlock(name, items, plain) {
-  const ul = el("ul", { class: "cat-items" });
-  for (const d of items) ul.append(docRow(d));
-  const det = el("details", { class: "group" + (plain ? " group-plain" : ""), open: true },
-    el("summary", {},
-      name,
-      el("span", { class: "count" }, String(items.length))),
-    ul);
-  return det;
+  if (uncategorized) list.append(renderGroup(uncategorized, "uncategorized", true));
 }
 
 // Items are compact list rows: title, category, tags — the details
@@ -349,6 +362,8 @@ async function showDetail(id, tab = "summary") {
   renderDetailTabs(tab);
 }
 
+let detailRenderToken = 0;
+
 function renderDetailTabs(active) {
   const d = currentDetail.data.document;
   const tabs = el("div", { class: "tabs" });
@@ -360,7 +375,19 @@ function renderDetailTabs(active) {
   tabs.append(mk("preview", "Preview" + (isPdf(d.path) ? "" : " (file)")));
   tabs.append(mk("text", `Text (${currentDetail.data.chunks.length})`));
   tabs.append(mk("ask", "Ask an LLM"));
-  $("#detail-body").replaceChildren(tabs, detailContent(active));
+  const body = $("#detail-body");
+  const token = ++detailRenderToken;
+  // detailContent may be async; replace the loading placeholder when it
+  // resolves — a newer tab switch wins the race
+  const node = detailContent(active);
+  if (node instanceof Node) {
+    body.replaceChildren(tabs, node);
+  } else {
+    body.replaceChildren(tabs, el("div", { class: "hint" }, "loading…"));
+    Promise.resolve(node).then((content) => {
+      if (token === detailRenderToken) body.replaceChildren(tabs, content);
+    });
+  }
 }
 
 function detailContent(tab) {
@@ -395,9 +422,10 @@ function detailContent(tab) {
             const btn = ev.target;
             btn.textContent = "Fixing…";
             btn.disabled = true;
-            await reextract(d.id, false);
-            btn.textContent = "Re-extract";
-            btn.disabled = false;
+            try { await reextract(d.id, false); } finally {
+              btn.textContent = "Re-extract";
+              btn.disabled = false;
+            }
           },
         }, "Re-extract"),
         el("button", {
@@ -405,51 +433,55 @@ function detailContent(tab) {
             const btn = ev.target;
             btn.textContent = "OCR-ing every page…";
             btn.disabled = true;
-            await reextract(d.id, true);
-            btn.textContent = "Force OCR";
-            btn.disabled = false;
+            try { await reextract(d.id, true); } finally {
+              btn.textContent = "Force OCR";
+              btn.disabled = false;
+            }
           },
         }, "Force OCR")));
     }
-    // repair affordance even for documents that LOOK fine — the user
-    // is the judge of garbled text
-    wrap.append(el("div", { class: "row right" },
-      el("button", {
-        class: "plain",
-        onclick: (ev) => {
-          ev.target.textContent = "Re-extracting…";
-          reextract(d.id, true).then(() =>
-            { ev.target.textContent = "re-extracted"; });
-        },
-      }, "re-extract text (force OCR)")));
+    // collapsible chunk list: each row expands to the FULL text; the
+    // per-chunk buttons jump to the Preview pane or force-OCR that page
+    const list = el("div", { class: "chunklist" });
+    const chunksEls = [];
     for (const c of data.chunks) {
-      const loc = c.page > 0 ? `page ${c.page}` : `chunk ${c.seq}`;
+      const loc = c.page > 0 ? `p. ${c.page}` : `chunk ${c.seq}`;
+      const textPre = el("div", { class: "chunk-text" }, esc(c.text));
+      const jump = c.page > 0 && isPdf(d.path) ? el("button", {
+        class: "mini", title: "open this page in Preview",
+        onclick: (ev) => {
+          ev.stopPropagation();
+          currentDetail.page = c.page;
+          renderDetailTabs("preview");
+        },
+      }, "⤢") : null;
       const fix = c.page > 0 && isPdf(d.path) ? el("button", {
         class: "mini", title: "OCR just this page (repair)",
         onclick: async (ev) => {
           ev.stopPropagation();
           ev.target.textContent = "OCR…";
           ev.target.disabled = true;
-          try { await reextract(d.id, true, [c.page]); } finally {
+          try { await reextractPage(d.id, c.page); } finally {
             ev.target.textContent = "OCR";
             ev.target.disabled = false;
           }
         },
       }, "OCR") : null;
-      const open = () => {
-        if (isPdf(d.path) && c.page > 0) {
-          currentDetail.page = c.page;
-          renderDetailTabs("preview");
-          return;
-        }
-        div.classList.toggle("open");
-      };
-      const div = el("div", { class: "chunk", onclick: open },
-        el("span", { class: "loc" }, esc(loc)), " ",
-        esc(c.text.slice(0, 240) + (c.text.length > 240 ? "…" : "")));
-      if (fix) div.append(fix);
-      wrap.append(div);
+      const head = el("div", { class: "chunk-head" },
+        el("span", { class: "loc" }, esc(loc)), jump, fix);
+      const row = el("div", { class: "chunk" }, head, textPre);
+      head.addEventListener("click", () => row.classList.toggle("open"));
+      chunksEls.push(row);
+      list.append(row);
     }
+    wrap.append(el("div", { class: "row" },
+      el("button", { class: "small", onclick: () =>
+        chunksEls.forEach((r) => r.classList.add("open")) }, "expand all"),
+      el("button", { class: "small", onclick: () =>
+        chunksEls.forEach((r) => r.classList.remove("open")) }, "collapse all"),
+      el("span", { class: "hint" },
+        `${chunksEls.length} sections — click a row to expand; OCR replaces that page's text and re-queues processing`)));
+    wrap.append(list);
     return wrap;
   }
 
@@ -485,12 +517,44 @@ function detailContent(tab) {
   body.append(el("label", {}, "kind (paper/book/gallery/course/reference/custom; drives the processing path)"));
   const inKind = el("input", { value: d.kind || "", placeholder: "not detected" });
   body.append(inKind);
-  body.append(el("label", {}, "category (your own shelving, e.g. ai-papers)"));
+  body.append(el("label", {},
+    "category (your shelving; slashes nest subcategories: ai/transformers)"));
   const inCategory = el("input", { value: d.category || "", placeholder: "uncategorized", list: "category-list" });
   body.append(inCategory);
+  const regenRow = el("div", { class: "row" },
+    el("span", { class: "hint" }, "re-generate:"));
+  const regen = (fields, label) => el("button", {
+    class: "small",
+    onclick: async (ev) => {
+      ev.target.textContent = label + "…";
+      ev.target.disabled = true;
+      notice(`Re-generating ${fields.join(", ")} — live progress below…`);
+      startProgressPolling(`Regenerate ${fields.join(", ")}`);
+      try {
+        const res = await api(`/api/documents/${id}/regenerate`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ fields }),
+        });
+        notice("Regenerated: " + fields.join(", ") + " ✓");
+      } catch (e) { notice("regenerate: " + e.message); }
+      stopProgressPolling();
+      await loadDocs();
+      await loadCategories();
+      const again = await api(`/api/documents/${id}`);
+      currentDetail = { id, data: again };
+      renderDetailTabs("summary");
+    },
+  }, label);
+  regenRow.append(regen(["meta"], "metadata"));
+  regenRow.append(regen(["summary"], "summary"));
+  regenRow.append(regen(["tags"], "tags"));
+  regenRow.append(regen(["category"], "category"));
+  regenRow.append(regen(["kind"], "kind"));
+
   body.append(el("label", {}, "summary"));
   const inSummary = el("textarea", {}, d.summary || "");
   body.append(inSummary);
+  body.append(regenRow);
 
   const saveRow = el("div", { class: "row" });
   saveRow.append(el("button", {
@@ -815,3 +879,102 @@ $("#vocab-add").onclick = async () => {
     notice("API error: " + e.message);
   }
 })();
+
+/* ---------------------------------------------------------------- settings */
+
+const settings = {};
+const SETTINGS_FIELDS = [
+  ["llm", "backend", "select", ["llama-server", "ollama"], "chat backend"],
+  ["llm", "model", "input", null, "chat model name (ollama)"],
+  ["llm", "external", "check", null, "external chat server (own llama.cpp)"],
+  ["llm", "url", "input", null, "chat server url"],
+  ["llm", "num_ctx", "number", null, "context window (match the server's -c)"],
+  ["llm", "temperature", "number", null, "temperature"],
+  ["llm", "think", "check", null, "allow thinking models to reason"],
+  ["embed", "provider", "select", ["llama-server", "ollama"], "embedding backend"],
+  ["embed", "external", "check", null, "external embedding server"],
+  ["embed", "model", "input", null, "embedding model name (ollama)"],
+  ["embed", "url", "input", null, "embedding server url"],
+  ["embed", "batch", "number", null, "embedding batch size"],
+  ["ocr", "langs", "input", null, "tesseract languages (plus-joined: eng+fin)"],
+  ["ocr", "dpi", "number", null, "ocr render dpi (300 recommended)"],
+  ["ocr", "workers", "number", null, "parallel ocr workers"],
+  ["ocr", "min_chars_per_page", "number", null, "min text-layer chars per page"],
+  ["summarize", "chunk_chars", "number", null, "map chunk size (chars)"],
+  ["summarize", "max_tags", "number", null, "max tags per document"],
+  ["ask", "provider", "select2", ["none", "openai", "anthropic", "ollama"], "ask provider (chat tab)"],
+  ["ask", "model", "input", null, "ask model"],
+  ["ask", "base_url", "input", null, "ask base url"],
+  ["ask", "api_key", "key", null, "ask api key"],
+];
+
+const $field = (sec, key) => settings.inputs?.[sec + "." + key];
+
+async function settingsOpen() {
+  $("#dlg-settings").showModal();
+  $("#settings-msg").textContent = "loading…";
+  const cfg = await api("/api/config");
+  const body = $("#settings-body");
+  body.replaceChildren();
+  settings.inputs = {};
+  for (const [sec, key, kind, options, label] of SETTINGS_FIELDS) {
+    const value = cfg[sec]?.[key];
+    const row = el("div", { class: "row" });
+    let input;
+    if (kind === "select" || kind === "select2") {
+      input = el("select", {}, ...options.map((o) =>
+        el("option", { value: o }, o)));
+      input.value = value ?? options[0];
+    } else if (kind === "check") {
+      input = el("input", { type: "checkbox" });
+      if (value) input.checked = true;
+    } else if (kind === "number") {
+      input = el("input", { type: "number", value: value ?? "" });
+    } else if (kind === "key") {
+      input = el("input", { type: "password", placeholder: value ? "(stored)" : "(unset)" });
+    } else {
+      input = el("input", { type: "text", value: value ?? "" });
+    }
+    settings.inputs[sec + "." + key] = input;
+    row.append(el("label", { style: "min-width:16rem" }, `${sec}.${key.replace(/_/g, " ")} — ${label}`));
+    row.append(input);
+    body.append(row);
+  }
+  $("#settings-msg").textContent = "";
+}
+
+$("#btn-settings").onclick = () => settingsOpen().catch((e) =>
+  { $("#settings-msg").textContent = "load failed: " + e.message; $("#dlg-settings").showModal(); });
+$("#settings-cancel").onclick = () => $("#dlg-settings").close();
+$("#settings-save").onclick = async () => {
+  const payload = { llm: {}, embed: {}, ocr: {}, summarize: {}, ask: {} };
+  for (const [sec, key, kind] of SETTINGS_FIELDS) {
+    const input = $field(sec, key);
+    if (!input) continue;
+    if (kind === "select" || kind === "select2") {
+      payload[sec][key] = input.value;
+      continue;
+    }
+    if (kind === "check") { payload[sec][key] = input.checked; continue; }
+    if (kind === "number") { payload[sec][key] = Number(input.value); continue; }
+    if (kind === "key") { if (input.value) payload[sec][key] = input.value; continue; }
+    payload[sec][key] = input.value;
+  }
+  try {
+    await api("/api/config", {
+      method: "PUT", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    askConfig = null; // re-read on next use
+    $("#settings-msg").textContent = "saved + applied ✓";
+    await refresh();
+  } catch (e) { $("#settings-msg").textContent = "save failed: " + e.message; }
+};
+$("#settings-test").onclick = async () => {
+  const msg = $("#settings-msg");
+  msg.textContent = "testing chat backend…";
+  try {
+    const st = await api("/api/status");
+    msg.textContent = `chat: ${st.llm_up ? "up ✓" : "down ✗"} — embed: ${st.embed_up ? "up ✓" : "down ✗"}`;
+  } catch (e) { msg.textContent = "test failed: " + e.message; }
+};

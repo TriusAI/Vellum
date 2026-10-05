@@ -63,10 +63,13 @@ func (s *Server) Mux() http.Handler {
 	mux.HandleFunc("POST /api/ingest", s.postIngest)
 	mux.HandleFunc("GET /api/fs", s.fsList)
 	mux.HandleFunc("POST /api/documents/{id}/reextract", s.reextract)
+	mux.HandleFunc("POST /api/documents/{id}/regenerate", s.regenerate)
 	mux.HandleFunc("POST /api/process", s.postProcess)
 	mux.HandleFunc("GET /api/ask/config", s.getAskConfig)
 	mux.HandleFunc("PUT /api/ask/config", s.putAskConfig)
 	mux.HandleFunc("POST /api/ask/test", s.testAsk)
+	mux.HandleFunc("GET /api/config", s.getConfig)
+	mux.HandleFunc("PUT /api/config", s.putConfig)
 	mux.HandleFunc("POST /api/documents/{id}/ask", s.postAsk)
 	mux.HandleFunc("GET /api/search", s.search)
 	mux.HandleFunc("GET /api/vocab", s.getVocab)
@@ -1059,6 +1062,81 @@ func (s *Server) putAskConfig(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"ok": true, "enabled": c.Enabled()})
 }
 
+// regenerate rebuilds individual metadata fields in place (no full
+// reprocess): fields ⊆ {"meta","summary","tags","category","kind"}.
+func (s *Server) regenerate(w http.ResponseWriter, r *http.Request) {
+	id, err := pathID(r)
+	if err != nil {
+		writeErr(w, 400, "bad id")
+		return
+	}
+	var body struct {
+		Fields []string `json:"fields"`
+	}
+	if err := decodeBody(r, &body); err != nil {
+		writeErr(w, 400, "bad JSON body: "+err.Error())
+		return
+	}
+	allowed := map[string]bool{"meta": true, "summary": true,
+		"tags": true, "category": true, "kind": true}
+	fields := []string{}
+	for _, f := range body.Fields {
+		if allowed[f] {
+			fields = append(fields, f)
+		}
+	}
+	if len(fields) == 0 {
+		writeErr(w, 400,
+			`fields[] ⊆ ["meta","summary","tags","category","kind"] required`)
+		return
+	}
+	v, err := vocab.Load(s.cfg.VocabPath)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	needLLM := false
+	for _, f := range fields {
+		if f != "kind" {
+			needLLM = true
+		}
+	}
+	if needLLM && len(v.Tags) == 0 && (slicesContains(fields, "tags") || slicesContains(fields, "category")) {
+		writeErr(w, 400, "vocab.yaml is empty — add tags first")
+		return
+	}
+	if needLLM && !llm.AvailableFor(s.cfg.LLM.Backend, s.cfg.Tools.LLMURL) {
+		writeErr(w, 503, "no chat backend at "+s.cfg.Tools.LLMURL+
+			" (llm.backend="+s.cfg.LLM.Backend+")")
+		return
+	}
+	progress := func(msg string) {
+		s.mu.Lock()
+		s.progress = map[string]any{"running": true, "message": msg,
+			"updated": time.Now().Format(time.RFC3339)}
+		s.mu.Unlock()
+	}
+	_, err = ingest.Regenerate(s.cfg, s.conn, v, id, fields, progress)
+	s.mu.Lock()
+	s.progress = map[string]any{"running": false, "message": "",
+		"updated": time.Now().Format(time.RFC3339)}
+	s.mu.Unlock()
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	s.document(w, r)
+}
+
+func slicesContains(xs []string, x string) bool {
+	for _, e := range xs {
+		if e == x {
+			return true
+		}
+	}
+	return false
+}
+
 // testAsk verifies the ask provider configuration with a tiny exchange.
 // With a JSON body the UNSTORED values are tested (the UI's pre-save
 // check); with no body the current configuration is.
@@ -1179,4 +1257,173 @@ func sseSend(w http.ResponseWriter, payload any) {
 	if f, ok := w.(http.Flusher); ok {
 		f.Flush()
 	}
+}
+
+// ------------------------------- configuration ---------------------------
+
+// getConfig returns the editable subset for the Settings dialog (the
+// api keys are masked).
+func (s *Server) getConfig(w http.ResponseWriter, r *http.Request) {
+	c := s.cfg
+	type askOut struct {
+		Provider, Model, BaseURL string
+		KeySet                   bool
+	}
+	writeJSON(w, 200, map[string]any{
+		"llm": map[string]any{
+			"backend":     c.LLM.Backend,
+			"model":       c.LLM.Model,
+			"external":    c.LLM.External,
+			"think":       c.LLM.Think,
+			"temperature": c.LLM.Temperature,
+			"num_ctx":     c.LLM.NumCtx,
+			"url":         c.Tools.LLMURL,
+		},
+		"embed": map[string]any{
+			"provider": c.Embed.Provider,
+			"model":    c.Embed.Model,
+			"external": c.Embed.External,
+			"batch":    c.Embed.Batch,
+			"url":      c.Tools.EmbedURL,
+		},
+		"ocr": map[string]any{
+			"langs":              c.OCR.Langs,
+			"dpi":                c.OCR.DPI,
+			"workers":            c.OCR.Workers,
+			"min_chars_per_page": c.OCR.MinCharsPerPage,
+		},
+		"summarize": map[string]any{
+			"chunk_chars": c.Summarize.ChunkChars,
+			"max_tags":    c.Summarize.MaxTags,
+		},
+		"ask": askOut{
+			Provider: c.Ask.Provider, Model: c.Ask.Model,
+			BaseURL: c.Ask.BaseURL, KeySet: c.Ask.APIKey != "",
+		},
+	})
+}
+
+// putConfig applies settings IMMEDIATELY to the running server (in
+// memory) and persists to config.yaml. Values absent from the request
+// keep their current settings. Server LIFECYCLE is the one thing that
+// cannot take effect this way: switching to/from a bundled backend
+// needs the launcher rerun (`./vellum.sh serve` is idempotent and
+// won't duplicate servers).
+func (s *Server) putConfig(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		LLM struct {
+			Backend     *string  `json:"backend"`
+			Model       *string  `json:"model"`
+			External    *bool    `json:"external"`
+			Think       *bool    `json:"think"`
+			Temperature *float64 `json:"temperature"`
+			NumCtx      *int     `json:"num_ctx"`
+			URL         *string  `json:"url"`
+		} `json:"llm"`
+		Embed struct {
+			Provider *string `json:"provider"`
+			External *bool   `json:"external"`
+			Model    *string `json:"model"`
+			Batch    *int    `json:"batch"`
+			URL      *string `json:"url"`
+		} `json:"embed"`
+		OCR struct {
+			Langs           *string `json:"langs"`
+			DPI             *int    `json:"dpi"`
+			Workers         *int    `json:"workers"`
+			MinCharsPerPage *int    `json:"min_chars_per_page"`
+		} `json:"ocr"`
+		Summarize struct {
+			ChunkChars *int `json:"chunk_chars"`
+			MaxTags    *int `json:"max_tags"`
+		} `json:"summarize"`
+		Ask struct {
+			Provider *string `json:"provider"`
+			Model    *string `json:"model"`
+			APIKey   *string `json:"api_key"`
+			BaseURL  *string `json:"base_url"`
+		} `json:"ask"`
+	}
+	if err := decodeBody(r, &body); err != nil {
+		writeErr(w, 400, "bad JSON body: "+err.Error())
+		return
+	}
+	c := s.cfg
+	b := body.LLM
+	if b.Backend != nil && (*b.Backend == "llama-server" || *b.Backend == "ollama") {
+		c.LLM.Backend = *b.Backend
+	}
+	if b.Model != nil {
+		c.LLM.Model = *b.Model
+	}
+	if b.External != nil {
+		c.LLM.External = *b.External
+	}
+	if b.Think != nil {
+		c.LLM.Think = *b.Think
+	}
+	if b.Temperature != nil && *b.Temperature >= 0 && *b.Temperature <= 2 {
+		c.LLM.Temperature = *b.Temperature
+	}
+	if b.NumCtx != nil && *b.NumCtx >= 1024 && *b.NumCtx <= 1024*1024 {
+		c.LLM.NumCtx = *b.NumCtx
+	}
+	if b.URL != nil {
+		c.Tools.LLMURL = *b.URL
+	}
+	b2 := body.Embed
+	if b2.Provider != nil && (*b2.Provider == "llama-server" || *b2.Provider == "ollama") {
+		c.Embed.Provider = *b2.Provider
+	}
+	if b2.External != nil {
+		c.Embed.External = *b2.External
+	}
+	if b2.Model != nil {
+		c.Embed.Model = *b2.Model
+	}
+	if b2.Batch != nil && *b2.Batch >= 1 && *b2.Batch <= 512 {
+		c.Embed.Batch = *b2.Batch
+	}
+	if b2.URL != nil {
+		c.Tools.EmbedURL = *b2.URL
+	}
+	o := body.OCR
+	if o.Langs != nil && *o.Langs != "" {
+		c.OCR.Langs = *o.Langs
+	}
+	if o.DPI != nil && *o.DPI >= 72 && *o.DPI <= 1200 {
+		c.OCR.DPI = *o.DPI
+	}
+	if o.Workers != nil && *o.Workers >= 1 && *o.Workers <= 32 {
+		c.OCR.Workers = *o.Workers
+	}
+	if o.MinCharsPerPage != nil && *o.MinCharsPerPage >= 0 && *o.MinCharsPerPage <= 10000 {
+		c.OCR.MinCharsPerPage = *o.MinCharsPerPage
+	}
+	sm := body.Summarize
+	if sm.ChunkChars != nil && *sm.ChunkChars >= 500 && *sm.ChunkChars <= 50000 {
+		c.Summarize.ChunkChars = *sm.ChunkChars
+	}
+	if sm.MaxTags != nil && *sm.MaxTags >= 1 && *sm.MaxTags <= 32 {
+		c.Summarize.MaxTags = *sm.MaxTags
+	}
+	a := body.Ask
+	if a.Provider != nil && *a.Provider != "" {
+		c.Ask.Provider = *a.Provider
+	}
+	if a.Model != nil && *a.Model != "" {
+		c.Ask.Model = *a.Model
+	}
+	if a.APIKey != nil && *a.APIKey != "" {
+		c.Ask.APIKey = *a.APIKey
+	}
+	if a.BaseURL != nil {
+		c.Ask.BaseURL = *a.BaseURL
+	}
+	// persist
+	if err := s.cfg.Save(); err != nil {
+		writeErr(w, 500, "config save failed: "+err.Error())
+		return
+	}
+	s.getConfig(w, r)
 }

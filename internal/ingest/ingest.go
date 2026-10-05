@@ -471,22 +471,19 @@ func processOne(cfg *config.Config, conn *sql.DB, v *vocab.Vocabulary,
 	// one map phase feeds both the summary and the tagging call —
 	// long documents are tagged from summaries + opening text, not by
 	// re-sending a huge raw-text prefix
-	summaries, chunks, err := summarize.MapSummaries(cfg, text, progress)
+	produced, err := produceSummary(cfg, kind, text, progress)
 	if err != nil {
 		return nil, err
 	}
-	summary, err := summarize.SummarizeFrom(cfg, chunks, summaries, progress)
-	if err != nil {
-		return nil, err
-	}
+	summary := produced.Summary
 	tags, err := summarize.TagDocumentWithCategories(cfg, v, existingCategories,
-		chunks, summaries, summary, progress)
+		produced.TagChunks, produced.TagSummaries, summary, progress)
 	if err != nil {
 		return nil, err
 	}
 
 	if err := storeProcessed(conn, docID, title, authors, year, tags,
-		summary, "generated"); err != nil {
+		summary, produced.Source); err != nil {
 		return nil, err
 	}
 	log.Printf("done: tags: %s%s", strings.Join(tags.Tags, ", "),
@@ -552,4 +549,224 @@ func storeProcessed(conn *sql.DB, docID int64, title, authors, year string,
 		pairs = append(pairs, [2]string{t, "suggested"})
 	}
 	return db.SetTags(conn, docID, pairs)
+}
+
+// produced carries the summary and the inputs the tagging call wants.
+type produced struct {
+	Summary      string
+	Source       string   // abstract | front-matter | generated
+	TagChunks    []string // opening pieces for the tagging call
+	TagSummaries []string // section summaries for the tagging call
+}
+
+// produceSummary generates a document's summary using the kind's fast
+// path where possible (extracted abstract / front matter), else the
+// map-reduce. Shared by full processing and per-field regeneration.
+func produceSummary(cfg *config.Config, kind, text string,
+	progress func(string)) (*produced, error) {
+	if progress == nil {
+		progress = func(string) {}
+	}
+	opening := text
+	if len(opening) > 6000 {
+		opening = opening[:6000]
+	}
+	if kind == "paper" {
+		if abstract := classify.ExtractAbstract(text); abstract != "" {
+			return &produced{Summary: abstract, Source: "abstract",
+				TagChunks: []string{abstract, opening}}, nil
+		}
+	}
+	if kind == "book" {
+		if front := classify.ExtractFrontMatter(text); front != "" {
+			tagInput := []string{front}
+			if toc := classify.ExtractTOC(text); toc != "" {
+				tagInput = append(tagInput, "Contents:\n"+toc)
+			}
+			return &produced{Summary: front, Source: "front-matter",
+				TagChunks: tagInput}, nil
+		}
+	}
+	summaries, chunks, err := summarize.MapSummaries(cfg, text, progress)
+	if err != nil {
+		return nil, err
+	}
+	summary, err := summarize.SummarizeFrom(cfg, chunks, summaries, progress)
+	if err != nil {
+		return nil, err
+	}
+	return &produced{Summary: summary, Source: "generated",
+		TagChunks: chunks, TagSummaries: summaries}, nil
+}
+
+// Regenerate rebuilds INDIVIDUAL metadata fields in place:
+//
+//	"meta"     title/authors/year via one cheap constrained call
+//	"summary"  the kind's fast path or map-reduce; source updated
+//	"tags"     re-tagging from the stored summary + opening text
+//	"category" model-filed like tags, then pinned-off (user asked for it)
+//	"kind"     deterministic reclassify on the current text (no LLM)
+//
+// Unknown fields are ignored; returns the applied field names.
+func Regenerate(cfg *config.Config, conn *sql.DB, v *vocab.Vocabulary,
+	docID int64, fields []string, progress func(string)) ([]string, error) {
+	if progress == nil {
+		progress = func(string) {}
+	}
+	var path, title, authors, year, summary, kind string
+	var kindUser, categoryUser int64
+	var ocrPages, nPages int64
+	err := conn.QueryRow(
+		"SELECT path, title, authors, year, summary, kind, kind_user, category_user, ocr_pages, n_pages FROM documents WHERE id=?",
+		docID).Scan(&path, &title, &authors, &year, &summary, &kind,
+		&kindUser, &categoryUser, &ocrPages, &nPages)
+	if err != nil {
+		return nil, err
+	}
+	text, err := db.DocumentText(conn, docID)
+	if err != nil {
+		return nil, err
+	}
+	opening := text
+	if len(opening) > 8000 {
+		opening = opening[:8000]
+	}
+	want := map[string]bool{}
+	for _, f := range fields {
+		want[f] = true
+	}
+	applied := []string{}
+
+	// full tag call reuse: tags/category/meta can share one call
+	fullTagCall := want["tags"] || (want["category"] && len(text) > 0)
+	if want["meta"] && !want["tags"] {
+		progress("re-generating title/authors/year")
+		mr, err := summarize.RegenMeta(cfg, opening)
+		if err != nil {
+			return applied, err
+		}
+		newTitle := cleanMetaValue(mr.Title)
+		newAuthors := cleanMetaValue(strings.Join(mr.Authors, ", "))
+		newYear := ""
+		if yearRE.MatchString(mr.Year) {
+			newYear = mr.Year
+		}
+		// store whichever came back sanely (empty result = keep old)
+		if newTitle != "" {
+			title = newTitle
+		}
+		if newAuthors != "" {
+			authors = newAuthors
+		}
+		if newYear != "" {
+			year = newYear
+		}
+		if _, err := conn.Exec(
+			"UPDATE documents SET title=?, authors=?, year=? WHERE id=?",
+			title, authors, year, docID); err != nil {
+			return applied, err
+		}
+		progress("metadata updated")
+		applied = append(applied, "meta")
+	}
+
+	if want["summary"] {
+		progress("re-generating summary")
+		produced, err := produceSummary(cfg, kind, text, progress)
+		if err != nil {
+			return applied, err
+		}
+		if _, err := conn.Exec(
+			"UPDATE documents SET summary=?, summary_source=? WHERE id=?",
+			produced.Summary, produced.Source, docID); err != nil {
+			return applied, err
+		}
+		summary = produced.Summary
+		progress("summary updated")
+		applied = append(applied, "summary")
+	}
+
+	if want["kind"] {
+		newKind, _ := classify.Detect(text, int(ocrPages), int(nPages))
+		if _, err := conn.Exec(
+			"UPDATE documents SET kind=?, kind_user=0 WHERE id=?",
+			newKind, docID); err != nil {
+			return applied, err
+		}
+		progress("kind re-detected: " + or_(newKind))
+		applied = append(applied, "kind")
+	}
+
+	if fullTagCall {
+		if want["tags"] {
+			progress("re-generating tags")
+		}
+		if want["category"] {
+			progress("re-generating category")
+		}
+		existingCategories, err := db.ExistingCategories(conn)
+		if err != nil {
+			return applied, err
+		}
+		tagSummaries := []string{}
+		tagChunks := []string{opening}
+		if summary != "" {
+			tagSummaries = []string{summary}
+		}
+		tr, err := summarize.TagDocumentWithCategories(cfg, v, existingCategories,
+			tagChunks, tagSummaries, summary, progress)
+		if err != nil {
+			return applied, err
+		}
+		if want["tags"] {
+			pairs := make([][2]string, 0, len(tr.Tags)+len(tr.TagsOther))
+			for _, t := range tr.Tags {
+				pairs = append(pairs, [2]string{t, "vocab"})
+			}
+			for _, t := range tr.TagsOther {
+				pairs = append(pairs, [2]string{t, "suggested"})
+			}
+			if err := db.SetTags(conn, docID, pairs); err != nil {
+				return applied, err
+			}
+			progress("tags updated")
+			applied = append(applied, "tags")
+		}
+		if want["category"] && tr.Category != "" {
+			// the user explicitly asked to re-gen: their pin lifts
+			if _, err := conn.Exec(
+				"UPDATE documents SET category=?, category_user=0 WHERE id=?",
+				tr.Category, docID); err != nil {
+				return applied, err
+			}
+			progress("category updated: " + tr.Category)
+			applied = append(applied, "category")
+		}
+		// the same call returns metadata: fill EMPTY fields for free
+		// (never clobber good ones)
+		gapTitle, gapAuthors := "", ""
+		gapYear := ""
+		if cleanMetaValue(tr.Title) != "" && cleanMetaValue(title) == "" {
+			gapTitle = cleanMetaValue(tr.Title)
+		}
+		if cleanMetaValue(strings.Join(tr.Authors, ", ")) != "" && cleanMetaValue(authors) == "" {
+			gapAuthors = cleanMetaValue(strings.Join(tr.Authors, ", "))
+		}
+		if yearRE.MatchString(tr.Year) && cleanMetaValue(year) == "" {
+			gapYear = tr.Year
+		}
+		if gapTitle != "" || gapAuthors != "" || gapYear != "" {
+			conn.Exec(
+				"UPDATE documents SET title=CASE WHEN ?!='' THEN ? ELSE title END, authors=CASE WHEN ?!='' THEN ? ELSE authors END, year=CASE WHEN ?!='' THEN ? ELSE year END WHERE id=?",
+				gapTitle, gapTitle, gapAuthors, gapAuthors, gapYear, gapYear, docID)
+		}
+	}
+	return applied, nil
+}
+
+func or_(s string) string {
+	if s == "" {
+		return "(generic)"
+	}
+	return s
 }
