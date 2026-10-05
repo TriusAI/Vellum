@@ -47,7 +47,7 @@ file (FTS5). Models served locally by llama.cpp llama-server.
 `
 
 // versionString is reported by --version, /api/status and `vellum agent`.
-const versionString = "0.7.0"
+const versionString = "0.8.0"
 
 // documentColumns is the explicit projection used everywhere (never SELECT *,
 // so the scan order is fixed even if the schema gains columns).
@@ -631,10 +631,10 @@ func cmdCategory(cfg *config.Config, args []string) {
 	if value == "none" || value == "-" {
 		value = ""
 	}
-	if _, err := conn.Exec("UPDATE documents SET category=? WHERE id=?", value, id); err != nil {
+	if _, err := conn.Exec("UPDATE documents SET category=?, category_user=1 WHERE id=?", value, id); err != nil {
 		log.Fatalf("category: %s", err)
 	}
-	fmt.Printf("#%d: category set to %q\n", id, value)
+	fmt.Printf("#%d: category set to %q (user-pinned; the model will not re-file it)\n", id, value)
 }
 
 // allowedDocs returns the set of document ids matching the filters, or nil

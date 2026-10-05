@@ -82,15 +82,51 @@ async function loadDocs() {
   renderList(allDocs);
 }
 
-function renderList(docs) {
+function renderList(docs, flat) {
   const list = $("#list");
   list.replaceChildren();
   if (!docs.length) {
-    list.append(el("li", { class: "hint" },
+    list.append(el("p", { class: "hint" },
       "Nothing here yet — use Ingest to index some files or directories."));
     return;
   }
-  for (const d of docs) list.append(docRow(d));
+  if (flat) {
+    // search results keep relevance order: one flat group
+    const ul = el("ul", { class: "cat-items" });
+    for (const d of docs) ul.append(docRow(d));
+    list.append(el("details", { class: "group", open: true },
+      el("summary", {}, "matches", el("span", { class: "count" }, String(docs.length))), ul));
+    return;
+  }
+  // item tree: grouped by category first; named shelves in user order
+  // (alphabetical), uncategorized items at the end
+  const groups = new Map();
+  for (const d of docs) {
+    const cat = d.category || "";
+    if (!groups.has(cat)) groups.set(cat, []);
+    groups.get(cat).push(d);
+  }
+  const named = [...groups.entries()]
+    .filter(([c]) => c !== "").sort((a, b) => a[0].localeCompare(b[0]));
+  const uncategorized = groups.get("");
+  for (const [cat, items] of named) {
+    list.append(groupBlock(cat, items, false));
+  }
+  if (uncategorized && uncategorized.length) {
+    list.append(groupBlock("uncategorized", uncategorized, true));
+  }
+}
+
+// groupBlock is one collapsible category group.
+function groupBlock(name, items, plain) {
+  const ul = el("ul", { class: "cat-items" });
+  for (const d of items) ul.append(docRow(d));
+  const det = el("details", { class: "group" + (plain ? " group-plain" : ""), open: true },
+    el("summary", {},
+      name,
+      el("span", { class: "count" }, String(items.length))),
+    ul);
+  return det;
 }
 
 // Items are compact list rows: title, category, tags — the details
@@ -104,6 +140,12 @@ function docRow(d) {
     el("span", { class: "item-title" }, esc(title)),
     chips);
 }
+
+// keep the sticky notice just below the sticky header on any header wrap
+const syncNoticeTop = () => document.documentElement.style.setProperty(
+  "--notice-top", document.querySelector("header").getBoundingClientRect().height + "px");
+window.addEventListener("resize", syncNoticeTop);
+syncNoticeTop();
 
 let progressTimer = null;
 
@@ -135,6 +177,8 @@ async function processIds(ids) {
     const done = results.filter((r) => r.status === "done");
     const failed = results.filter((r) => r.status === "error");
     let msg = `Processed ${done.length} document(s)`;
+    for (const r of done)
+      if (r.category) msg += ` — filed under: ${r.category}`;
     for (const r of done) if (r.tags_other?.length) msg += ` — suggested new tags: ${r.tags_other.join(", ")}`;
     if (failed.length) msg += `; ${failed.length} failed (status chip shows why)`;
     notice(msg);
@@ -372,7 +416,8 @@ async function doSearch() {
     if (mode === "semantic") {
       const list = $("#list");
       list.replaceChildren();
-      if (!hits.length) { list.append(el("li", { class: "hint" }, "no matches")); return; }
+      if (!hits.length) { list.append(el("p", { class: "hint" }, "no matches")); return; }
+      const ul = el("ul", { class: "cat-items" });
       for (const h of hits) {
         const d = allDocs.find((x) => x.id === h.doc_id) ||
           { id: h.doc_id, title: h.title, path: h.path, tags: [] };
@@ -382,17 +427,20 @@ async function doSearch() {
             `cos ${h.snippets[0].score.toFixed(3)}`));
         if (d.category) chips.append(el("span", { class: "chip sug" }, esc(d.category)));
         for (const t of d.tags) chips.append(el("span", { class: "chip" }, esc(t)));
-        list.append(el("li", { class: "item", onclick: () => showDetail(h.doc_id) },
+        ul.append(el("li", { class: "item", onclick: () => showDetail(h.doc_id) },
           el("span", { class: "item-title" }, esc(d.title || h.path.split("/").pop())),
           chips));
       }
+      list.append(el("details", { class: "group", open: true },
+        el("summary", {}, "results",
+          el("span", { class: "count" }, String(hits.length))), ul));
     } else {
       if (!allDocs.length) await loadDocs();
       const ids = [...new Set(hits.map((h) => h.doc_id))];
       const order = new Map(ids.map((id, i) => [id, i]));
       const docs = allDocs.filter((d) => ids.includes(d.id));
       docs.sort((a, b) => order.get(a.id) - order.get(b.id));
-      renderList(docs);
+      renderList(docs, true);
     }
   } catch (e) { notice("search: " + e.message); }
 }

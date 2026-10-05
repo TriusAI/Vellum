@@ -25,7 +25,10 @@ button {
 button.plain { background: transparent; color: var(--muted); border: 1px solid var(--line); }
 button.small { padding: .15rem .55rem; font-size: .8rem; }
 button:hover { filter: brightness(1.08); }
-#notice { padding: .5rem 1.2rem; }
+#notice {
+  position: sticky; z-index: 4; top: var(--notice-top, 3.4rem);
+  padding: .5rem 1.2rem; min-height: 1.2rem;
+}
 #notice:not(:empty) { background: var(--chip-warn); }
 main { display: flex; align-items: flex-start; gap: 1rem; padding: 1.2rem; }
 #list { flex: 1 1 55%; border: 1px solid var(--line); background: var(--card);
@@ -120,3 +123,24 @@ mark { background: #f5e6a8; }
 #fs-selected { display: flex; flex-wrap: wrap; gap: .3rem; min-height: 1.6rem;
   margin-bottom: .4rem; }
 #fs-selected .chip { display: inline-flex; cursor: pointer; }
+
+/* grouped item tree */
+details.group > summary {
+  display: flex; align-items: baseline; gap: .5rem;
+  list-style: none; cursor: pointer; padding: .45rem .9rem;
+  font-weight: 600; color: var(--accent); user-select: none;
+  border-bottom: 1px solid var(--line); background: var(--bg);
+}
+details.group > summary::-webkit-details-marker { display: none; }
+details.group > summary::before { content: "▸"; font-weight: 400;
+  transform: rotate(90deg); transition: transform .12s; }
+details.group[open] > summary::before { transform: rotate(0deg); }
+details.group > summary .count { color: var(--muted); font-weight: 400;
+  font-size: .8rem; }
+details.group > ul {
+  list-style: none; margin: 0; padding: 0;
+}
+details.group.group-plain > summary { color: var(--muted); font-style: italic; }
+ul.cat-empty > li, details.group > ul > li {
+  padding-left: 2rem;
+}

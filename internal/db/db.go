@@ -37,7 +37,8 @@ CREATE TABLE IF NOT EXISTS documents(
   summary_source TEXT DEFAULT '',
   category TEXT DEFAULT '',
   ocr_pending INTEGER DEFAULT 0,
-  kind_user INTEGER DEFAULT 0
+  kind_user INTEGER DEFAULT 0,
+  category_user INTEGER DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS chunks(
@@ -105,6 +106,7 @@ func migrate(conn *sql.DB) error {
 		{"documents", "category", "ALTER TABLE documents ADD COLUMN category TEXT DEFAULT ''"},
 		{"documents", "ocr_pending", "ALTER TABLE documents ADD COLUMN ocr_pending INTEGER DEFAULT 0"},
 		{"documents", "kind_user", "ALTER TABLE documents ADD COLUMN kind_user INTEGER DEFAULT 0"},
+		{"documents", "category_user", "ALTER TABLE documents ADD COLUMN category_user INTEGER DEFAULT 0"},
 	}
 	for _, m := range migrations {
 		rows, err := conn.Query("PRAGMA table_info(" + m.table + ")")
@@ -224,4 +226,25 @@ type Chunk struct {
 	Seq  int
 	Page int // 1-based; 0 = unpaginated source
 	Text string
+}
+
+// ExistingCategories lists distinct non-empty categories in the library
+// (the model reuses these when auto-categorizing, so shelves consolidate
+// instead of multiplying).
+func ExistingCategories(conn *sql.DB) ([]string, error) {
+	rows, err := conn.Query(
+		"SELECT DISTINCT category FROM documents WHERE category != '' ORDER BY category")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var c string
+		if err := rows.Scan(&c); err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
 }

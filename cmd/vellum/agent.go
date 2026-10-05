@@ -115,7 +115,12 @@ Override a kind (then re-process):
     vellum kind 42 paper
     vellum process 42
 
-Categories are YOUR shelving (any string; e.g. "ai-papers", "theology"):
+Categories are YOUR shelving (any string; e.g. "ai-papers", "theology").
+Processing AUTO-FILES unshelved documents: the tagging call proposes one
+category per document (reusing your existing shelves when one fits;
+junk values are filtered); PATCH/vellum category pins it (category_user)
+and the model never re-files a pinned document. Process results carry
+the field ("category") and the UI shows the shelf as a chip.
     vellum category 42 ai-papers     # set; "none" clears
     vellum show all --kind paper --category ai-papers --tag transformer
     vellum search "attention" --kind paper --tag ai --category ai-papers
@@ -142,7 +147,8 @@ Editing vocab.yaml by hand is also fine (name: description, YAML map).
     GET  /api/categories            # distinct categories + counts
     GET  /api/documents/{id}        # + chunks, tag_sources
     GET  /api/documents/{id}/file    # the original file (?dl=1 to download)
-    PATCH /api/documents/{id}       # {"title":..,"authors":..,"year":..,"summary":..}
+    PATCH /api/documents/{id}       # {"title":..,"authors":..,"year":..,
+                                    #  "summary":..,"kind":..,"category":..}
     PUT  /api/documents/{id}/tags   # {"tags":[...]} (replaces; source=manual)
     POST /api/ingest                # {"paths":[...],"reprocess":false} -> stats
                                     # (fast: text layers only; progress via

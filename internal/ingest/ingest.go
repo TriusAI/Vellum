@@ -62,6 +62,7 @@ type ProcessResult struct {
 	Status    string   `json:"status"` // done | error
 	Tags      []string `json:"tags,omitempty"`
 	TagsOther []string `json:"tags_other,omitempty"`
+	Category  string   `json:"category,omitempty"` // auto-filed or suggested
 	Error     string   `json:"error,omitempty"`
 }
 
@@ -305,7 +306,7 @@ func ProcessPending(cfg *config.Config, conn *sql.DB, v *vocab.Vocabulary,
 		}
 		results = append(results, ProcessResult{
 			DocID: d.id, Path: d.path, Status: "done",
-			Tags: res.Tags, TagsOther: res.TagsOther})
+			Tags: res.Tags, TagsOther: res.TagsOther, Category: res.Category})
 	}
 	return results, nil
 }
@@ -356,6 +357,11 @@ func processOne(cfg *config.Config, conn *sql.DB, v *vocab.Vocabulary,
 	}
 
 	text, err := db.DocumentText(conn, docID)
+	if err != nil {
+		return nil, err
+	}
+
+	existingCategories, err := db.ExistingCategories(conn)
 	if err != nil {
 		return nil, err
 	}
@@ -412,8 +418,8 @@ func processOne(cfg *config.Config, conn *sql.DB, v *vocab.Vocabulary,
 			if len(opening) > 3000 {
 				opening = opening[:3000]
 			}
-			tags, err := summarize.TagDocument(cfg, v, []string{abstract, opening},
-				nil, abstract, progress)
+			tags, err := summarize.TagDocumentWithCategories(cfg, v, existingCategories,
+				[]string{abstract, opening}, nil, abstract, progress)
 			if err != nil {
 				return nil, err
 			}
@@ -444,7 +450,8 @@ func processOne(cfg *config.Config, conn *sql.DB, v *vocab.Vocabulary,
 				if toc := classify.ExtractTOC(text); toc != "" {
 					tagInput = append(tagInput, "Contents:\n"+toc)
 				}
-				tags, terr := summarize.TagDocument(cfg, v, tagInput, nil, front, progress)
+				tags, terr := summarize.TagDocumentWithCategories(cfg, v,
+					existingCategories, tagInput, nil, front, progress)
 				if terr != nil {
 					return nil, terr
 				}
@@ -472,7 +479,8 @@ func processOne(cfg *config.Config, conn *sql.DB, v *vocab.Vocabulary,
 	if err != nil {
 		return nil, err
 	}
-	tags, err := summarize.TagDocument(cfg, v, chunks, summaries, summary, progress)
+	tags, err := summarize.TagDocumentWithCategories(cfg, v, existingCategories,
+		chunks, summaries, summary, progress)
 	if err != nil {
 		return nil, err
 	}
@@ -522,6 +530,14 @@ func storeProcessed(conn *sql.DB, docID int64, title, authors, year string,
 	newAuthors = cleanMetaValue(newAuthors)
 	if !yearRE.MatchString(newYear) {
 		newYear = ""
+	}
+	// auto-categorization: the model's category suggestion files the
+	// document into a shelf — but ONLY when the user has not set one
+	// themselves (category_user) or already picked a category
+	if tags.Category != "" {
+		conn.Exec(
+			"UPDATE documents SET category=? WHERE id=? AND category_user=0 AND (category IS NULL OR category='')",
+			tags.Category, docID)
 	}
 	if _, err := conn.Exec(
 		"UPDATE documents SET summary=?, summary_source=?, title=?, authors=?, year=?, status='done', processed_at=datetime('now') WHERE id=?",

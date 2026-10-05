@@ -57,6 +57,13 @@ Rules:
   "marine-biology", "austen-studies"). Only propose a new tag when it is
   genuinely better than anything allowed; do not duplicate allowed tags,
   and do not propose vague labels ("misc", "other", "science").
+- Also file the document into ONE shelve-like category in the "category"
+  field — a broad subject area (not a format, not a tag duplicate), short,
+  lowercase, hyphenated ("quantum-mechanics", "moral-theology",
+  "medieval-history"). Categories already in use in this library:
+{categories}
+prefer one of those EXACTLY when it fits; propose a new one otherwise.
+If nothing fits, use "".
 - If you can confidently infer the document's title, authors, or publication
   year from the text, fill them in; otherwise leave them empty ("" / []).
 
@@ -78,10 +85,11 @@ func tagSchema(enum []string) map[string]any {
 			"title":      map[string]any{"type": "string"},
 			"authors":    map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
 			"year":       map[string]any{"type": "string"},
+			"category":   map[string]any{"type": "string", "maxLength": 40},
 			"tags":       map[string]any{"type": "array", "items": map[string]any{"type": "string", "enum": enum}},
 			"tags_other": map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
 		},
-		"required": []string{"title", "authors", "year", "tags", "tags_other"},
+		"required": []string{"title", "authors", "year", "category", "tags", "tags_other"},
 	}
 }
 
@@ -255,6 +263,7 @@ type TagResult struct {
 	Title     string
 	Authors   []string
 	Year      string
+	Category  string   // shelving suggestion ("" none); junk-filtered
 	Tags      []string // all in the controlled vocabulary
 	TagsOther []string // freeform suggestions, lowercase, max 3
 }
@@ -268,6 +277,16 @@ type TagResult struct {
 // raw-text prefix — cheaper and enough signal for topic tagging.
 func TagDocument(cfg *config.Config, v *vocab.Vocabulary,
 	chunks, summaries []string, finalSummary string, cb ProgressFunc) (*TagResult, error) {
+	return TagDocumentWithCategories(cfg, v, nil, chunks, summaries, finalSummary, cb)
+}
+
+// TagDocumentWithCategories is TagDocument plus the library's existing
+// categories, which the model is told to reuse when one fits (so
+// auto-categorization consolidates shelves instead of inventing one per
+// document).
+func TagDocumentWithCategories(cfg *config.Config, v *vocab.Vocabulary,
+	categories []string, chunks, summaries []string, finalSummary string,
+	cb ProgressFunc) (*TagResult, error) {
 
 	var input string
 	if len(summaries) > 0 {
@@ -291,6 +310,12 @@ func TagDocument(cfg *config.Config, v *vocab.Vocabulary,
 	report(cb, "choosing tags")
 	prompt := strings.ReplaceAll(tagPrompt, "{descriptions}", v.DescriptionsBlock())
 	prompt = strings.ReplaceAll(prompt, "{max_tags}", fmt.Sprint(cfg.Summarize.MaxTags))
+	prompt = strings.ReplaceAll(prompt, "{categories}", func() string {
+		if len(categories) == 0 {
+			return "(none yet — propose freely)"
+		}
+		return strings.Join(categories, ", ")
+	}())
 	prompt = strings.ReplaceAll(prompt, "{text}", input)
 
 	out, err := chat(cfg, prompt, tagSchema(v.SortedKeys()))
@@ -306,6 +331,27 @@ func TagDocument(cfg *config.Config, v *vocab.Vocabulary,
 		Title:   str(out["title"]),
 		Year:    str(out["year"]),
 		Authors: strSlice(out["authors"]),
+	}
+	{
+		cat := strings.ToLower(strings.TrimSpace(str(out["category"])))
+		cat = strings.Join(strings.Fields(cat), "-") // spaces -> hyphens
+		switch cat {
+		case "", "unknown", "untitled", "unspecified", "none", "n/a",
+			"na", "null", "other", "misc", "miscellaneous", "general",
+			"documents", "library", "uncategorized":
+			cat = ""
+		}
+		// reuse an existing shelf's exact spelling when it matches
+		for _, existing := range categories {
+			if strings.EqualFold(existing, cat) && existing != "" {
+				cat = existing
+				break
+			}
+		}
+		if len(cat) > 40 {
+			cat = cat[:40]
+		}
+		res.Category = cat
 	}
 	for _, t := range strSlice(out["tags"]) {
 		if vocabSet[t] && len(res.Tags) < cfg.Summarize.MaxTags {

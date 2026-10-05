@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"syscall"
 	"testing"
@@ -25,6 +26,8 @@ import (
 	"vellum/internal/vocab"
 	"vellum/tests/testutil"
 )
+
+var shelfLabel = regexp.MustCompile(`^[a-z0-9-]{1,40}$`)
 
 const lorem = `On the Origin of Cognitive Machines
 
@@ -464,6 +467,27 @@ The rain began before the road did, and the field kept its own counsel.
 		}
 	}
 	tagsRows.Close()
+
+	// ---- auto-categorization: when the model filed documents, the
+	// category must be a well-formed shelf label (junk-filtered)
+	catRows, err := conn.Query(
+		"SELECT DISTINCT category FROM documents WHERE category != ''")
+	if err != nil {
+		t.Fatal(err)
+	}
+	seenCat := 0
+	for catRows.Next() {
+		var c string
+		if err := catRows.Scan(&c); err != nil {
+			t.Fatal(err)
+		}
+		seenCat++
+		if !shelfLabel.MatchString(c) {
+			t.Fatalf("auto-category label malformed: %q", c)
+		}
+	}
+	catRows.Close()
+	t.Logf("auto-categorized shelves: %d", seenCat)
 
 	// ---- embeddings + semantic search
 	if _, err := search.EmbedPending(cfg, conn); err != nil {

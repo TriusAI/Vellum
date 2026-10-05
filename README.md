@@ -73,6 +73,9 @@ vellum search "papers arguing against tabula rasa" --semantic
 # filters (on search and "show all"): --kind --category --tag (repeatable)
 vellum show all --kind paper --category ai-papers
 vellum search "attention" --tag transformer --kind paper
+# auto-categorization: processing files unshelved documents into
+# categories (reusing your existing shelves; user-set shelves are kept)
+vellum category 3 theology      # pin or re-file manually
 
 # 3. inspect
 vellum show all

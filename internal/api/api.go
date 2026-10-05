@@ -433,6 +433,9 @@ func (s *Server) patchDocument(w http.ResponseWriter, r *http.Request) {
 	if _, hasKind := set["kind"]; hasKind {
 		s.conn.Exec("UPDATE documents SET kind_user=1 WHERE id=?", id)
 	}
+	if _, hasCategory := set["category"]; hasCategory {
+		s.conn.Exec("UPDATE documents SET category_user=1 WHERE id=?", id)
+	}
 	s.document(w, r)
 }
 
