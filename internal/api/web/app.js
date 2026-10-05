@@ -132,15 +132,16 @@ function renderList(docs, flat) {
       ul);
     return det;
   };
-  let uncategorized = null;
-  if (root.children.has("")) {
-    uncategorized = root.children.get("");
-    root.children.delete("");
-  }
   for (const [cat, node] of [...root.children.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
     list.append(renderGroup(node, cat, false));
   }
-  if (uncategorized) list.append(renderGroup(uncategorized, "uncategorized", true));
+  // documents without a category live directly on the root node
+  // (empty category = no child group was ever created)
+  if (root.docs.length) {
+    list.append(renderGroup(
+      { docs: root.docs, children: new Map(), total: root.docs.length },
+      "uncategorized", true));
+  }
 }
 
 // Items are compact list rows: title, category, tags — the details
