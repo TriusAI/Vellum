@@ -76,6 +76,20 @@ Inspect:            vellum show all --json
   -> [{"id":N,"path":"...","title":"...","authors":"...","year":"...",
        "summary":"...","status":"done","tags":["..."],"ocr_pages":N,...},...]
 
+## Backends: bundled llama.cpp, your own llama.cpp, or ollama
+llm.backend: llama-server (default; bundled) — the shell launcher starts
+the bundled qwen3 + nomic servers (skip-able individually):
+    llm: {external: true}      # your OWN llama-server at tools.llm_url
+    embed: {external: true}    # your own embedding server
+    llm: {backend: ollama, model: qwen3:4b}
+    embed: {provider: ollama, model: nomic-embed-text}
+llm.external / embed.external: true points the pipeline at servers you
+run yourself (fast GPU hosts welcome); tools.llm_url / tools.embed_url
+must be reachable then. IMPORTANT: constraints survive the switch —
+tags stay grammar-bound on every backend (llama-server response_format
+= ollama "format" = the same JSON schema), and llm.num_ctx must match
+the actual server context on any backend (ollama: num_ctx option).
+
 ## Ingest is two-phase (fast ingest, OCR at process time)
 ingest reads TEXT LAYERS only and never OCRs: a scanned 300-page book
 indexes in seconds, marked ocr_pending=1 with a thin (or empty) chunk
@@ -88,12 +102,29 @@ text. The heavy work happens in process:
 So after ingesting scans, just run process and watch the progress
 line; ingest "hang" on big scans is fixed.
 
+## Ask an LLM (about one document)
+A freeform streaming chat per document, powered by an EXTERNAL model
+(config: ask: {provider: none|openai|anthropic|ollama, model, api_key,
+base_url}; openai = any OpenAI-COMPATIBLE endpoint via base_url). The
+chat context = metadata + summary + opening text of that document.
+    GET  /api/ask/config            # (key masked: key_set)
+    PUT  /api/ask/config {provider, model, api_key?, base_url}
+    POST /api/ask/test              # tiny exchange; {} = test current
+    POST /api/documents/{id}/ask    # stream: "data: {...}\n\n" events
+                                    #   {"d": "..."} deltas, {"e": "..."}
+                                    #   error, {"done":"1"} end
+Provider can be overridden per request ({"provider":"ollama",...}).
+This chat does NOT affect tagging (which stays grammar-constrained).
+
 ## Fixing garbled text
 When the text (Text tab in the UI) is garbled — a bad OCR pass baked
 into the file by some other tool: re-extract with raster forced:
-    vellum reextract ID --force-ocr    # OCR every page, replace text
-    vellum reextract ID                # repair only broken-looking pages
-    POST /api/documents/{id}/reextract {"force":true}
+    vellum reextract ID --force-ocr          # OCR every page, replace text
+    vellum reextract ID --pages 3,7-12       # OCR only those pages
+    vellum reextract ID                      # repair only broken-looking pages
+    POST /api/documents/{id}/reextract {"force":true,"pages":[3,7]}
+Per-page repairs accumulate (documents.ocr_done_pages), so fixing one
+page does not undo the previous fix when the text pass rebuilds.
 Text is replaced in place; status lands back on pending so the next
 process rebuilds summary/tags. Run "vellum embed" afterwards to
 refresh semantic vectors (chunk text changed).

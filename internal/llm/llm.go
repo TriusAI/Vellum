@@ -109,8 +109,23 @@ func TrimToTokenBudget(baseURL, text string, budgetTokens, overheadTokens int) (
 		effective = 512
 	}
 	n, err := CountTokens(baseURL, text)
-	if err != nil || n <= effective {
-		return text, err
+	if err == nil {
+		if n <= effective {
+			return text, nil
+		}
+	} else {
+		// no tokenizer reachable (e.g. the ollama backend): fall back to
+		// the character heuristic directly instead of returning the
+		// text uncut
+		est := len(text)
+		if est <= effective*3 {
+			return text, nil
+		}
+		cut := strings.LastIndex(text[:effective*3], "\n\n")
+		if cut <= 0 {
+			cut = effective * 3
+		}
+		return text[:cut], nil
 	}
 	// estimate a cut point, then verify
 	for {

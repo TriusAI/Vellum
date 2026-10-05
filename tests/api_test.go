@@ -5,6 +5,7 @@ package tests
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -165,6 +166,58 @@ func TestAPI(t *testing.T) {
 		t.Fatal("dotfiles must be hidden from the picker")
 	}
 	request("GET", "/api/fs?path=relative/path", "", nil, 400)
+
+	// ---- ask configuration round-trip (api key masked)
+	var askCfg map[string]any
+	request("PUT", "/api/ask/config",
+		`{"provider":"openai","model":"gpt-4o-mini","api_key":"sk-test"}`, &askCfg, 200)
+	request("GET", "/api/ask/config", "", &askCfg, 200)
+	if askCfg["provider"] != "openai" || askCfg["key_set"] != true {
+		t.Fatalf("ask config round-trip wrong: %v", askCfg)
+	}
+	if _, has := askCfg["api_key"]; has {
+		t.Fatal("the api key must not be served back")
+	}
+	// empty key in a further PUT keeps the stored one
+	request("PUT", "/api/ask/config", `{"provider":"anthropic"}`, &askCfg, 200)
+	request("GET", "/api/ask/config", "", &askCfg, 200)
+	if askCfg["provider"] != "anthropic" || askCfg["key_set"] != true {
+		t.Fatalf("empty key must keep the stored key: %v", askCfg)
+	}
+	// ask with provider unset-but-testable: a test call WITHOUT the key
+	// must fail (502) — it would try a network call against the default
+	// endpoint with junk; the e2e runs offline-guarded anyway. Test only
+	// the shape of the disabled path:
+	request("PUT", "/api/ask/config", `{"provider":"none"}`, &askCfg, 200)
+	if askCfg["enabled"] != false {
+		t.Fatalf("provider none must read as disabled: %v", askCfg)
+	}
+
+	// ---- covers: the .pdf renders page 1; text files have none
+	var coverResp *http.Response
+	req1, _ := http.NewRequest("GET", ts.URL+"/api/documents/1/cover", nil)
+	coverResp, err = ts.Client().Do(req1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if coverResp.StatusCode != 200 {
+		t.Fatalf("pdf cover should render, got %d", coverResp.StatusCode)
+	}
+	if ct := coverResp.Header.Get("Content-Type"); ct != "image/png" {
+		t.Fatalf("cover content type: %s", ct)
+	}
+	coverResp.Body.Close()
+	var mdID int64
+	if err := conn.QueryRow("SELECT id FROM documents WHERE path LIKE '%.md'").
+		Scan(&mdID); err != nil {
+		t.Fatal(err)
+	}
+	request("GET", fmt.Sprintf("/api/documents/%d/cover", mdID), "", nil, 404)
+
+	// ---- reextract pass-through on a text-format doc (chunks rebuilt)
+	var reex map[string]any
+	request("POST", fmt.Sprintf("/api/documents/%d/reextract", mdID),
+		`{}`, &reex, 200)
 
 	// documents list
 	var docs []map[string]any

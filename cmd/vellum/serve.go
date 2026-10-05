@@ -10,7 +10,15 @@ import (
 
 	"vellum/internal/api"
 	"vellum/internal/config"
+	"vellum/internal/llm"
 )
+
+func orDash(s string) string {
+	if s == "" {
+		return "(default)"
+	}
+	return s
+}
 
 // cmdServe runs the local web UI + JSON API. Binds 127.0.0.1 by default —
 // the UI has no authentication; it is meant for the person at the machine.
@@ -25,7 +33,15 @@ func cmdServe(cfg *config.Config, args []string) {
 
 	url := "http://" + *listen
 	fmt.Printf("vellum web UI:  %s\n", url)
-	fmt.Printf("JSON API:       %s/api/status  (docs: `vellum agent`)\n", url)
+	fmt.Printf("JSON API:       %s/api/status  (docs: vellum agent)\n", url)
+	fmt.Printf("chat backend:   %s at %s (model: %s)\n",
+		cfg.LLM.Backend, cfg.Tools.LLMURL, orDash(cfg.LLM.Model))
+	if !llm.AvailableFor(cfg.LLM.Backend, cfg.Tools.LLMURL) {
+		fmt.Printf("WARNING: chat backend not reachable NOW — %s\n"+
+			"  (for backend=llama-server with external=false the shell launcher\n"+
+			"  starts the bundled servers; external=true/Ollama must be running)\n",
+			cfg.Tools.LLMURL)
+	}
 	if *open {
 		exec.Command("xdg-open", url).Start() // best effort; Linux pack
 	}

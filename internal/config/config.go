@@ -5,8 +5,11 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+
+	"vellum/internal/ask"
 
 	"gopkg.in/yaml.v3"
 )
@@ -25,6 +28,19 @@ type Config struct {
 	} `yaml:"models"`
 
 	LLM struct {
+		// Backend is how Vellum talks to the chat model:
+		//   llama-server (default): bundled llama.cpp server via
+		//     /v1/chat/completions (schema-constrained decoding)
+		//   ollama: any Ollama instance via its native /api/chat with
+		//     the same JSON schema as "format" (tags stay grammar-bound;
+		//     tools.llm_url becomes the Ollama base URL, llm.model the
+		//     Ollama model name; the launcher skips its llama-servers)
+		// With external=true the launcher starts NO bundled server and
+		// tools.llm_url is used as-is — e.g. your own llama.cpp on
+		// another machine or GPU host (num_ctx must match its -c).
+		Backend     string  `yaml:"backend"`
+		External    bool    `yaml:"external"`
+		Model       string  `yaml:"model"`
 		Think       bool    `yaml:"think"`
 		Temperature float64 `yaml:"temperature"`
 		// NumCtx is the chat server's context window (its -c flag). The
@@ -47,9 +63,18 @@ type Config struct {
 	} `yaml:"summarize"`
 
 	Embed struct {
-		Batch     int `yaml:"batch"`
-		MaxTokens int `yaml:"max_tokens"` // per-chunk embedding input cap
+		Provider  string `yaml:"provider"` // llama-server (default) | ollama
+		External  bool   `yaml:"external"` // launcher skips its servers
+		Model     string `yaml:"model"`    // ollama: embed model name
+		Batch     int    `yaml:"batch"`
+		MaxTokens int    `yaml:"max_tokens"` // per-chunk embedding input cap
 	} `yaml:"embed"`
+
+	// Ask configures the "Ask an LLM" chat (item-context Q&A in the
+	// UI): none (default) | openai (any OpenAI-compatible endpoint, see
+	// base_url) | anthropic | ollama. The pipeline's constrained
+	// tagging is UNAFFECTED — this is for the freeform chat only.
+	Ask ask.Config `yaml:"ask"`
 
 	Tools struct {
 		Mutool    string `yaml:"mutool"`
@@ -60,9 +85,10 @@ type Config struct {
 	} `yaml:"tools"`
 
 	// computed at load time
-	BaseDir   string `yaml:"-"`
-	DBPath    string `yaml:"-"`
-	VocabPath string `yaml:"-"`
+	configPath string `yaml:"-"`
+	BaseDir    string `yaml:"-"`
+	DBPath     string `yaml:"-"`
+	VocabPath  string `yaml:"-"`
 }
 
 // Default returns a Config with all defaults filled in.
@@ -72,6 +98,8 @@ func Default() *Config {
 	c.DB = "library.db"
 	c.Models.LLM = "qwen3-4b.gguf"
 	c.Models.Embed = "nomic-embed-text-v1.5.gguf"
+	c.LLM.Backend = "llama-server"
+	c.LLM.Model = ""
 	c.LLM.Think = false
 	c.LLM.Temperature = 0.3
 	// chat server: context sized to fit GPU VRAM; the client tokenizes and
@@ -84,12 +112,15 @@ func Default() *Config {
 	c.OCR.Workers = 3
 	c.Summarize.ChunkChars = 6000
 	c.Summarize.MaxTags = 8
+	c.Embed.Provider = "llama-server"
+	c.Embed.Model = ""
 	c.Embed.Batch = 32
 	// nomic-embed-text-v1.5 has a 2048-token context: chunk embedding
 	// inputs are trimmed to this cap (the head of each chunk)
 	c.Embed.MaxTokens = 1500
 	c.Tools.Mutool = "mutool"
 	c.Tools.Tesseract = "tesseract"
+	c.Ask.Provider = "none"
 	c.Tools.LLMURL = "http://127.0.0.1:8081"
 	c.Tools.EmbedURL = "http://127.0.0.1:8082"
 	return c
@@ -134,6 +165,7 @@ func Load(path string) (*Config, error) {
 			return nil, err
 		}
 		cfg.BaseDir = filepath.Dir(cfgPath)
+		cfg.configPath = cfgPath
 	} else {
 		cfg.BaseDir = wd
 	}
@@ -144,3 +176,20 @@ func Load(path string) (*Config, error) {
 	}
 	return cfg, nil
 }
+
+// Save writes the config back to the YAML file it was loaded from,
+// preserving whatever comments/format yaml.Marshal produces. Only used
+// by the "ask" configuration UI.
+func (c *Config) Save() error {
+	if c.configPath == "" {
+		return fmt.Errorf("config was not loaded from a file (defaults)")
+	}
+	data, err := yaml.Marshal(c)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(c.configPath, data, 0o600) // contains the ask api key
+}
+
+// ConfigPath reports the file the config was loaded from.
+func (c *Config) ConfigPath() string { return c.configPath }

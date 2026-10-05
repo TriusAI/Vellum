@@ -221,16 +221,35 @@ start_embed_server() { # $1 port  $2 gguf  $3 logname
     done
 }
 
-if ! up "$LLM_PORT"; then
-    # chat server: full context window, qwen3 no-think template
-    start_llm_server "$LLM_PORT" "$LLM_GGUF" "llm-server.log" \
-        -c 8192 --jinja --chat-template-file "$TEMPLATE"
-    echo "vellum: chat server on :$LLM_PORT ($LLM_GGUF; backend: $backend)"
-fi
-if ! up "$EMBED_PORT"; then
-    start_embed_server "$EMBED_PORT" "$EMBED_GGUF" "embed-server.log"
-    echo "vellum: started embedding server on :$EMBED_PORT"
-fi
+# backend switches: the config can point the pipeline at anything else
+# (llm.backend: ollama, embed.provider: ollama, or llm/embed external:
+# true — e.g. the user's own llama-server on a GPU). The launcher asks
+# the binary for the per-channel decision (vellum backends) instead of
+# parsing YAML in shell.
+be="$("$ROOT/vellum" --config "$ROOT/config.yaml" backends 2>/dev/null || echo "chat=bundled embed=bundled")"
+case "$be" in
+    *chat=external*) ;;
+    *)
+        if ! up "$LLM_PORT"; then
+            start_llm_server "$LLM_PORT" "$LLM_GGUF" "llm-server.log" \
+                -c 8192 --jinja --chat-template-file "$TEMPLATE"
+            echo "vellum: chat server on :$LLM_PORT ($LLM_GGUF; backend: $backend)"
+        fi
+        ;;
+esac
+case "$be" in
+    *embed=external*) ;;
+    *)
+        if ! up "$EMBED_PORT"; then
+            start_embed_server "$EMBED_PORT" "$EMBED_GGUF" "embed-server.log"
+            echo "vellum: started embedding server on :$EMBED_PORT"
+        fi
+        ;;
+esac
+case "$be" in
+    *chat=external*|*embed=external*)
+        echo "vellum: config selects an external backend — bundled llama-servers skipped ($be)" >&2 ;;
+esac
 
 exec "$ROOT/vellum" --config "$ROOT/config.yaml" "$@"
 EOF

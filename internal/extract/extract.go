@@ -18,6 +18,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -91,7 +92,7 @@ func Extract(path string, cfg *config.Config) (*Result, error) {
 	if !pdfLike[ext] {
 		return nil, fmt.Errorf("unsupported file type: %s", ext)
 	}
-	return ocrize(path, cfg, text, false)
+	return ocrize(path, cfg, text, false, nil)
 }
 
 // ExtractOCR re-extracts with raster forced over the embedded text
@@ -99,6 +100,13 @@ func Extract(path string, cfg *config.Config) (*Result, error) {
 // or unusable text layer (auto mode only re-OCRs pages that LOOK
 // broken; force distrusts all of them).
 func ExtractOCR(path string, cfg *config.Config) (*Result, error) {
+	return ExtractOCRPages(path, cfg, true, nil)
+}
+
+// ExtractOCRPages is the per-page repair variant: force=true with pages
+// set OCRs exactly those pages (1-based, matching chunk.Page), leaving
+// every other page's text layer alone; pages=nil with force OCRs all.
+func ExtractOCRPages(path string, cfg *config.Config, force bool, pages []int) (*Result, error) {
 	ext := strings.ToLower(filepath.Ext(path))
 	if textExt[ext] {
 		return extractPlainText(path, cfg)
@@ -110,7 +118,7 @@ func ExtractOCR(path string, cfg *config.Config) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
-	return ocrize(path, cfg, text, true)
+	return ocrize(path, cfg, text, force, pages)
 }
 
 func extractPlainText(path string, cfg *config.Config) (*Result, error) {
@@ -188,7 +196,9 @@ func ExtractText(path string, cfg *config.Config) (*Result, error) {
 
 // ocrize runs the full OCR pass (with scan geometry) over the pages of
 // a quick-extracted document, replacing thin/garbled chunks in place.
-func ocrize(path string, cfg *config.Config, quick *Result, force bool) (*Result, error) {
+// force/pages: all pages, a page subset (per-page repair), or the
+// auto-selected broken ones.
+func ocrize(path string, cfg *config.Config, quick *Result, force bool, pages []int) (*Result, error) {
 	ext := strings.ToLower(filepath.Ext(path))
 	if textExt[ext] || !pdfLike[ext] {
 		return quick, nil
@@ -210,8 +220,19 @@ func ocrize(path string, cfg *config.Config, quick *Result, force bool) (*Result
 	chunks := quick.Chunks
 	needsOCR := []int{}
 	if force {
-		for i := range chunks {
-			needsOCR = append(needsOCR, i)
+		if pages == nil {
+			for i := range chunks {
+				needsOCR = append(needsOCR, i)
+			}
+		} else {
+			// per-page repair (1-based page numbers as stored on
+			// chunks as Page; the user reads them in the Text tab)
+			for _, pg := range pages {
+				if pg >= 1 && pg <= len(chunks) {
+					needsOCR = append(needsOCR, pg-1)
+				}
+			}
+			sort.Ints(needsOCR)
 		}
 	} else {
 		for i, c := range chunks {
@@ -681,3 +702,53 @@ const (
 )
 
 var reWord = regexp.MustCompile(`[A-Za-zÀ-ž]{3,}`)
+
+// KindOf classifies a path's family for feature gating ("pdf" =
+// rasterizable PDF-like formats, "text" = plain text, "" = unknown).
+func KindOf(ext string) string {
+	switch strings.ToLower(ext) {
+	case ".pdf", ".epub", ".mobi", ".azw", ".azw3", ".fb2":
+		return "pdf"
+	case ".txt", ".md", ".markdown", ".rst":
+		return "text"
+	}
+	return ""
+}
+
+// RenderPagePNG draws one page (1-based) of a PDF-like file to dst at
+// the given DPI — used for cover thumbnails. EPUB/MOBI/FB2 convert
+// first, so the first call for a book costs one conversion.
+func RenderPagePNG(cfg *config.Config, path string, page, dpi int, dst string) error {
+	if KindOf(filepath.Ext(path)) != "pdf" {
+		return fmt.Errorf("unsupported for raster rendering: %s", filepath.Ext(path))
+	}
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return err
+	}
+	tmp, err := os.MkdirTemp("", "vellum-render-*")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(tmp)
+	pdfPath := path
+	if strings.ToLower(filepath.Ext(path)) != ".pdf" {
+		pdfPath = filepath.Join(tmp, "converted.pdf")
+		if _, err := run(cfg.Tools.Mutool, "convert", "-o", pdfPath, path); err != nil {
+			return fmt.Errorf("convert: %w", err)
+		}
+	}
+	outPath := filepath.Join(tmp, fmt.Sprintf("p%d.png", page))
+	if _, err := run(cfg.Tools.Mutool, "draw", "-F", "png", "-r",
+		strconv.Itoa(dpi), "-o", outPath, pdfPath, strconv.Itoa(page)); err != nil {
+		return err
+	}
+	data, err := os.ReadFile(outPath)
+	if err != nil || len(data) < 8 {
+		return fmt.Errorf("empty render")
+	}
+	tmpDst := dst + ".tmp"
+	if err := os.WriteFile(tmpDst, data, 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmpDst, dst)
+}

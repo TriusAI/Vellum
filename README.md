@@ -154,6 +154,28 @@ docker run --rm -v "$PWD:/data" vellum search "tabula rasa" --semantic
 `config.yaml`, `vocab.yaml`, `library.db`, and the `library/` folder all
 live in the mounted `/data`.
 
+## Backends: bundled, your own llama.cpp, or Ollama
+The pipeline (summarize + grammar-constrained tagging + embeddings)
+talks to any of:
+
+- the **bundled** llama.cpp servers (default; the launcher starts them);
+- **your own llama.cpp** — set `llm: {external: true}` (+ `embed:
+  {external: true}` as wanted); nothing is launched, your
+  `tools.llm_url`/`tools.embed_url` must be reachable (GPU-hosted
+  llama-servers are the fast option; set `llm.num_ctx` to its `-c`);
+- **Ollama** — `llm: {backend: ollama, "model": "..."}` (+
+  `embed: {provider: ollama, "model": ...}`): tags stay grammar-bound
+  via Ollama's structured outputs (same schema, same guarantee).
+
+## Ask an LLM (chat about an document)
+The detail pane has an "Ask an LLM" tab: a streaming chat served by an
+EXTERNAL provider of your choice — `ask: {provider: none|openai|
+anthropic|ollama, model, api_key, base_url}` in config.yaml (openai =
+any OpenAI-compatible endpoint via `base_url`; editable + testable in
+the UI too). The chat sees that document's metadata, summary, and
+opening text. Tagging remains constrained by the pipeline backend
+regardless.
+
 ## Configuration
 
 `config.yaml` (found via `--config`, `$VELLUM_CONFIG`, or `./config.yaml`):

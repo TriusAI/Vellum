@@ -144,3 +144,28 @@ details.group.group-plain > summary { color: var(--muted); font-style: italic; }
 ul.cat-empty > li, details.group > ul > li {
   padding-left: 2rem;
 }
+
+.detail-head { display: flex; gap: 1rem; align-items: flex-start;
+  margin-bottom: .8rem; }
+.detail-head .cover { width: 128px; height: auto; flex: 0 0 auto;
+  border: 1px solid var(--line); }
+.detail-head .head-right { flex: 1; min-width: 0; }
+.chunk .mini { margin-left: .5rem; font-size: .72rem; padding: 0 .4rem; }
+button.mini { font-size: .72rem; padding: 0 .45rem; }
+
+/* ask panel */
+.ask-cfg { border: 1px solid var(--line); background: var(--bg);
+  margin-bottom: .7rem; }
+.ask-cfg > summary { padding: .4rem .7rem; cursor: pointer;
+  font-size: .85rem; color: var(--muted); }
+.ask-fields { display: flex; flex-wrap: wrap; gap: .4rem; padding: .5rem .7rem;
+  align-items: end; }
+.ask-fields label { width: 100%; font-size: .78rem; color: var(--muted);
+  margin: 0; }
+.ask-fields select, .ask-fields input { flex: 1 1 45%; min-width: 200px; }
+.ask-log { display: flex; flex-direction: column; gap: .6rem; }
+.ask-turn .q { background: var(--chip); padding: .4rem .6rem;
+  font-size: .9rem; white-space: pre-wrap; }
+.ask-turn .a { padding: .4rem 0 .4rem .2rem; font-size: .92rem;
+  white-space: pre-wrap; color: var(--fg); min-height: 1.2rem; }
+.ask-panel textarea { width: 100%; resize: vertical; }

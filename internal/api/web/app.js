@@ -26,6 +26,7 @@ const esc = (s) =>
 function notice(msg) { $("#notice").textContent = msg || ""; }
 
 const isPdf = (path) => /\.pdf$/i.test(path);
+const hasCover = (path) => /\.(pdf|epub|mobi|azw3?)$/i.test(path);
 
 /* ------------------------------------------------------------------ list */
 
@@ -189,7 +190,133 @@ async function processIds(ids) {
   stopProgressPolling();
 }
 
-async function reextract(id, force) {
+/* ask panel: chat with an external LLM about this document */
+
+let askConfig = null;
+
+async function askPanel(id, d) {
+  const wrap = el("div", { class: "ask-panel" });
+  if (!askConfig) {
+    try { askConfig = await api("/api/ask/config"); }
+    catch (e) { askConfig = { enabled: false, provider: "none" }; }
+  }
+  const cfgBox = el("details", { class: "ask-cfg" },
+    el("summary", {},
+      "LLM: " + (askConfig.enabled ? `${askConfig.provider} / ${askConfig.model || "(model)"}` 
+      : "not configured — configure to use"))); 
+  const sel = el("select", {},
+    ...["none", "openai", "anthropic", "ollama"].map((p) =>
+      el("option", { value: p }, p === "openai" ? "openai (or compatible endpoint)" : p)));
+  sel.value = askConfig.provider || "none";
+  const inModel = el("input", { value: askConfig.model || "", placeholder: "model (e.g. gpt-4o-mini, claude-sonnet-4-5, llama3.1:8b)" });
+  const inKey = el("input", { type: "password", value: "",
+    placeholder: askConfig.key_set ? "api key (stored — leave blank to keep)" : "api key" });
+  const inBase = el("input", { value: askConfig.base_url || "",
+    placeholder: "base url (default: api endpoint; any openai-compatible server)" });
+  const cfgMsg = el("span", { class: "hint" }, "");
+  const cfgRow = el("div", { class: "row" },
+    el("button", {
+      class: "plain",
+      onclick: async () => {
+        cfgMsg.textContent = "testing…";
+        try {
+          await api("/api/ask/test", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              provider: sel.value, model: inModel.value,
+              ...(inKey.value ? { api_key: inKey.value } : {}),
+              base_url: inBase.value, }),
+          });
+          cfgMsg.textContent = "connection OK";
+        } catch (e) { cfgMsg.textContent = "failed: " + e.message; }
+      },
+    }, "Test"),
+    el("button", {
+      onclick: async () => {
+        try {
+          askConfig = await api("/api/ask/config", {
+            method: "PUT", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              provider: sel.value, model: inModel.value,
+              ...(inKey.value ? { api_key: inKey.value } : {}),
+              base_url: inBase.value, }),
+          });
+          cfgMsg.textContent = "saved ✓";
+          const sum = cfgBox.querySelector("summary");
+          sum.textContent = "LLM: " + (askConfig.enabled
+            ? `${askConfig.provider} / ${askConfig.model || "(model)"}` : "not configured");
+        } catch (e) { cfgMsg.textContent = "save failed: " + e.message; }
+      },
+      style: "margin-left: .4rem",
+    }, "Save"),
+    cfgMsg);
+  cfgBox.append(el("div", { class: "ask-fields" },
+    el("label", {}, "provider"), sel,
+    el("label", {}, "model"), inModel,
+    el("label", {}, "api key"), inKey,
+    el("label", {}, "base url (openai-compatible override)"), inBase,
+    cfgRow));
+  wrap.append(cfgBox);
+
+  // transcript (session-local: the chat is not stored)
+  const log = el("div", { class: "ask-log" });
+  const input = el("textarea", { rows: 2, placeholder: "ask about this document…" });
+  let busy = false;
+  const sendBtn = el("button", { onclick: send, disabled: !askConfig?.enabled }, "Send");
+  const setBusy = (b) => { busy = b; sendBtn.disabled = b || !askConfig?.enabled; input.disabled = b; };
+  async function send() {
+    const q = input.value.trim();
+    if (!q || busy) return;
+    input.value = "";
+    setBusy(true);
+    const turn = el("div", { class: "ask-turn" }, el("div", { class: "q" }, esc(q)),
+      el("div", { class: "a", id: "…" }));
+    log.append(turn);
+    const answer = turn.querySelector(".a");
+    try {
+      const res = await fetch(`/api/documents/${id}/ask`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ messages: [...askHistory[id] || [],
+          { role: "user", content: q }] }),
+      });
+      if (!res.ok || !res.body) throw new Error(res.statusText);
+      askHistory[id] = [...(askHistory[id] || []), { role: "user", content: q }];
+      let acc = "";
+      const reader = res.body.getReader();
+      const dec = new TextDecoder();
+      let buf = "";
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
+        for (let nl; (nl = buf.indexOf("\n\n")) >= 0; buf = buf.slice(nl + 2)) {
+          const frame = buf.slice(0, nl);
+          if (!frame.startsWith("data:")) continue;
+          const payload = JSON.parse(frame.slice(5).trim());
+          if (payload.e) { acc += (acc ? "\n" : "") + "⚠ " + payload.e; }
+          else if (payload.d) acc += payload.d;
+        }
+        answer.textContent = acc || "…";
+      }
+      answer.textContent = acc || "(empty answer)";
+      askHistory[id].push({ role: "assistant", content: acc });
+    } catch (e) {
+      answer.textContent = "error: " + e.message;
+    }
+    setBusy(false);
+  }
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey && !busy) { e.preventDefault(); send(); }
+  });
+  wrap.append(log, el("div", { class: "row" }, input, sendBtn));
+  wrap.append(el("p", { class: "hint" },
+    "The model sees the metadata, summary, and opening text of this document. This chat is session-local."));
+  return wrap;
+}
+
+const askHistory = {};
+
+async function reextract(id, force, pages) {
   const prefix = force ? "Force-OCR re-extract" : "Re-extract";
   notice(`${prefix} — live progress below…`);
   startProgressPolling(prefix);
@@ -197,7 +324,7 @@ async function reextract(id, force) {
     await api(`/api/documents/${id}/reextract`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ force }),
+      body: JSON.stringify(pages ? { force: true, pages } : { force }),
     });
     notice(`${prefix} done — text replaced; the document is pending re-processing.`);
     await loadDocs();
@@ -232,6 +359,7 @@ function renderDetailTabs(active) {
   tabs.append(mk("summary", "Summary"));
   tabs.append(mk("preview", "Preview" + (isPdf(d.path) ? "" : " (file)")));
   tabs.append(mk("text", `Text (${currentDetail.data.chunks.length})`));
+  tabs.append(mk("ask", "Ask an LLM"));
   $("#detail-body").replaceChildren(tabs, detailContent(active));
 }
 
@@ -250,6 +378,10 @@ function detailContent(tab) {
     }
     return el("p", { class: "hint" },
       `No inline preview for this file type — download: /api/documents/${id}/file?dl=1`);
+  }
+
+  if (tab === "ask") {
+    return askPanel(id, d);
   }
 
   if (tab === "text") {
@@ -292,6 +424,18 @@ function detailContent(tab) {
       }, "re-extract text (force OCR)")));
     for (const c of data.chunks) {
       const loc = c.page > 0 ? `page ${c.page}` : `chunk ${c.seq}`;
+      const fix = c.page > 0 && isPdf(d.path) ? el("button", {
+        class: "mini", title: "OCR just this page (repair)",
+        onclick: async (ev) => {
+          ev.stopPropagation();
+          ev.target.textContent = "OCR…";
+          ev.target.disabled = true;
+          try { await reextract(d.id, true, [c.page]); } finally {
+            ev.target.textContent = "OCR";
+            ev.target.disabled = false;
+          }
+        },
+      }, "OCR") : null;
       const open = () => {
         if (isPdf(d.path) && c.page > 0) {
           currentDetail.page = c.page;
@@ -301,19 +445,30 @@ function detailContent(tab) {
         div.classList.toggle("open");
       };
       const div = el("div", { class: "chunk", onclick: open },
-        el("span", { class: "loc" }, esc(loc)), " ", esc(c.text.slice(0, 240) + (c.text.length > 240 ? "…" : "")));
+        el("span", { class: "loc" }, esc(loc)), " ",
+        esc(c.text.slice(0, 240) + (c.text.length > 240 ? "…" : "")));
+      if (fix) div.append(fix);
       wrap.append(div);
     }
     return wrap;
   }
 
-  // summary tab: metadata editing + tags
-  const body = el("div", {},
+  // summary tab: cover + metadata editing + tags
+  const cover = hasCover(d.path) ? el("img", {
+    class: "cover", src: `/api/documents/${id}/cover`,
+    alt: "first page", loading: "lazy",
+    onerror: (ev) => { ev.target.style.display = "none"; },
+  }) : null;
+  const headRight = el("div", { class: "head-right" },
     el("h2", {}, esc(d.title || d.path.split("/").pop())),
     el("div", { class: "hint" }, esc(d.path)),
     d.summary_source ? el("div", { class: "hint" },
       "summary: extracted from the document (" + esc(d.summary_source) +
       " — the author's own words, not model-generated)") : null);
+  const head = el("div", { class: "detail-head" });
+  if (cover) head.append(cover);
+  head.append(headRight);
+  const body = el("div", {}, head);
   if (d.status !== "done")
     body.append(el("div", { class: "hint" },
       `status: ${esc(d.status)} ${d.error ? "— " + esc(d.error) : ""}`));

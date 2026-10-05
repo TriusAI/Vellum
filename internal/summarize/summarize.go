@@ -94,6 +94,12 @@ func tagSchema(enum []string) map[string]any {
 }
 
 func chat(cfg *config.Config, prompt string, schema map[string]any) (map[string]any, error) {
+	// ollama backend: same grammar-structured call through its native API
+	if cfg.LLM.Backend == "ollama" {
+		return llm.OllamaChatJSON(cfg.Tools.LLMURL, cfg.LLM.Model,
+			[]llm.Message{{Role: "user", Content: prompt}},
+			schema, cfg.LLM.Think, cfg.LLM.Temperature, cfg.LLM.NumCtx)
+	}
 	return llm.ChatJSON(cfg.Tools.LLMURL,
 		[]llm.Message{{Role: "user", Content: prompt}},
 		schema, cfg.LLM.Think, cfg.LLM.Temperature)

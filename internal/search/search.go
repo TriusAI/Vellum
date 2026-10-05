@@ -81,7 +81,13 @@ func Semantic(cfg *config.Config, conn *sql.DB, query string, k int) ([]Semantic
 	if _, err := EmbedPending(cfg, conn); err != nil {
 		return nil, err
 	}
-	vecs, err := llm.Embed(cfg.Tools.EmbedURL, []string{query})
+	var vecs [][]float32
+	var err error
+	if cfg.Embed.Provider == "ollama" {
+		vecs, err = llm.OllamaEmbed(cfg.Tools.EmbedURL, cfg.Embed.Model, []string{query})
+	} else {
+		vecs, err = llm.Embed(cfg.Tools.EmbedURL, []string{query})
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -189,7 +195,13 @@ WHERE c.embedding IS NOT NULL`)
 // 2048 tokens — inputs beyond that are not embeddable, the head carries
 // the topical signal).
 func EmbedPending(cfg *config.Config, conn *sql.DB) (int, error) {
-	model := cfg.Tools.EmbedURL
+	modelName := "" // ollama embed model name ("" = llama-server mode)
+	if cfg.Embed.Provider == "ollama" {
+		modelName = cfg.Embed.Model
+	}
+	// identity = server + provider + model: vectors live in one model's
+	// space; switching any of them invalidates the lot
+	model := cfg.Embed.Provider + "@" + cfg.Tools.EmbedURL + "/" + modelName
 	if stored := db.MetaGet(conn, "embed_model"); stored != "" && stored != model {
 		if _, err := conn.Exec("UPDATE chunks SET embedding=NULL"); err != nil {
 			return 0, err
@@ -238,18 +250,23 @@ func EmbedPending(cfg *config.Config, conn *sql.DB) (int, error) {
 				texts = append(texts, " ")
 				continue
 			}
-			trimmed, err := llm.TrimToTokenBudget(cfg.Tools.EmbedURL, t,
-				cfg.Embed.MaxTokens, 100)
+			trimmed, err := TrimToTokenBudgetFor(cfg, t)
 			if err != nil {
 				// tokenizer unavailable: conservative character cap
-				trimmed = t
+				trimmed, _ = llm.TrimToTokenBudget(cfg.Tools.EmbedURL, t,
+					cfg.Embed.MaxTokens, 100)
 				if max := cfg.Embed.MaxTokens * 4; max > 0 && len(t) > max {
 					trimmed = t[:max]
 				}
 			}
 			texts = append(texts, trimmed)
 		}
-		vecs, err := llm.Embed(cfg.Tools.EmbedURL, texts)
+		var vecs [][]float32
+		if cfg.Embed.Provider == "ollama" {
+			vecs, err = llm.OllamaEmbed(cfg.Tools.EmbedURL, cfg.Embed.Model, texts)
+		} else {
+			vecs, err = llm.Embed(cfg.Tools.EmbedURL, texts)
+		}
 		if err != nil {
 			return done, err
 		}
@@ -305,4 +322,9 @@ func cosine(a []float32, b []float32) float64 {
 		return 0
 	}
 	return dot / (math.Sqrt(na) * math.Sqrt(nb))
+}
+
+// TrimToTokenBudgetFor trims embed inputs to embed.max_tokens.
+func TrimToTokenBudgetFor(cfg *config.Config, text string) (string, error) {
+	return llm.TrimToTokenBudget(cfg.Tools.EmbedURL, text, cfg.Embed.MaxTokens, 100)
 }

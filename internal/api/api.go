@@ -7,16 +7,19 @@ import (
 	"database/sql"
 	"embed"
 	"encoding/json"
+	"fmt"
 	"io/fs"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"vellum/internal/ask"
 	"vellum/internal/classify"
 	"vellum/internal/config"
 	"vellum/internal/db"
@@ -54,12 +57,17 @@ func (s *Server) Mux() http.Handler {
 	mux.HandleFunc("GET /api/categories", s.categories)
 	mux.HandleFunc("GET /api/documents/{id}", s.document)
 	mux.HandleFunc("GET /api/documents/{id}/file", s.file)
+	mux.HandleFunc("GET /api/documents/{id}/cover", s.cover)
 	mux.HandleFunc("PATCH /api/documents/{id}", s.patchDocument)
 	mux.HandleFunc("PUT /api/documents/{id}/tags", s.putTags)
 	mux.HandleFunc("POST /api/ingest", s.postIngest)
 	mux.HandleFunc("GET /api/fs", s.fsList)
 	mux.HandleFunc("POST /api/documents/{id}/reextract", s.reextract)
 	mux.HandleFunc("POST /api/process", s.postProcess)
+	mux.HandleFunc("GET /api/ask/config", s.getAskConfig)
+	mux.HandleFunc("PUT /api/ask/config", s.putAskConfig)
+	mux.HandleFunc("POST /api/ask/test", s.testAsk)
+	mux.HandleFunc("POST /api/documents/{id}/ask", s.postAsk)
 	mux.HandleFunc("GET /api/search", s.search)
 	mux.HandleFunc("GET /api/vocab", s.getVocab)
 	mux.HandleFunc("GET /api/vocab/suggestions", s.suggestions)
@@ -522,6 +530,39 @@ func (s *Server) fsList(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, out)
 }
 
+// vellumParseStoredPages decodes the ocr_done_pages csv ("all"/"" -> nil).
+func vellumParseStoredPages(s string) []int {
+	if s == "all" || s == "" {
+		return nil
+	}
+	var out []int
+	for _, part := range strings.Split(s, ",") {
+		if n, err := strconv.Atoi(strings.TrimSpace(part)); err == nil && n >= 1 {
+			out = append(out, n)
+		}
+	}
+	sort.Ints(out)
+	return out
+}
+
+// vellumStoreDonePages merges page numbers into a sorted csv string.
+func vellumStoreDonePages(pages []int) string {
+	set := map[int]bool{}
+	for _, p := range pages {
+		set[p] = true
+	}
+	out := make([]int, 0, len(set))
+	for p := range set {
+		out = append(out, p)
+	}
+	sort.Ints(out)
+	parts := []string{}
+	for _, p := range out {
+		parts = append(parts, strconv.Itoa(p))
+	}
+	return strings.Join(parts, ",")
+}
+
 func (s *Server) postIngest(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Paths     []string `json:"paths"`
@@ -555,6 +596,50 @@ func (s *Server) postIngest(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, st)
 }
 
+// cover serves page 1 as a PNG — the item's "cover image" for the
+// metadata view. Rendered lazily on first request and cached under
+// <basedir>/covers/; ingest of a changed file drops the cache entry.
+func (s *Server) cover(w http.ResponseWriter, r *http.Request) {
+	id, err := pathID(r)
+	if err != nil {
+		writeErr(w, 400, "bad id")
+		return
+	}
+	var path string
+	err = s.conn.QueryRow("SELECT path FROM documents WHERE id=?", id).Scan(&path)
+	if err == sql.ErrNoRows {
+		writeErr(w, 404, "no such document")
+		return
+	}
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	if extract.KindOf(filepath.Ext(path)) != "pdf" {
+		writeErr(w, 404, "no cover for "+filepath.Ext(path)+" files")
+		return
+	}
+	cacheDir := filepath.Join(s.cfg.BaseDir, "covers")
+	cache := filepath.Join(cacheDir, fmt.Sprintf("cover-%d.png", id))
+	if fi, err := os.Stat(cache); err != nil || fi.Size() == 0 {
+		if err := extract.RenderPagePNG(s.cfg, path, 1, 100, cache); err != nil {
+			writeErr(w, 404, "cover render failed: "+err.Error())
+			return
+		}
+	}
+	f, err := os.Open(cache)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	defer f.Close()
+	fi, _ := f.Stat()
+	w.Header().Set("Content-Type", "image/png")
+	w.Header().Set("Cache-Control", "private, max-age=86400")
+	http.ServeContent(w, r, "cover.png", fi.ModTime(), f)
+}
+
+// cover render lives in extract (mutool ownership).
 // reextract re-runs text extraction on a document's source file: with
 // {"force":true} the raster is OCR'd on EVERY page (the repair path
 // for garbled embedded text layers), otherwise only broken-looking
@@ -567,7 +652,8 @@ func (s *Server) reextract(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		Force bool `json:"force"`
+		Force bool    `json:"force"`
+		Pages []int64 `json:"pages"`
 	}
 	if r.ContentLength > 0 {
 		if err := decodeBody(r, &body); err != nil {
@@ -576,7 +662,9 @@ func (s *Server) reextract(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	var path string
-	err = s.conn.QueryRow("SELECT path FROM documents WHERE id=?", id).Scan(&path)
+	var donePages string
+	err = s.conn.QueryRow("SELECT path, ocr_done_pages FROM documents WHERE id=?", id).
+		Scan(&path, &donePages)
 	if err == sql.ErrNoRows {
 		writeErr(w, 404, "no such document")
 		return
@@ -596,10 +684,34 @@ func (s *Server) reextract(w http.ResponseWriter, r *http.Request) {
 		s.mu.Unlock()
 	}
 	var res *extract.Result
-	if body.Force {
+	switch {
+	case body.Force && len(body.Pages) > 0:
+		// per-page repair: the named pages + any previously repaired
+		// pages stay OCR-backed after the fresh text pass
+		progress(fmt.Sprintf(
+			"re-extracting text (OCR forced on %d page(s))", len(body.Pages)))
+		var want []int
+		for _, p := range body.Pages {
+			if p >= 1 {
+				want = append(want, int(p))
+			}
+		}
+		for _, p := range vellumParseStoredPages(donePages) {
+			want = append(want, p)
+		}
+		if res, err = extract.ExtractOCRPages(path, s.cfg, true, want); err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+		s.conn.Exec("UPDATE documents SET ocr_done_pages=? WHERE id=?",
+			vellumStoreDonePages(want), id)
+	case body.Force:
 		progress("re-extracting text (OCR forced on every page)")
 		res, err = extract.ExtractOCR(path, s.cfg)
-	} else {
+		if err == nil {
+			s.conn.Exec("UPDATE documents SET ocr_done_pages='all' WHERE id=?", id)
+		}
+	default:
 		progress("re-extracting text")
 		res, err = extract.Extract(path, s.cfg)
 	}
@@ -899,4 +1011,172 @@ func (s *Server) deleteVocab(w http.ResponseWriter, r *http.Request) {
 	}
 	s.conn.Exec("DELETE FROM doc_tags WHERE tag=?", name)
 	writeJSON(w, 200, map[string]string{"removed": name})
+}
+
+// ------------------------------- ask (LLM chat about an item) ------------
+
+// getAskConfig returns the ask configuration with the API key masked
+// (the UI needs to know a key exists, not the key).
+func (s *Server) getAskConfig(w http.ResponseWriter, r *http.Request) {
+	c := s.cfg.Ask
+	writeJSON(w, 200, map[string]any{
+		"provider": c.Provider, "model": c.Model,
+		"base_url": c.BaseURL, "key_set": c.APIKey != "",
+		"enabled": c.Enabled(),
+	})
+}
+
+// putAskConfig updates + saves the ask configuration. An empty api_key
+// in the request keeps the stored one (users do not retype it).
+func (s *Server) putAskConfig(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Provider string `json:"provider"`
+		Model    string `json:"model"`
+		APIKey   string `json:"api_key"`
+		BaseURL  string `json:"base_url"`
+	}
+	if err := decodeBody(r, &body); err != nil {
+		writeErr(w, 400, "bad JSON body: "+err.Error())
+		return
+	}
+	c := &s.cfg.Ask
+	if body.Provider != "" {
+		c.Provider = body.Provider
+	}
+	if body.Model != "" {
+		c.Model = body.Model
+	}
+	if body.BaseURL != "" || body.Provider != "" {
+		c.BaseURL = body.BaseURL
+	}
+	if body.APIKey != "" {
+		c.APIKey = body.APIKey
+	}
+	if err := s.cfg.Save(); err != nil {
+		writeErr(w, 500, "config save failed: "+err.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]any{"ok": true, "enabled": c.Enabled()})
+}
+
+// testAsk verifies the ask provider configuration with a tiny exchange.
+// With a JSON body the UNSTORED values are tested (the UI's pre-save
+// check); with no body the current configuration is.
+func (s *Server) testAsk(w http.ResponseWriter, r *http.Request) {
+	c := s.cfg.Ask
+	if r.ContentLength > 0 {
+		var body struct {
+			Provider string `json:"provider"`
+			Model    string `json:"model"`
+			APIKey   string `json:"api_key"`
+			BaseURL  string `json:"base_url"`
+		}
+		if err := decodeBody(r, &body); err != nil {
+			writeErr(w, 400, "bad JSON body: "+err.Error())
+			return
+		}
+		if body.Provider != "" || body.Model != "" {
+			c = ask.Config{Provider: body.Provider, Model: body.Model,
+				APIKey: body.APIKey, BaseURL: body.BaseURL}
+		}
+	}
+	if err := c.Test(); err != nil {
+		writeErr(w, 502, "ask test failed: "+err.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]any{"ok": true})
+}
+
+// postAsk streams a chat answer about one document (SSE). The system
+// context carries the document's metadata + summary + opening text;
+// the client's turns are passed through as-is.
+func (s *Server) postAsk(w http.ResponseWriter, r *http.Request) {
+	id, err := pathID(r)
+	if err != nil {
+		writeErr(w, 400, "bad id")
+		return
+	}
+	var body struct {
+		Messages []ask.Message `json:"messages"`
+		// quick-try overrides (usable before saving the config)
+		Provider string `json:"provider"`
+		Model    string `json:"model"`
+		APIKey   string `json:"api_key"`
+		BaseURL  string `json:"base_url"`
+	}
+	if err := decodeBody(r, &body); err != nil {
+		writeErr(w, 400, "bad JSON body: "+err.Error())
+		return
+	}
+	var title, authors, year, summary, kind string
+	err = s.conn.QueryRow(
+		"SELECT title, authors, year, summary, kind FROM documents WHERE id=?", id).
+		Scan(&title, &authors, &year, &summary, &kind)
+	if err == sql.ErrNoRows {
+		writeErr(w, 404, "no such document")
+		return
+	}
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	// opening text: the first chunks (title page/introduction carry the
+	// document's voice); ~6k chars keeps the request cheap for any
+	// provider
+	opening, err := db.DocumentText(s.conn, id)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	if len(opening) > 6000 {
+		opening = opening[:6000]
+	}
+	sys := "You are answering questions about one specific document in the " +
+		"user's personal library. Use the provided material; say plainly " +
+		"when something is outside it. Answer concisely.\n\n" +
+		"Document metadata: title=" + title + "; authors=" + authors +
+		"; year=" + year + "; kind=" + kind + "\n"
+	if summary != "" {
+		sys += "Summary:\n" + summary + "\n"
+	}
+	if opening != "" {
+		sys += "\nOpening text (truncated):\n" + opening
+	}
+	out := s.cfg.Ask
+	if body.Provider != "" {
+		out = ask.Config{Provider: body.Provider, Model: body.Model,
+			APIKey: body.APIKey, BaseURL: body.BaseURL}
+	}
+	deltas, err := out.Stream(sys, body.Messages)
+	if err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
+	flush, ok := w.(http.Flusher)
+	if !ok {
+		writeErr(w, 500, "streaming unsupported")
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.WriteHeader(200)
+	for d := range deltas {
+		if d.Error != "" {
+			sseSend(w, map[string]string{"e": d.Error})
+			break
+		}
+		sseSend(w, map[string]string{"d": d.Text})
+	}
+	sseSend(w, map[string]string{"done": "1"})
+	flush.Flush()
+}
+
+// sseSend writes one SSE event line-pair.
+func sseSend(w http.ResponseWriter, payload any) {
+	data, _ := json.Marshal(payload)
+	fmt.Fprintf(w, "data: %s\n\n", data)
+	if f, ok := w.(http.Flusher); ok {
+		f.Flush()
+	}
 }

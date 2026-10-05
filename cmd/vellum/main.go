@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -47,7 +48,7 @@ file (FTS5). Models served locally by llama.cpp llama-server.
 `
 
 // versionString is reported by --version, /api/status and `vellum agent`.
-const versionString = "0.8.0"
+const versionString = "0.9.0"
 
 // documentColumns is the explicit projection used everywhere (never SELECT *,
 // so the scan order is fixed even if the schema gains columns).
@@ -143,6 +144,8 @@ func main() {
 		cmdCategory(cfg, args[1:])
 	case "reextract":
 		cmdReextract(cfg, args[1:])
+	case "backends":
+		cmdBackends(cfg, args[1:])
 	case "serve":
 		cmdServe(cfg, args[1:])
 	case "agent", "agents":
@@ -201,8 +204,12 @@ func cmdProcess(cfg *config.Config, args []string) {
 		log.Fatalf("vocab.yaml is empty — add tags first with `vellum vocab add`. " +
 			"Tagging needs a controlled vocabulary to constrain the LLM.")
 	}
-	if !llm.Available(cfg.Tools.LLMURL) {
-		log.Fatalf("no llama-server at %s — start it with the vellum launcher, or:\n"+
+	if !llm.AvailableFor(cfg.LLM.Backend, cfg.Tools.LLMURL) {
+		if cfg.LLM.Backend == "ollama" {
+			log.Fatalf("no ollama at %s — start ollama or check llm.backend/llm.model in config.yaml",
+				cfg.Tools.LLMURL)
+		}
+		log.Fatalf("no llama-server at %s — start it with the vellum launcher, your own llama.cpp (llm.external: true), or:\n"+
 			"  llama-server -m %s --host 127.0.0.1 --port %s -c %d --jinja",
 			cfg.Tools.LLMURL, cfg.Models.LLM, portOf(cfg.Tools.LLMURL), cfg.LLM.NumCtx)
 	}
@@ -721,6 +728,91 @@ func cmdKind(cfg *config.Config, args []string) {
 // every page is rasterized + OCR'd (the repair path for a garbled
 // embedded text layer). The text is replaced in place and the document
 // becomes pending again (re-summarize + re-tag to refresh derived data).
+// parseStoredPages decodes the stored ocr_done_pages csv (or "all").
+func parseStoredPages(s string, nPages int) []int {
+	if s == "all" {
+		if nPages <= 0 {
+			return nil
+		}
+		out := make([]int, 0, nPages)
+		for i := 1; i <= nPages; i++ {
+			out = append(out, i)
+		}
+		return out
+	}
+	pages, err := parsePageList(s)
+	if err != nil {
+		return nil
+	}
+	return pages
+}
+
+// mergeDone accumulates per-page repair history on the document.
+// pages==nil && all=true marks "all".
+func mergeDone(conn *sql.DB, id int64, pages []int, all int) {
+	if pages != nil {
+		var current string
+		conn.QueryRow("SELECT ocr_done_pages FROM documents WHERE id=?", id).Scan(&current)
+		allPrev := parseStoredPages(current, 1<<20)
+		full := sortedSetUnion(allPrev, pages)
+		var parts []string
+		for _, p := range full {
+			parts = append(parts, strconv.Itoa(p))
+		}
+		conn.Exec("UPDATE documents SET ocr_done_pages=? WHERE id=?",
+			strings.Join(parts, ","), id)
+		return
+	}
+	if all == -1 {
+		conn.Exec("UPDATE documents SET ocr_done_pages='all' WHERE id=?", id)
+	}
+}
+
+// sortedSetUnion merges and dedupes page lists.
+func sortedSetUnion(a, b []int) []int {
+	set := map[int]bool{}
+	for _, p := range a {
+		set[p] = true
+	}
+	for _, p := range b {
+		set[p] = true
+	}
+	out := make([]int, 0, len(set))
+	for p := range set {
+		out = append(out, p)
+	}
+	sort.Ints(out)
+	return out
+}
+
+// parsePageList parses "3,7-12" into 1-based page numbers.
+func parsePageList(s string) ([]int, error) {
+	out := []int{}
+	for _, part := range strings.Split(s, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		if a, b, found := strings.Cut(part, "-"); found {
+			lo, err1 := strconv.Atoi(strings.TrimSpace(a))
+			hi, err2 := strconv.Atoi(strings.TrimSpace(b))
+			if err1 != nil || err2 != nil || lo < 1 || hi < lo {
+				return nil, fmt.Errorf("bad page range %q", part)
+			}
+			for p := lo; p <= hi && p-lo < 5000; p++ {
+				out = append(out, p)
+			}
+			continue
+		}
+		p, err := strconv.Atoi(part)
+		if err != nil || p < 1 {
+			return nil, fmt.Errorf("bad page number %q", part)
+		}
+		out = append(out, p)
+	}
+	return out, nil
+}
+
 func cmdReextract(cfg *config.Config, args []string) {
 	force := false
 	var positional []string
@@ -733,23 +825,42 @@ func cmdReextract(cfg *config.Config, args []string) {
 		}
 	}
 	if len(positional) < 1 {
-		log.Fatalf("usage: vellum reextract ID [--force-ocr]")
+		log.Fatalf("usage: vellum reextract ID [--force-ocr] [--pages 3,7-12]")
 	}
 	id, err := strconv.ParseInt(positional[0], 10, 64)
 	if err != nil {
 		log.Fatalf("reextract expects a numeric document id")
 	}
+	var pages []int
+	for i, a := range args {
+		if (a == "--pages" || a == "-pages") && i+1 < len(args) {
+			pages, err = parsePageList(args[i+1])
+			if err != nil {
+				log.Fatalf("reextract: %s", err)
+			}
+			force = true // --pages implies force on those pages
+		}
+	}
 	conn := mustOpen(cfg)
-	var path string
-	if err := conn.QueryRow("SELECT path FROM documents WHERE id=?", id).
-		Scan(&path); err != nil {
+	var path, donePages string
+	if err := conn.QueryRow("SELECT path, ocr_done_pages FROM documents WHERE id=?", id).
+		Scan(&path, &donePages); err != nil {
 		log.Fatalf("reextract: %s", err)
 	}
 	var res *extract.Result
-	if force {
+	switch {
+	case force && len(pages) > 0:
+		fmt.Printf("re-extracting #%d: OCR forced on %d page(s)...\n", id, len(pages))
+		// previously repaired pages stay repaired even though the text
+		// pass rebuilds every chunk
+		previous := parseStoredPages(donePages, len(res.Chunks))
+		res, err = extract.ExtractOCRPages(path, cfg, true, append(append([]int{}, pages...), previous...))
+		mergeDone(conn, id, pages, len(res.Chunks))
+	case force:
 		fmt.Printf("re-extracting #%d with OCR forced on every page (slow)...\n", id)
 		res, err = extract.ExtractOCR(path, cfg)
-	} else {
+		mergeDone(conn, id, nil, -1) // all
+	default:
 		fmt.Printf("re-extracting #%d...\n", id)
 		res, err = extract.Extract(path, cfg)
 	}
@@ -781,6 +892,26 @@ func cmdReextract(cfg *config.Config, args []string) {
 	fmt.Printf("#%d: re-extracted (%d chunks, %d OCR pages) — status back to pending;\n"+
 		"process it again to refresh summary/tags: vellum process %d\n",
 		id, len(res.Chunks), res.OCRPages, id)
+}
+
+// cmdBackends prints the per-channel backend decision for the shell
+// launcher (which must decide whether to start bundled llama-servers
+// without parsing YAML):
+//
+//	chat=<bundled|external> embed=<bundled|external>
+//
+// external means: ollama backend/provider, or llm/embed external: true
+// (the user's own llama.cpp, often on a GPU).
+func cmdBackends(cfg *config.Config, args []string) {
+	chat := "bundled"
+	if cfg.LLM.Backend == "ollama" || cfg.LLM.External {
+		chat = "external"
+	}
+	embed := "bundled"
+	if cfg.Embed.Provider == "ollama" || cfg.Embed.External {
+		embed = "external"
+	}
+	fmt.Printf("chat=%s embed=%s\n", chat, embed)
 }
 
 func cmdEmbed(cfg *config.Config, args []string) {
