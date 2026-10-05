@@ -86,41 +86,23 @@ function renderList(docs) {
   const list = $("#list");
   list.replaceChildren();
   if (!docs.length) {
-    list.append(el("p", { class: "hint" },
+    list.append(el("li", { class: "hint" },
       "Nothing here yet — use Ingest to index some files or directories."));
     return;
   }
-  for (const d of docs) list.append(docCard(d));
+  for (const d of docs) list.append(docRow(d));
 }
 
-function docCard(d) {
+// Items are compact list rows: title, category, tags — the details
+// (summary, status, metadata, processing) live in the detail pane.
+function docRow(d) {
   const title = d.title || d.path.split("/").pop();
-  const card = el("div", { class: "doc" },
-    el("div", { onclick: () => showDetail(d.id) },
-      el("h3", {}, esc(title)),
-      el("div", { class: "meta" },
-        [d.authors, d.year, `#${d.id}`].filter(Boolean).map(esc).join(" · ")),
-    ),
-  );
-  const row = card.firstChild;
-  if (d.status !== "done")
-    row.append(el("span", { class: "chip status" }, esc(d.status)));
-  if (d.summary) row.append(el("div", { class: "summary" }, esc(d.summary)));
   const chips = el("div", { class: "chips" });
-  if (d.kind) chips.append(el("span", { class: "chip status" }, esc(d.kind)));
   if (d.category) chips.append(el("span", { class: "chip sug" }, esc(d.category)));
-  if (d.summary_source)
-    chips.append(el("span", { class: "chip" }, esc(d.summary_source)));
   for (const t of d.tags) chips.append(el("span", { class: "chip" }, esc(t)));
-  row.append(chips);
-  // per-document process: don't wait for the whole batch
-  if (d.status !== "done" || d.tags.length === 0) {
-    card.append(el("div", { class: "row" },
-      el("button", { class: "small", onclick: () => processIds([d.id], card) },
-        "Summarize + tag this document"),
-    ));
-  }
-  return card;
+  return el("li", { class: "item", onclick: () => showDetail(d.id) },
+    el("span", { class: "item-title" }, esc(title)),
+    chips);
 }
 
 let progressTimer = null;
@@ -140,8 +122,7 @@ function stopProgressPolling() {
   if (progressTimer) { clearInterval(progressTimer); progressTimer = null; }
 }
 
-async function processIds(ids, card) {
-  if (card) card.classList.add("busy");
+async function processIds(ids) {
   const prefix = ids.length === 1 ? "Processing document" : `Processing ${ids.length} documents`;
   notice(`${prefix} — live progress below; this is slow, keep the tab open…`);
   startProgressPolling(prefix);
@@ -162,7 +143,6 @@ async function processIds(ids, card) {
     await refresh();
   } catch (e) { notice("process: " + e.message); }
   stopProgressPolling();
-  if (card) card.classList.remove("busy");
 }
 
 /* ---------------------------------------------------------------- detail */
@@ -335,17 +315,19 @@ async function doSearch() {
     if (mode === "semantic") {
       const list = $("#list");
       list.replaceChildren();
-      if (!hits.length) { list.append(el("p", { class: "hint" }, "no matches")); return; }
+      if (!hits.length) { list.append(el("li", { class: "hint" }, "no matches")); return; }
       for (const h of hits) {
         const d = allDocs.find((x) => x.id === h.doc_id) ||
           { id: h.doc_id, title: h.title, path: h.path, tags: [] };
-        list.append(el("div", { class: "doc", onclick: () => showDetail(h.doc_id) },
-          el("h3", {}, esc(d.title || h.path.split("/").pop())),
-          el("span", { class: "score" }, `cosine ${h.snippets[0].score.toFixed(3)}`),
-          el("div", { class: "summary" },
-            ...h.snippets.slice(0, 2).map((s) =>
-              el("div", {}, esc((s.page > 0 ? `p.${s.page}: ` : "") + s.text + "…")))),
-        ));
+        const chips = el("div", { class: "chips" });
+        if (h.snippets && h.snippets[0])
+          chips.append(el("span", { class: "chip" },
+            `cos ${h.snippets[0].score.toFixed(3)}`));
+        if (d.category) chips.append(el("span", { class: "chip sug" }, esc(d.category)));
+        for (const t of d.tags) chips.append(el("span", { class: "chip" }, esc(t)));
+        list.append(el("li", { class: "item", onclick: () => showDetail(h.doc_id) },
+          el("span", { class: "item-title" }, esc(d.title || h.path.split("/").pop())),
+          chips));
       }
     } else {
       if (!allDocs.length) await loadDocs();

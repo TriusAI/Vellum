@@ -28,14 +28,21 @@ button:hover { filter: brightness(1.08); }
 #notice { padding: .5rem 1.2rem; }
 #notice:not(:empty) { background: var(--chip-warn); }
 main { display: flex; align-items: flex-start; gap: 1rem; padding: 1.2rem; }
-#list { flex: 1 1 55%; display: flex; flex-direction: column; gap: .8rem; }
-.doc {
-  background: var(--card); border: 1px solid var(--line); padding: .9rem 1.1rem;
+#list { flex: 1 1 55%; border: 1px solid var(--line); background: var(--card);
+  list-style: none; margin: 0; padding: 0; overflow: hidden; }
+#list .hint { padding: .8rem 1rem; margin: 0; }
+#list .item {
+  display: flex; align-items: baseline; justify-content: space-between;
+  gap: 1rem; padding: .5rem .9rem; cursor: pointer;
+  border-bottom: 1px dashed var(--line);
 }
-.doc:hover { border-color: var(--accent); }
-.doc h3 { margin: 0 0 .2rem; font-size: 1.02rem; }
-.doc .meta { color: var(--muted); font-size: .85rem; margin-bottom: .35rem; }
-.doc .summary { font-size: .9rem; color: #44423c; max-height: 4.6em; overflow: hidden; }
+#list .item:hover { background: rgba(127, 127, 127, .09); }
+#list .item:last-child { border-bottom: none; }
+#list .item-title {
+  font-size: .98rem; flex: 1 1 auto; text-overflow: ellipsis;
+  overflow: hidden; white-space: nowrap;
+}
+#list .item .chips { margin-top: 0; flex: 0 1 auto; justify-content: flex-end; }
 .chips { display: flex; flex-wrap: wrap; gap: .3rem; margin-top: .5rem; }
 .chip { background: var(--chip); padding: .1rem .6rem; font-size: .78rem; }
 .chip.status { background: var(--chip-warn); color: #6b4d12; }
