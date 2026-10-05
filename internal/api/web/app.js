@@ -145,6 +145,27 @@ async function processIds(ids) {
   stopProgressPolling();
 }
 
+async function reextract(id, force) {
+  const prefix = force ? "Force-OCR re-extract" : "Re-extract";
+  notice(`${prefix} — live progress below…`);
+  startProgressPolling(prefix);
+  try {
+    await api(`/api/documents/${id}/reextract`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ force }),
+    });
+    notice(`${prefix} done — text replaced; the document is pending re-processing.`);
+    await loadDocs();
+    await loadCategories();
+    // reopen the detail with fresh data
+    const again = await api(`/api/documents/${id}`);
+    currentDetail = { id, data: again };
+    renderDetailTabs("text");
+  } catch (e) { notice("reextract: " + e.message); }
+  stopProgressPolling();
+}
+
 /* ---------------------------------------------------------------- detail */
 
 let currentDetail = null;
@@ -189,6 +210,42 @@ function detailContent(tab) {
 
   if (tab === "text") {
     const wrap = el("div", {});
+    if (d.ocr_pending) {
+      wrap.append(el("div", { class: "hint" },
+        "text layer is thin or garbled — processing will OCR the raster first; or fix it now:"));
+      wrap.append(el("div", { class: "row" },
+        el("button", {
+          onclick: async (ev) => {
+            const btn = ev.target;
+            btn.textContent = "Fixing…";
+            btn.disabled = true;
+            await reextract(d.id, false);
+            btn.textContent = "Re-extract";
+            btn.disabled = false;
+          },
+        }, "Re-extract"),
+        el("button", {
+          onclick: async (ev) => {
+            const btn = ev.target;
+            btn.textContent = "OCR-ing every page…";
+            btn.disabled = true;
+            await reextract(d.id, true);
+            btn.textContent = "Force OCR";
+            btn.disabled = false;
+          },
+        }, "Force OCR")));
+    }
+    // repair affordance even for documents that LOOK fine — the user
+    // is the judge of garbled text
+    wrap.append(el("div", { class: "row right" },
+      el("button", {
+        class: "plain",
+        onclick: (ev) => {
+          ev.target.textContent = "Re-extracting…";
+          reextract(d.id, true).then(() =>
+            { ev.target.textContent = "re-extracted"; });
+        },
+      }, "re-extract text (force OCR)")));
     for (const c of data.chunks) {
       const loc = c.page > 0 ? `page ${c.page}` : `chunk ${c.seq}`;
       const open = () => {
@@ -446,6 +503,7 @@ $("#ingest-go").onclick = async () => {
   if (!paths.length) return;
   const btn = $("#ingest-go");
   btn.textContent = "Ingesting…";
+  startProgressPolling("Ingest");
   try {
     const st = await api("/api/ingest", {
       method: "POST",
@@ -463,6 +521,7 @@ $("#ingest-go").onclick = async () => {
     await refresh();
     if (!st.Failed) $("#dlg-ingest").close();
   } catch (e) { notice("ingest: " + e.message); }
+  stopProgressPolling();
   btn.textContent = "Ingest";
 };
 

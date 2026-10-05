@@ -65,12 +65,20 @@ type ProcessResult struct {
 	Error     string   `json:"error,omitempty"`
 }
 
-// Ingest walks the paths and indexes every supported file, with sha256-based
-// change detection.
-func Ingest(cfg *config.Config, conn *sql.DB, paths []string, reprocess bool) (*Stats, error) {
+// Ingest walks the paths and indexes every supported file, with
+// sha256-based change detection. Ingest is QUICK: it reads text layers
+// only — OCR work on raster-heavy pages is deferred to the processing
+// phase (documents land with ocr_pending=1). progress (may be nil)
+// receives per-file updates for UI feedback.
+func Ingest(cfg *config.Config, conn *sql.DB, paths []string, reprocess bool,
+	progress func(string)) (*Stats, error) {
 	st := &Stats{Files: []FileResult{}}
-
-	for _, path := range collectFiles(paths) {
+	files := collectFiles(paths)
+	for i, path := range files {
+		if progress != nil {
+			progress(fmt.Sprintf("ingesting %d/%d: %s",
+				i+1, len(files), filepath.Base(path)))
+		}
 		action, err := ingestOne(cfg, conn, path, reprocess)
 		if err != nil {
 			log.Printf("failed to ingest %s: %s", path, err)
@@ -140,11 +148,15 @@ func ingestOne(cfg *config.Config, conn *sql.DB, path string, reprocess bool) (s
 	}
 
 	t0 := time.Now()
-	res, err := extract.Extract(abs, cfg)
+	// text layer only: ingest never OCRs (tesseract on a rastered book
+	// takes minutes and made ingest look hung). Pages that look thin
+	// or garbled set ocr_pending; the processing phase does the OCR
+	// with live progress, then re-classifies on the better text.
+	res, err := extract.ExtractText(abs, cfg)
 	if err != nil {
 		return "failed", err
 	}
-	hasText := false
+	hasText := res.NeedsOCR // raster-heavy documents ingest with thin text
 	for _, c := range res.Chunks {
 		if c.Text != "" {
 			hasText = true
@@ -152,20 +164,25 @@ func ingestOne(cfg *config.Config, conn *sql.DB, path string, reprocess bool) (s
 		}
 	}
 	if !hasText {
-		return "failed", fmt.Errorf("no text extracted")
+		return "failed", fmt.Errorf("no text extracted and nothing to OCR")
+	}
+
+	pending := 0
+	if res.NeedsOCR {
+		pending = 1
 	}
 
 	action := "updated"
 	if known {
 		if _, err := conn.Exec(
-			"UPDATE documents SET sha256=?, status='ingested', error=NULL, processed_at=NULL WHERE id=?",
-			digest, docID); err != nil {
+			"UPDATE documents SET sha256=?, status='ingested', error=NULL, processed_at=NULL, ocr_pending=?, n_pages=? WHERE id=?",
+			digest, pending, len(res.Chunks), docID); err != nil {
 			return "failed", err
 		}
 	} else {
 		result, err := conn.Exec(
-			"INSERT INTO documents(path, sha256, title, authors, year, ocr_pages, status) VALUES(?,?,?,?,?,?,'ingested')",
-			abs, digest, res.Title, res.Authors, "", res.OCRPages)
+			"INSERT INTO documents(path, sha256, title, authors, year, ocr_pages, n_pages, ocr_pending, status) VALUES(?,?,?,?,?,?,?,?,'ingested')",
+			abs, digest, res.Title, res.Authors, "", 0, len(res.Chunks), pending)
 		if err != nil {
 			return "failed", err
 		}
@@ -182,27 +199,27 @@ func ingestOne(cfg *config.Config, conn *sql.DB, path string, reprocess bool) (s
 
 	// kind detection is instant and deterministic: structural heuristics
 	// over the extracted text (paper/book/gallery/course/reference).
-	// Users can override via `vellum kind` or the API.
-	kind, _ := classify.Detect(strings.Join(sampleChunks(res.Chunks), "\n\n"),
-		res.OCRPages, len(res.Chunks))
+	// Processing re-classifies after OCR when this text was thin; users
+	// can override any time via `vellum kind`, the API, or the UI.
+	kind, _ := classify.Detect(strings.Join(chunkTexts(res.Chunks), "\n\n"),
+		0, len(res.Chunks))
+	kindSuffix := ""
+	if kind != "" {
+		kindSuffix = " [" + kind + "]"
+	}
 	if _, err := conn.Exec(
 		"UPDATE documents SET kind=? WHERE id=?", kind, docID); err != nil {
 		return "failed", err
 	}
 
-	log.Printf("%s: %d chunks (%d OCR pages) in %.1fs%s",
-		filepath.Base(abs), len(res.Chunks), res.OCRPages,
-		time.Since(t0).Seconds(), kindSuffix(kind))
-	return action, nil
-}
-
-// sampleChunks takes leading + trailing chunks for classification.
-func sampleChunks(chunks []db.Chunk) []string {
-	if len(chunks) <= 8 {
-		return chunkTexts(chunks)
+	ocrNote := ""
+	if pending == 1 {
+		ocrNote = " — OCR deferred to processing"
 	}
-	sample := append(chunkTexts(chunks[:5]), chunkTexts(chunks[len(chunks)-3:])...)
-	return sample
+	log.Printf("%s: %d chunks in %.1fs%s%s",
+		filepath.Base(abs), len(res.Chunks), time.Since(t0).Seconds(),
+		kindSuffix, ocrNote)
+	return action, nil
 }
 
 func chunkTexts(chunks []db.Chunk) []string {
@@ -211,13 +228,6 @@ func chunkTexts(chunks []db.Chunk) []string {
 		out[i] = c.Text
 	}
 	return out
-}
-
-func kindSuffix(kind string) string {
-	if kind == "" {
-		return ""
-	}
-	return " [" + kind + "]"
 }
 
 // ProcessPending summarizes and tags documents. With ids empty it takes all
@@ -233,6 +243,7 @@ func ProcessPending(cfg *config.Config, conn *sql.DB, v *vocab.Vocabulary,
 	type docRow struct {
 		id                               int64
 		path, title, authors, year, kind string
+		ocrPending, kindUser             int64
 	}
 	var docs []docRow
 
@@ -240,8 +251,9 @@ func ProcessPending(cfg *config.Config, conn *sql.DB, v *vocab.Vocabulary,
 		for _, id := range ids {
 			var d docRow
 			err := conn.QueryRow(
-				"SELECT id, path, title, authors, year, kind FROM documents WHERE id=?", id).
-				Scan(&d.id, &d.path, &d.title, &d.authors, &d.year, &d.kind)
+				"SELECT id, path, title, authors, year, kind, ocr_pending, kind_user FROM documents WHERE id=?", id).
+				Scan(&d.id, &d.path, &d.title, &d.authors, &d.year, &d.kind,
+					&d.ocrPending, &d.kindUser)
 			if err == sql.ErrNoRows {
 				log.Printf("process: no document #%d", id)
 				continue
@@ -252,7 +264,7 @@ func ProcessPending(cfg *config.Config, conn *sql.DB, v *vocab.Vocabulary,
 			docs = append(docs, d)
 		}
 	} else {
-		q := "SELECT id, path, title, authors, year, kind FROM documents WHERE status='ingested' ORDER BY id"
+		q := "SELECT id, path, title, authors, year, kind, ocr_pending, kind_user FROM documents WHERE status='ingested' ORDER BY id"
 		if limit > 0 {
 			q += fmt.Sprintf(" LIMIT %d", limit)
 		}
@@ -262,7 +274,8 @@ func ProcessPending(cfg *config.Config, conn *sql.DB, v *vocab.Vocabulary,
 		}
 		for rows.Next() {
 			var d docRow
-			if err := rows.Scan(&d.id, &d.path, &d.title, &d.authors, &d.year, &d.kind); err != nil {
+			if err := rows.Scan(&d.id, &d.path, &d.title, &d.authors, &d.year, &d.kind,
+				&d.ocrPending, &d.kindUser); err != nil {
 				rows.Close()
 				return nil, err
 			}
@@ -280,7 +293,8 @@ func ProcessPending(cfg *config.Config, conn *sql.DB, v *vocab.Vocabulary,
 			progress(fmt.Sprintf("document %d/%d: %s", i+1, len(docs), filepath.Base(d.path)))
 		}
 		log.Printf("processing %s", d.path)
-		res, err := processOne(cfg, conn, v, d.id, d.title, d.authors, d.year, d.kind, progress)
+		res, err := processOne(cfg, conn, v, d.id, d.title, d.authors, d.year,
+			d.path, d.kind, progress)
 		if err != nil {
 			log.Printf("processing failed for %s: %s", d.path, err)
 			conn.Exec("UPDATE documents SET status='error', error=? WHERE id=?",
@@ -297,10 +311,76 @@ func ProcessPending(cfg *config.Config, conn *sql.DB, v *vocab.Vocabulary,
 }
 
 func processOne(cfg *config.Config, conn *sql.DB, v *vocab.Vocabulary,
-	docID int64, title, authors, year, kind string, progress func(string)) (*summarize.TagResult, error) {
+	docID int64, title, authors, year, path, kind string, progress func(string)) (*summarize.TagResult, error) {
+	if progress == nil {
+		progress = func(string) {}
+	}
+
+	// ---- deferred OCR: ingest only read the text layer; documents
+	// marked ocr_pending (thin pages, or a garbled embedded layer)
+	// get the full raster treatment here, with live progress. This
+	// can take minutes for a big scanned book — that is expected.
+	var ocrPending, kindUser int64
+	if err := conn.QueryRow(
+		"SELECT ocr_pending, kind_user FROM documents WHERE id=?", docID).
+		Scan(&ocrPending, &kindUser); err != nil {
+		return nil, err
+	}
+	if ocrPending == 1 {
+		progress("extracting text (OCR on raster pages — can take minutes)")
+		t0 := time.Now()
+		res, err := extract.Extract(path, cfg)
+		if err != nil {
+			return nil, fmt.Errorf("OCR extraction failed: %w", err)
+		}
+		if err := db.ReplaceDocumentText(conn, docID, res.Chunks); err != nil {
+			return nil, err
+		}
+		if res.Title != "" && title == "" {
+			title = res.Title
+			conn.Exec("UPDATE documents SET title=? WHERE id=? AND (title IS NULL OR title='')",
+				res.Title, docID)
+		}
+		if res.Authors != "" && authors == "" {
+			authors = res.Authors
+			conn.Exec("UPDATE documents SET authors=? WHERE id=? AND (authors IS NULL OR authors='')",
+				res.Authors, docID)
+		}
+		if _, err := conn.Exec(
+			"UPDATE documents SET ocr_pending=0, ocr_pages=?, n_pages=? WHERE id=?",
+			res.OCRPages, len(res.Chunks), docID); err != nil {
+			return nil, err
+		}
+		log.Printf("%s: OCR replaced text on %d pages in %.1fs",
+			filepath.Base(path), res.OCRPages, time.Since(t0).Seconds())
+	}
+
 	text, err := db.DocumentText(conn, docID)
 	if err != nil {
 		return nil, err
+	}
+
+	// ---- re-classify on the current text unless the user set the kind:
+	// ingest classified from the text layer alone; OCR text (chapters,
+	// TOC, preface) flips borderline calls, and classifier improvements
+	// reach old libraries at processing time.
+	if kindUser == 0 {
+		var ocrPages, nPages int64
+		if err := conn.QueryRow(
+			"SELECT ocr_pages, n_pages FROM documents WHERE id=?", docID).
+			Scan(&ocrPages, &nPages); err == nil {
+			newKind, _ := classify.Detect(text, int(ocrPages), int(nPages))
+			if newKind != kind {
+				kind = newKind
+				if _, err := conn.Exec(
+					"UPDATE documents SET kind=? WHERE id=?", kind, docID); err != nil {
+					return nil, err
+				}
+				if kind != "" {
+					progress("kind classified as " + kind)
+				}
+			}
+		}
 	}
 
 	// ---- fast paths keyed on the detected kind -------------------------

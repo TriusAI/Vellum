@@ -76,6 +76,28 @@ Inspect:            vellum show all --json
   -> [{"id":N,"path":"...","title":"...","authors":"...","year":"...",
        "summary":"...","status":"done","tags":["..."],"ocr_pages":N,...},...]
 
+## Ingest is two-phase (fast ingest, OCR at process time)
+ingest reads TEXT LAYERS only and never OCRs: a scanned 300-page book
+indexes in seconds, marked ocr_pending=1 with a thin (or empty) chunk
+text. The heavy work happens in process:
+    vellum process ID
+    -> progress: "extracting text (OCR on raster pages)" — geometry
+       (spread split + rotation) runs here too
+    -> after OCR the document is RE-CLASSIFIED from the better text
+       (unless you set the kind yourself; your override is kept)
+So after ingesting scans, just run process and watch the progress
+line; ingest "hang" on big scans is fixed.
+
+## Fixing garbled text
+When the text (Text tab in the UI) is garbled — a bad OCR pass baked
+into the file by some other tool: re-extract with raster forced:
+    vellum reextract ID --force-ocr    # OCR every page, replace text
+    vellum reextract ID                # repair only broken-looking pages
+    POST /api/documents/{id}/reextract {"force":true}
+Text is replaced in place; status lands back on pending so the next
+process rebuilds summary/tags. Run "vellum embed" afterwards to
+refresh semantic vectors (chunk text changed).
+
 ## Document kinds, categories, and fast paths
 Every document gets a kind at ingest (instant, deterministic heuristics):
 "paper", "book", "gallery", "course", "reference", or "" (generic).
@@ -123,6 +145,8 @@ Editing vocab.yaml by hand is also fine (name: description, YAML map).
     PATCH /api/documents/{id}       # {"title":..,"authors":..,"year":..,"summary":..}
     PUT  /api/documents/{id}/tags   # {"tags":[...]} (replaces; source=manual)
     POST /api/ingest                # {"paths":[...],"reprocess":false} -> stats
+                                    # (fast: text layers only; progress via
+                                    #  /api/progress; scans land ocr_pending)
     GET  /api/fs?path=/abs/dir      # dir listing for the ingest picker
                                     # (loopback-only; no file contents served)
     POST /api/process               # {"ids":[...]} or {} for all pending -> results

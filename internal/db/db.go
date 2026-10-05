@@ -35,7 +35,9 @@ CREATE TABLE IF NOT EXISTS documents(
   processed_at TEXT,
   kind TEXT DEFAULT '',
   summary_source TEXT DEFAULT '',
-  category TEXT DEFAULT ''
+  category TEXT DEFAULT '',
+  ocr_pending INTEGER DEFAULT 0,
+  kind_user INTEGER DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS chunks(
@@ -101,6 +103,8 @@ func migrate(conn *sql.DB) error {
 		{"documents", "kind", "ALTER TABLE documents ADD COLUMN kind TEXT DEFAULT ''"},
 		{"documents", "summary_source", "ALTER TABLE documents ADD COLUMN summary_source TEXT DEFAULT ''"},
 		{"documents", "category", "ALTER TABLE documents ADD COLUMN category TEXT DEFAULT ''"},
+		{"documents", "ocr_pending", "ALTER TABLE documents ADD COLUMN ocr_pending INTEGER DEFAULT 0"},
+		{"documents", "kind_user", "ALTER TABLE documents ADD COLUMN kind_user INTEGER DEFAULT 0"},
 	}
 	for _, m := range migrations {
 		rows, err := conn.Query("PRAGMA table_info(" + m.table + ")")

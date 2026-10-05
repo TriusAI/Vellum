@@ -188,6 +188,16 @@ The SQLite schema is identical to the retired Python prototype's, so a
 - **Server lifecycle**: llama.cpp serves one model per process, so the
   launcher runs two small llama-servers (chat :8081, embeddings :8082) and
   reuses them if they're already up.
+- **Ingest is two-phase**: ingest reads text layers only (seconds for
+  anything, including scanned books — OCR work is deferred to
+  `vellum process`, which re-classifies the document on the better
+  text unless you set the kind yourself). Watch the progress line at
+  process time: "extracting text (OCR on raster pages)".
+- **Fixing garbled text**: if the text layer of a file is garbage
+  (some other tool's bad OCR), re-extract with the raster forced:
+  `vellum reextract ID --force-ocr` (or the detail pane's button in
+  the web UI; same repair is automatic at process time for pages
+  that look broken). Run `vellum embed` after to refresh vectors.
 - **Scan geometry** (v0.6.0): OCR handles common scan quirks — open-book
   two-page spreads are split at the detected gutter (each half processed
   as its own page), rotated scans are turned upright (tesseract OSD when

@@ -13,8 +13,10 @@ import (
 	"strconv"
 	"strings"
 
+	"vellum/internal/classify"
 	"vellum/internal/config"
 	"vellum/internal/db"
+	"vellum/internal/extract"
 	"vellum/internal/ingest"
 	"vellum/internal/llm"
 	"vellum/internal/search"
@@ -45,7 +47,7 @@ file (FTS5). Models served locally by llama.cpp llama-server.
 `
 
 // versionString is reported by --version, /api/status and `vellum agent`.
-const versionString = "0.6.1"
+const versionString = "0.7.0"
 
 // documentColumns is the explicit projection used everywhere (never SELECT *,
 // so the scan order is fixed even if the schema gains columns).
@@ -139,6 +141,8 @@ func main() {
 		cmdKind(cfg, args[1:])
 	case "category":
 		cmdCategory(cfg, args[1:])
+	case "reextract":
+		cmdReextract(cfg, args[1:])
 	case "serve":
 		cmdServe(cfg, args[1:])
 	case "agent", "agents":
@@ -174,7 +178,7 @@ func cmdIngest(cfg *config.Config, args []string) {
 		log.Fatalf("ingest needs at least one path")
 	}
 	conn := mustOpen(cfg)
-	st, err := ingest.Ingest(cfg, conn, fs.Args(), *reprocess)
+	st, err := ingest.Ingest(cfg, conn, fs.Args(), *reprocess, nil)
 	if err != nil {
 		log.Fatalf("ingest: %s", err)
 	}
@@ -705,11 +709,78 @@ func cmdKind(cfg *config.Config, args []string) {
 	if value == "none" || value == "-" {
 		value = ""
 	}
-	if _, err := conn.Exec("UPDATE documents SET kind=? WHERE id=?", value, id); err != nil {
+	if _, err := conn.Exec("UPDATE documents SET kind=?, kind_user=1 WHERE id=?", value, id); err != nil {
 		log.Fatalf("kind: %s", err)
 	}
-	fmt.Printf("#%d: kind set to %q\n", id, value)
+	fmt.Printf("#%d: kind set to %q (user-set kinds are kept; 'none' clears and marks generic)\n", id, value)
 	fmt.Println("note: re-run `vellum process " + args[0] + "` to process with the new kind")
+}
+
+// cmdReextract re-runs text extraction on a document's source file.
+// Without --force-ocr only broken-looking pages are re-OCR'd; with it
+// every page is rasterized + OCR'd (the repair path for a garbled
+// embedded text layer). The text is replaced in place and the document
+// becomes pending again (re-summarize + re-tag to refresh derived data).
+func cmdReextract(cfg *config.Config, args []string) {
+	force := false
+	var positional []string
+	for _, a := range args {
+		switch a {
+		case "--force-ocr", "-force-ocr":
+			force = true
+		default:
+			positional = append(positional, a)
+		}
+	}
+	if len(positional) < 1 {
+		log.Fatalf("usage: vellum reextract ID [--force-ocr]")
+	}
+	id, err := strconv.ParseInt(positional[0], 10, 64)
+	if err != nil {
+		log.Fatalf("reextract expects a numeric document id")
+	}
+	conn := mustOpen(cfg)
+	var path string
+	if err := conn.QueryRow("SELECT path FROM documents WHERE id=?", id).
+		Scan(&path); err != nil {
+		log.Fatalf("reextract: %s", err)
+	}
+	var res *extract.Result
+	if force {
+		fmt.Printf("re-extracting #%d with OCR forced on every page (slow)...\n", id)
+		res, err = extract.ExtractOCR(path, cfg)
+	} else {
+		fmt.Printf("re-extracting #%d...\n", id)
+		res, err = extract.Extract(path, cfg)
+	}
+	if err != nil {
+		log.Fatalf("reextract: %s", err)
+	}
+	if err := db.ReplaceDocumentText(conn, id, res.Chunks); err != nil {
+		log.Fatalf("reextract: %s", err)
+	}
+	var kindUser int64
+	conn.QueryRow("SELECT kind_user FROM documents WHERE id=?", id).Scan(&kindUser)
+	kind := ""
+	if kindUser == 0 && len(res.Chunks) > 0 {
+		var sb strings.Builder
+		for _, c := range res.Chunks {
+			sb.WriteString(c.Text)
+			sb.WriteString("\n\n")
+			if sb.Len() > 200000 {
+				break
+			}
+		}
+		kind, _ = classify.Detect(sb.String(), res.OCRPages, len(res.Chunks))
+	}
+	if _, err := conn.Exec(
+		"UPDATE documents SET kind=?, ocr_pages=?, n_pages=?, ocr_pending=0, status='ingested', error=NULL, processed_at=NULL WHERE id=?",
+		kind, res.OCRPages, len(res.Chunks), id); err != nil {
+		log.Fatalf("reextract: %s", err)
+	}
+	fmt.Printf("#%d: re-extracted (%d chunks, %d OCR pages) — status back to pending;\n"+
+		"process it again to refresh summary/tags: vellum process %d\n",
+		id, len(res.Chunks), res.OCRPages, id)
 }
 
 func cmdEmbed(cfg *config.Config, args []string) {

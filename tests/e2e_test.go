@@ -246,7 +246,7 @@ func TestE2E(t *testing.T) {
 	}
 
 	// ---- ingest
-	st, err := ingest.Ingest(cfg, conn, []string{lib}, false)
+	st, err := ingest.Ingest(cfg, conn, []string{lib}, false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -265,19 +265,16 @@ func TestE2E(t *testing.T) {
 		t.Fatalf("digital pdf not classified as paper, got %q", digitalKind)
 	}
 
-	// OCR actually extracted the scanned page?
-	hits, err := search.Keyword(conn, "sensorimotor", 20)
-	if err != nil {
+	// the scan must be PENDING OCR at ingest (quick text-layer extract),
+	// not OCR-ed inline
+	var scanPending int64
+	if err := conn.QueryRow(
+		"SELECT ocr_pending FROM documents WHERE path LIKE '%cognitive_machines_scan%'").
+		Scan(&scanPending); err != nil {
 		t.Fatal(err)
 	}
-	foundScan := false
-	for _, h := range hits {
-		if strings.Contains(h.Snippet, "[sensorimotor]") {
-			foundScan = true
-		}
-	}
-	if !foundScan {
-		t.Fatal("OCR text not indexed with a highlighted match")
+	if scanPending != 1 {
+		t.Fatalf("scan fixture not marked ocr_pending at ingest (%d)", scanPending)
 	}
 
 	// metadata title came through?
@@ -340,6 +337,31 @@ The rain began before the road did, and the field kept its own counsel.
 		t.Fatal("not all documents reached status=done")
 	}
 
+	// OCR actually extracted the scanned page? (processing did the OCR —
+	// ingest only flagged it as ocr_pending)
+	hits, err := search.Keyword(conn, "sensorimotor", 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundScan := false
+	for _, h := range hits {
+		if strings.Contains(h.Snippet, "[sensorimotor]") {
+			foundScan = true
+		}
+	}
+	if !foundScan {
+		t.Fatal("OCR text not indexed with a highlighted match")
+	}
+	var scanOcrPages int64
+	if err := conn.QueryRow(
+		"SELECT ocr_pages FROM documents WHERE path LIKE '%cognitive_machines_scan%'").
+		Scan(&scanOcrPages); err != nil {
+		t.Fatal(err)
+	}
+	if scanOcrPages < 1 {
+		t.Fatalf("scan document processed without OCR pages (%d)", scanOcrPages)
+	}
+
 	// ---- paper fast path: summary must be the EXTRACTED abstract
 	var sumSource, paperSummary string
 	if err := conn.QueryRow(
@@ -355,7 +377,7 @@ The rain began before the road did, and the field kept its own counsel.
 	}
 
 	// ingest the book, verify kind detection
-	stBook, err := ingest.Ingest(cfg, conn, []string{bookPath}, false)
+	stBook, err := ingest.Ingest(cfg, conn, []string{bookPath}, false, nil)
 	if err != nil || stBook.Added != 1 {
 		t.Fatalf("book not ingested: %+v (%v)", stBook, err)
 	}
@@ -376,7 +398,7 @@ The rain began before the road did, and the field kept its own counsel.
 	if err := os.WriteFile(longPath, []byte(longText), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	st2, err := ingest.Ingest(cfg, conn, []string{longPath}, false)
+	st2, err := ingest.Ingest(cfg, conn, []string{longPath}, false, nil)
 	if err != nil || st2.Added != 1 {
 		t.Fatalf("long doc not ingested: %+v (%v)", st2, err)
 	}

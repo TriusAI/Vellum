@@ -35,8 +35,14 @@ var (
 	reDOI        = regexp.MustCompile(`(?i)\bdoi:|\bhttps?://doi\.org/`)
 	reKeywords   = regexp.MustCompile(`(?im)^[\s]*keywords?[:.]`)
 	reChapter    = regexp.MustCompile(`(?im)^[\s]*chapter\s+(one|two|three|\d+)`)
-	rePublisher  = regexp.MustCompile(`(?i)all rights reserved|published by|isbn[\s:]`)
+	reChapterN   = regexp.MustCompile(`(?m)^\s*(chapter\s+(one|two|three|\d+)|[0-9]{1,2}\.\s+\S.{4,80}$)`)
+	rePublisher  = regexp.MustCompile(
+		`(?i)all rights reserved|published by|isbn[\s:]?\d|` +
+			`\blibrary of congress|printed in [a-z]|copyright ©?|©\s*(19|20)\d\d`)
 	reContents   = regexp.MustCompile(`(?im)^[\s]*(table of )?contents\b`)
+	reTOCLine    = regexp.MustCompile(`(?m)^\s*\S.{2,90}[.·]{2,}\s*\d+\s*$`)
+	reFrontSec   = regexp.MustCompile(`(?im)^[\s]*(preface|foreword|acknowledge?ments?|introduction|prologue)\b`)
+	reISBN       = regexp.MustCompile(`(?i)isbn[\s:]*97[89][0-9-]{9,}`)
 	reGalleryImg = regexp.MustCompile(`(?i)figure\s+\d+`)
 	reCourse     = regexp.MustCompile(`(?i)\b(lecture|syllabus|homework|problem set|instructor|office hours|semester|midterm|final exam)\b`)
 	reDue        = regexp.MustCompile(`(?i)\bdue[:\s]`)
@@ -44,10 +50,12 @@ var (
 	reAppendix   = regexp.MustCompile(`(?im)^[\s]*appendix\b`)
 )
 
-// Detect scores the kind from full extracted text plus page statistics
-// (ocrPages = pages that needed OCR, nPages = total). Text may be
-// truncated by the caller for very large documents (the leading ~30k
-// chars carry most structural signal).
+// Detect scores the kind from the EXTRACTED TEXT (the full text layer;
+// large documents are capped internally — the leading ~40k chars carry
+// title/front-matter signal, the trailing ~20k carry colophon and
+// references) plus page statistics (ocrPages = pages that needed OCR,
+// nPages = total page count). Page count is a first-class signal:
+// papers are small, monographs are not.
 func Detect(text string, ocrPages, nPages int) (kind string, scores []Scored) {
 	t := text
 	if len(t) > 40000 {
@@ -56,6 +64,12 @@ func Detect(text string, ocrPages, nPages int) (kind string, scores []Scored) {
 	// also sample the tail: references/colophon live at the end
 	if len(text) > 60000 {
 		t += "\n" + text[len(text)-20000:]
+	}
+	// full text for counting structural repeats (chapters, ISBN-like
+	// strings spread across the book) — capped to keep the scan cheap
+	full := text
+	if len(full) > 2_000_000 {
+		full = full[:2_000_000]
 	}
 	tl := strings.ToLower(t)
 
@@ -83,8 +97,22 @@ func Detect(text string, ocrPages, nPages int) (kind string, scores []Scored) {
 	}
 
 	// --- book signals
-	if reChapter.MatchString(t) {
+	if n := len(reChapterN.FindAllString(full, -1)); n >= 2 {
+		book += math.Min(4, 1.5+float64(n)/3)
+	} else if reChapter.MatchString(t) {
 		book += 3
+	}
+	if n := len(reTOCLine.FindAllString(full, -1)); n >= 6 {
+		// a real table of contents: many "title ..... 12" lines
+		book += 2
+	}
+	if n := len(reFrontSec.FindAllString(full, -1)); n >= 2 {
+		// preface/foreword/acknowledgments/introduction/prologue —
+		// the classic front-matter run of a monograph
+		book += 1.5
+	}
+	if reISBN.MatchString(full) {
+		book += 2
 	}
 	if rePublisher.MatchString(t) {
 		book += 2
@@ -92,6 +120,12 @@ func Detect(text string, ocrPages, nPages int) (kind string, scores []Scored) {
 	if reContents.MatchString(t) {
 		book += 1
 		course += 0.2
+	}
+	switch {
+	case nPages >= 120:
+		book += 3 // papers don't run this long
+	case nPages >= 60:
+		book += 1.5
 	}
 
 	// --- gallery signals: mostly images, thin text

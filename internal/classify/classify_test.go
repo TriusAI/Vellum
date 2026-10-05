@@ -160,3 +160,42 @@ About this book.
 		t.Fatalf("TOC bled into preface: %q", toc)
 	}
 }
+
+// A scanned-looking long book: front pages are cover/acknowledgments/
+// preface (no "Chapter" headings in the sample), chapters appear later.
+// Page count + ISBN + TOC-dot-leaders + front-matter run must carry it.
+func TestDetectBookFrontHeavyLong(t *testing.T) {
+	// simulate the sample ingest sees: first pages, no chapter in sight
+	text := `The Long Road to Mud
+Copyright 1997 by Lorem Author
+
+Acknowledgments
+For their patience across seven years, thanks to...
+(p) ... and the usual suspects who read the drafts.
+
+Contents
+1 The Lane ..... 1
+2 The Flood ..... 44
+3 The Ditch ..... 90
+
+Preface
+This book grew out of ten years of walking the same muddy lane...
+ISBN 978-0-13-123456-7
+`
+	text += strings.Repeat("\nChapter Seven\nThe rain, again, and the field under it.\n", 40)
+	kind, scores := Detect(text, 300, 312)
+	if kind != "book" {
+		t.Fatalf("long front-heavy book not classified as book: %v", scores)
+	}
+}
+
+// A paper's length must not bleed into book territory.
+func TestDetectLongPaperStaysPaper(t *testing.T) {
+	text := "Abstract\n" + strings.Repeat("We analyse the structure of attention. ", 30) +
+		"\n\n1 Introduction\n" + strings.Repeat("[14] citations and doi:10.1234/x ", 8) +
+		"\n\nReferences\n" + strings.Repeat("Author, A. Title of the cited work. Journal of Things, 2019.\n", 30)
+	kind, scores := Detect(text, 0, 28)
+	if kind != "paper" {
+		t.Fatalf("long paper not classified as paper: %v", scores)
+	}
+}

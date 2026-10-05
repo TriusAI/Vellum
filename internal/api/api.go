@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"vellum/internal/classify"
 	"vellum/internal/config"
 	"vellum/internal/db"
 	"vellum/internal/extract"
@@ -57,6 +58,7 @@ func (s *Server) Mux() http.Handler {
 	mux.HandleFunc("PUT /api/documents/{id}/tags", s.putTags)
 	mux.HandleFunc("POST /api/ingest", s.postIngest)
 	mux.HandleFunc("GET /api/fs", s.fsList)
+	mux.HandleFunc("POST /api/documents/{id}/reextract", s.reextract)
 	mux.HandleFunc("POST /api/process", s.postProcess)
 	mux.HandleFunc("GET /api/search", s.search)
 	mux.HandleFunc("GET /api/vocab", s.getVocab)
@@ -103,6 +105,7 @@ type documentJSON struct {
 	Kind          string   `json:"kind,omitempty"`
 	SummarySource string   `json:"summary_source,omitempty"`
 	Category      string   `json:"category,omitempty"`
+	OcrPending    bool     `json:"ocr_pending,omitempty"`
 	Tags          []string `json:"tags"`
 	OCRPages      int      `json:"ocr_pages"`
 	NPages        int      `json:"n_pages"`
@@ -112,7 +115,8 @@ type documentJSON struct {
 }
 
 const docColumns = "id, path, title, authors, year, summary, status, " +
-	"kind, summary_source, category, error, ocr_pages, n_pages, added_at, processed_at"
+	"kind, summary_source, category, error, ocr_pages, n_pages, ocr_pending, " +
+	"added_at, processed_at"
 
 type scanDoc struct {
 	id                            int64
@@ -122,13 +126,14 @@ type scanDoc struct {
 	err                           sql.NullString
 	processedAt                   sql.NullString
 	ocrPages, nPages              sql.NullInt64
+	ocrPending                    sql.NullInt64
 }
 
 func scanDocRow(sc interface{ Scan(...any) error }) (scanDoc, error) {
 	var d scanDoc
 	err := sc.Scan(&d.id, &d.path, &d.title, &d.authors, &d.year, &d.summary,
 		&d.status, &d.kind, &d.summarySource, &d.category, &d.err, &d.ocrPages,
-		&d.nPages, &d.addedAt, &d.processedAt)
+		&d.nPages, &d.ocrPending, &d.addedAt, &d.processedAt)
 	return d, err
 }
 
@@ -138,8 +143,9 @@ func (d scanDoc) toJSON() documentJSON {
 		Title: d.title.String, Authors: d.authors.String,
 		Year: d.year.String, Summary: d.summary.String, Status: d.status,
 		Kind: d.kind.String, SummarySource: d.summarySource.String,
-		Category: d.category.String,
-		OCRPages: int(d.ocrPages.Int64), NPages: int(d.nPages.Int64),
+		Category:   d.category.String,
+		OcrPending: d.ocrPending.Int64 > 0,
+		OCRPages:   int(d.ocrPages.Int64), NPages: int(d.nPages.Int64),
 		Error: d.err.String, AddedAt: d.addedAt,
 		ProcessedAt: d.processedAt.String, Tags: []string{},
 	}
@@ -412,6 +418,8 @@ func (s *Server) patchDocument(w http.ResponseWriter, r *http.Request) {
 		assignments += col + "=?"
 		args = append(args, val)
 	}
+	// a user-provided kind is sticky: processing only re-classifies
+	// documents the user has not overrode
 	args = append(args, id)
 	res, err := s.conn.Exec("UPDATE documents SET "+assignments+" WHERE id=?", args...)
 	if err != nil {
@@ -421,6 +429,9 @@ func (s *Server) patchDocument(w http.ResponseWriter, r *http.Request) {
 	if n, _ := res.RowsAffected(); n == 0 {
 		writeErr(w, 404, "no such document")
 		return
+	}
+	if _, hasKind := set["kind"]; hasKind {
+		s.conn.Exec("UPDATE documents SET kind_user=1 WHERE id=?", id)
 	}
 	s.document(w, r)
 }
@@ -521,12 +532,106 @@ func (s *Server) postIngest(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "paths[] required")
 		return
 	}
-	st, err := ingest.Ingest(s.cfg, s.conn, body.Paths, body.Reprocess)
+	s.mu.Lock()
+	s.progress = map[string]any{"running": true, "message": "ingesting", "updated": time.Now().Format(time.RFC3339)}
+	s.mu.Unlock()
+	st, err := ingest.Ingest(s.cfg, s.conn, body.Paths, body.Reprocess,
+		func(msg string) {
+			s.mu.Lock()
+			s.progress = map[string]any{"running": true, "message": msg,
+				"updated": time.Now().Format(time.RFC3339)}
+			s.mu.Unlock()
+		})
+	s.mu.Lock()
+	s.progress = map[string]any{"running": false, "message": "", "updated": time.Now().Format(time.RFC3339)}
+	s.mu.Unlock()
 	if err != nil {
 		writeErr(w, 500, err.Error())
 		return
 	}
 	writeJSON(w, 200, st)
+}
+
+// reextract re-runs text extraction on a document's source file: with
+// {"force":true} the raster is OCR'd on EVERY page (the repair path
+// for garbled embedded text layers), otherwise only broken-looking
+// pages are re-OCR'd. Text is replaced in place; the document lands
+// pending (status=ingested) so it is re-summarized and re-tagged.
+func (s *Server) reextract(w http.ResponseWriter, r *http.Request) {
+	id, err := pathID(r)
+	if err != nil {
+		writeErr(w, 400, "bad id")
+		return
+	}
+	var body struct {
+		Force bool `json:"force"`
+	}
+	if r.ContentLength > 0 {
+		if err := decodeBody(r, &body); err != nil {
+			writeErr(w, 400, "bad JSON body: "+err.Error())
+			return
+		}
+	}
+	var path string
+	err = s.conn.QueryRow("SELECT path FROM documents WHERE id=?", id).Scan(&path)
+	if err == sql.ErrNoRows {
+		writeErr(w, 404, "no such document")
+		return
+	}
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	if _, err := os.Stat(path); err != nil {
+		writeErr(w, 409, "source file missing: "+path)
+		return
+	}
+	progress := func(msg string) {
+		s.mu.Lock()
+		s.progress = map[string]any{"running": true, "message": msg,
+			"updated": time.Now().Format(time.RFC3339)}
+		s.mu.Unlock()
+	}
+	var res *extract.Result
+	if body.Force {
+		progress("re-extracting text (OCR forced on every page)")
+		res, err = extract.ExtractOCR(path, s.cfg)
+	} else {
+		progress("re-extracting text")
+		res, err = extract.Extract(path, s.cfg)
+	}
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	if err := db.ReplaceDocumentText(s.conn, id, res.Chunks); err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	var kindUser int64
+	s.conn.QueryRow("SELECT kind_user FROM documents WHERE id=?", id).Scan(&kindUser)
+	if kindUser == 0 && len(res.Chunks) > 0 {
+		text := ""
+		var sb strings.Builder
+		for _, c := range res.Chunks {
+			sb.WriteString(c.Text)
+			sb.WriteString("\n\n")
+			if sb.Len() > 200000 {
+				break
+			}
+		}
+		text = sb.String()
+		newKind, _ := classify.Detect(text, res.OCRPages, len(res.Chunks))
+		s.conn.Exec("UPDATE documents SET kind=?, kind_user=(SELECT kind_user FROM documents WHERE id=?), ocr_pages=?, n_pages=?, ocr_pending=0, status='ingested', error=NULL, processed_at=NULL WHERE id=?",
+			newKind, id, res.OCRPages, len(res.Chunks), id)
+	} else {
+		s.conn.Exec("UPDATE documents SET ocr_pages=?, n_pages=?, ocr_pending=0, status='ingested', error=NULL, processed_at=NULL WHERE id=?",
+			res.OCRPages, len(res.Chunks), id)
+	}
+	s.mu.Lock()
+	s.progress = map[string]any{"running": false, "message": "", "updated": time.Now().Format(time.RFC3339)}
+	s.mu.Unlock()
+	s.document(w, r)
 }
 
 func (s *Server) postProcess(w http.ResponseWriter, r *http.Request) {

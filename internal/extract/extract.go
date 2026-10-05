@@ -12,6 +12,7 @@ package extract
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -20,6 +21,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 	"unicode"
 
 	"vellum/internal/config"
@@ -39,6 +41,9 @@ type Result struct {
 	Title    string
 	Authors  string
 	OCRPages int
+	// NeedsOCR reports whether some pages carry too little usable text
+	// (only set by ExtractText — the quick, OCR-less pass ingest uses).
+	NeedsOCR bool
 }
 
 // Supported reports whether Vellum can ingest this file.
@@ -52,7 +57,12 @@ func clean(s string) string {
 }
 
 func run(bin string, args ...string) ([]byte, error) {
-	cmd := exec.Command(bin, args...)
+	// generous per-call timeout: tesseract on dense CJK pages takes
+	// minutes legitimately, but a wedged subprocess must not hang an
+	// ingest/process run forever
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, bin, args...)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
@@ -66,16 +76,41 @@ func run(bin string, args ...string) ([]byte, error) {
 	return out, nil
 }
 
-// Extract extracts text from one file.
+// Extract extracts text from one file, OCR-ing pages that need it
+// (low-text pages with image content, plus pages whose embedded text
+// layer is junk).
 func Extract(path string, cfg *config.Config) (*Result, error) {
+	text, err := ExtractText(path, cfg)
+	if err != nil {
+		return nil, err
+	}
+	ext := strings.ToLower(filepath.Ext(path))
+	if textExt[ext] {
+		return text, nil
+	}
+	if !pdfLike[ext] {
+		return nil, fmt.Errorf("unsupported file type: %s", ext)
+	}
+	return ocrize(path, cfg, text, false)
+}
+
+// ExtractOCR re-extracts with raster forced over the embedded text
+// layer on every page — the repair path for documents with a garbled
+// or unusable text layer (auto mode only re-OCRs pages that LOOK
+// broken; force distrusts all of them).
+func ExtractOCR(path string, cfg *config.Config) (*Result, error) {
 	ext := strings.ToLower(filepath.Ext(path))
 	if textExt[ext] {
 		return extractPlainText(path, cfg)
 	}
-	if pdfLike[ext] {
-		return extractPDFLike(path, cfg)
+	if !pdfLike[ext] {
+		return nil, fmt.Errorf("unsupported file type: %s", ext)
 	}
-	return nil, fmt.Errorf("unsupported file type: %s", ext)
+	text, err := ExtractText(path, cfg)
+	if err != nil {
+		return nil, err
+	}
+	return ocrize(path, cfg, text, true)
 }
 
 func extractPlainText(path string, cfg *config.Config) (*Result, error) {
@@ -96,7 +131,19 @@ func extractPlainText(path string, cfg *config.Config) (*Result, error) {
 	return &Result{Chunks: chunks}, nil
 }
 
-func extractPDFLike(path string, cfg *config.Config) (*Result, error) {
+// ExtractText is the QUICK path: text layer only — no rasterizing, no
+// OCR, no geometry analysis. Ingest runs this so indexing stays fast;
+// pages that would need OCR are reported via NeedsOCR and the work is
+// deferred to the processing phase (processOne), where progress can
+// be reported while tesseract grinds.
+func ExtractText(path string, cfg *config.Config) (*Result, error) {
+	ext := strings.ToLower(filepath.Ext(path))
+	if textExt[ext] {
+		return extractPlainText(path, cfg)
+	}
+	if !pdfLike[ext] {
+		return nil, fmt.Errorf("unsupported file type: %s", ext)
+	}
 	tmp, err := os.MkdirTemp("", "vellum-*")
 	if err != nil {
 		return nil, err
@@ -104,7 +151,7 @@ func extractPDFLike(path string, cfg *config.Config) (*Result, error) {
 	defer os.RemoveAll(tmp)
 
 	pdfPath := path
-	if strings.ToLower(filepath.Ext(path)) != ".pdf" {
+	if ext != ".pdf" {
 		pdfPath = filepath.Join(tmp, "converted.pdf")
 		if _, err := run(cfg.Tools.Mutool, "convert", "-o", pdfPath, path); err != nil {
 			return nil, fmt.Errorf("conversion to PDF failed: %w", err)
@@ -118,37 +165,78 @@ func extractPDFLike(path string, cfg *config.Config) (*Result, error) {
 	title, authors := mutoolMeta(cfg.Tools.Mutool, pdfPath)
 
 	chunks := make([]db.Chunk, len(pagesText))
-	needsOCR := []int{}
+	needsOCR := false
 	for i, text := range pagesText {
 		trimmed := strings.TrimSpace(text)
 		insufficient := len(trimmed) < cfg.OCR.MinCharsPerPage
 		// An embedded text layer can be BROKEN — scans processed by
 		// some other tool's bad OCR pass. Garbage in the layer is
 		// worse than no layer: it poisons summaries, tags, and search.
-		// Such pages go through image OCR like textless pages do.
 		insane := !insufficient && !textLayerSane(trimmed)
 		if insufficient || insane {
-			// OCR only if the page actually contains image XObjects
-			// (verified: `mutool show file 'pages.N.Resources.XObject.*'`
-			// lists XObjects, or prints null when there are none).
-			if pageHasImage(cfg.Tools.Mutool, pdfPath, i+1) || insufficient {
-				needsOCR = append(needsOCR, i)
-			}
+			needsOCR = true
 		}
 		chunks[i] = db.Chunk{Seq: i, Page: i + 1, Text: clean(text)}
+	}
+	return &Result{
+		Chunks:   chunks,
+		Title:    title,
+		Authors:  authors,
+		NeedsOCR: needsOCR,
+	}, nil
+}
+
+// ocrize runs the full OCR pass (with scan geometry) over the pages of
+// a quick-extracted document, replacing thin/garbled chunks in place.
+func ocrize(path string, cfg *config.Config, quick *Result, force bool) (*Result, error) {
+	ext := strings.ToLower(filepath.Ext(path))
+	if textExt[ext] || !pdfLike[ext] {
+		return quick, nil
+	}
+	tmp, err := os.MkdirTemp("", "vellum-*")
+	if err != nil {
+		return nil, err
+	}
+	defer os.RemoveAll(tmp)
+
+	pdfPath := path
+	if ext != ".pdf" {
+		pdfPath = filepath.Join(tmp, "converted.pdf")
+		if _, err := run(cfg.Tools.Mutool, "convert", "-o", pdfPath, path); err != nil {
+			return quick, fmt.Errorf("conversion to PDF failed: %w", err)
+		}
+	}
+
+	chunks := quick.Chunks
+	needsOCR := []int{}
+	if force {
+		for i := range chunks {
+			needsOCR = append(needsOCR, i)
+		}
+	} else {
+		for i, c := range chunks {
+			trimmed := strings.TrimSpace(c.Text)
+			insufficient := len(trimmed) < cfg.OCR.MinCharsPerPage
+			insane := !insufficient && !textLayerSane(trimmed)
+			if insufficient || insane {
+				// OCR only if the page actually contains image XObjects
+				// (verified: `mutool show file 'pages.N.Resources.XObject.*'`
+				// lists XObjects, or prints null when there are none).
+				if pageHasImage(cfg.Tools.Mutool, pdfPath, i+1) || insufficient {
+					needsOCR = append(needsOCR, i)
+				}
+			}
+		}
 	}
 
 	ocrPages := 0
 	if len(needsOCR) > 0 {
 		ocrPages = ocrPagesIn(cfg, pdfPath, tmp, needsOCR, chunks)
 	}
-
-	return &Result{
-		Chunks:   chunks,
-		Title:    title,
-		Authors:  authors,
-		OCRPages: ocrPages,
-	}, nil
+	if quick.OCRPages == 0 {
+		quick.OCRPages = ocrPages
+	}
+	return quick, nil
 }
 
 // mutoolPagesText returns the text of each page. Each page block ends with
