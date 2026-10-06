@@ -1290,9 +1290,12 @@ func (s *Server) postAsk(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var title, authors, year, summary, kind string
+	var nTitle, nAuthors, nYear, nSummary, nKind sql.NullString
 	err = s.conn.QueryRow(
 		"SELECT title, authors, year, summary, kind FROM documents WHERE id=?", id).
-		Scan(&title, &authors, &year, &summary, &kind)
+		Scan(&nTitle, &nAuthors, &nYear, &nSummary, &nKind)
+	title, authors, year, summary, kind =
+		nTitle.String, nAuthors.String, nYear.String, nSummary.String, nKind.String
 	if err == sql.ErrNoRows {
 		writeErr(w, 404, "no such document")
 		return

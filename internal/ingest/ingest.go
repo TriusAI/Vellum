@@ -616,13 +616,16 @@ func Regenerate(cfg *config.Config, conn *sql.DB, v *vocab.Vocabulary,
 	var path, title, authors, year, summary, kind string
 	var kindUser, categoryUser int64
 	var ocrPages, nPages int64
+	var nTitle, nAuthors, nYear, nSummary, nKind sql.NullString
 	err := conn.QueryRow(
 		"SELECT path, title, authors, year, summary, kind, kind_user, category_user, ocr_pages, n_pages FROM documents WHERE id=?",
-		docID).Scan(&path, &title, &authors, &year, &summary, &kind,
+		docID).Scan(&path, &nTitle, &nAuthors, &nYear, &nSummary, &nKind,
 		&kindUser, &categoryUser, &ocrPages, &nPages)
 	if err != nil {
 		return nil, err
 	}
+	title, authors, year, summary, kind =
+		nTitle.String, nAuthors.String, nYear.String, nSummary.String, nKind.String
 	text, err := db.DocumentText(conn, docID)
 	if err != nil {
 		return nil, err
