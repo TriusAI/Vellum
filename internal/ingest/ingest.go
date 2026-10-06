@@ -397,6 +397,10 @@ func processOne(ctx context.Context, cfg *config.Config, conn *sql.DB, v *vocab.
 	if err != nil {
 		return nil, err
 	}
+	shelvingExamples, err := userShelvingExamples(conn, docID)
+	if err != nil {
+		return nil, err
+	}
 
 	// ---- re-classify on the current text unless the user set the kind:
 	// ingest classified from the text layer alone; OCR text (chapters,
@@ -451,7 +455,7 @@ func processOne(ctx context.Context, cfg *config.Config, conn *sql.DB, v *vocab.
 				opening = opening[:3000]
 			}
 			tags, err := summarize.TagDocumentWithCategories(ctx, cfg, v, existingCategories,
-				[]string{abstract, opening}, nil, abstract, progress)
+				shelvingExamples, []string{abstract, opening}, nil, abstract, progress)
 			if err != nil {
 				return nil, err
 			}
@@ -483,7 +487,7 @@ func processOne(ctx context.Context, cfg *config.Config, conn *sql.DB, v *vocab.
 					tagInput = append(tagInput, "Contents:\n"+toc)
 				}
 				tags, terr := summarize.TagDocumentWithCategories(ctx, cfg, v,
-					existingCategories, tagInput, nil, front, progress)
+					existingCategories, shelvingExamples, tagInput, nil, front, progress)
 				if terr != nil {
 					return nil, terr
 				}
@@ -512,7 +516,7 @@ func processOne(ctx context.Context, cfg *config.Config, conn *sql.DB, v *vocab.
 	}
 	summary := produced.Summary
 	tags, err := summarize.TagDocumentWithCategories(ctx, cfg, v, existingCategories,
-		produced.TagChunks, produced.TagSummaries, summary, progress)
+		shelvingExamples, produced.TagChunks, produced.TagSummaries, summary, progress)
 	if err != nil {
 		return nil, err
 	}
@@ -529,6 +533,35 @@ func processOne(ctx context.Context, cfg *config.Config, conn *sql.DB, v *vocab.
 			return ""
 		}())
 	return tags, nil
+}
+
+// cleanMetaValue drops junk placeholder values ("unknown", LLM hedging like
+// "not specified") — they are worse than nothing.
+// userShelvingExamples returns the documents the user shelved personally
+// (category_user — every manual correction or pin): the tagger feeds the
+// most similar ones back as few-shot guidance, so corrections teach
+// future auto-filing. The document being processed is excluded — it must
+// not become its own example (a regeneration would just echo its shelf).
+func userShelvingExamples(conn *sql.DB, excludeDocID int64) ([]summarize.ShelvingExample, error) {
+	rows, err := conn.Query(
+		`SELECT title, authors, category FROM documents
+		 WHERE category_user=1 AND category != '' AND title != '' AND id != ?`,
+		excludeDocID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []summarize.ShelvingExample{}
+	for rows.Next() {
+		var ex summarize.ShelvingExample
+		var authors sql.NullString
+		if err := rows.Scan(&ex.Title, &authors, &ex.Category); err != nil {
+			return nil, err
+		}
+		ex.Authors = authors.String
+		out = append(out, ex)
+	}
+	return out, rows.Err()
 }
 
 // cleanMetaValue drops junk placeholder values ("unknown", LLM hedging like
@@ -773,6 +806,10 @@ func Regenerate(ctx context.Context, cfg *config.Config, conn *sql.DB, v *vocab.
 		if err != nil {
 			return applied, err
 		}
+		shelvingExamples, err := userShelvingExamples(conn, docID)
+		if err != nil {
+			return applied, err
+		}
 		tagSummaries := []string{}
 		tagChunks := []string{opening}
 		if summary != "" {
@@ -782,7 +819,7 @@ func Regenerate(ctx context.Context, cfg *config.Config, conn *sql.DB, v *vocab.
 			return applied, err
 		}
 		tr, err := summarize.TagDocumentWithCategories(ctx, cfg, v, existingCategories,
-			tagChunks, tagSummaries, summary, progress)
+			shelvingExamples, tagChunks, tagSummaries, summary, progress)
 		if err != nil {
 			return applied, err
 		}

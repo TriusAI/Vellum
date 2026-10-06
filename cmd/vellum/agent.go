@@ -207,7 +207,13 @@ Categories are YOUR shelving (any string; e.g. "ai-papers", "theology").
 Processing AUTO-FILES unshelved documents: the tagging call proposes one
 category per document (reusing your existing shelves when one fits;
 junk values are filtered); PATCH/vellum category pins it (category_user)
-and the model never re-files a pinned document. Process results carry
+and the model never re-files a pinned document.
+AUTO-FILING LEARNS FROM YOUR CORRECTIONS: every document you shelved by
+hand is recorded, and when the next similar document is processed, the
+most textually similar user-shelved documents are fed to the tagging
+call as few-shot examples ("file an alike document the same way").
+Correcting a mis-shelved paper teaches the next one (no retraining —
+retrieval from your own pins; keyword-overlap matching, deterministic). Process results carry
 the field ("category") and the UI shows the shelf as a chip.
     vellum category 42 ai-papers     # set; "none" clears
     vellum show all --kind paper --category ai-papers --tag transformer

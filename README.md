@@ -76,6 +76,8 @@ vellum search "attention" --tag transformer --kind paper
 # auto-categorization: processing files unshelved documents into
 # categories (reusing your existing shelves; user-set shelves are kept)
 vellum category 3 theology      # pin or re-file manually
+# your corrections teach auto-filing: documents you shelved by hand are
+# fed back as examples for similar future documents — no retraining
 # reorganize shelves: renames the shelf everywhere, subtree included
 vellum rename-category machine-learning computer-science/machine-learning
 

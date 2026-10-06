@@ -12,6 +12,7 @@ package summarize
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 
 	"vellum/internal/config"
@@ -65,6 +66,7 @@ Rules:
 {categories}
 prefer one of those EXACTLY when it fits; propose a new one otherwise.
 If nothing fits, use "".
+{examples}
 - If you can confidently infer the document's title, authors, or publication
   year from the text, fill them in; otherwise leave them empty ("" / []).
 
@@ -329,15 +331,118 @@ type TagResult struct {
 // raw-text prefix — cheaper and enough signal for topic tagging.
 func TagDocument(cfg *config.Config, v *vocab.Vocabulary,
 	chunks, summaries []string, finalSummary string, cb ProgressFunc) (*TagResult, error) {
-	return TagDocumentWithCategories(nil, cfg, v, nil, chunks, summaries, finalSummary, cb)
+	return TagDocumentWithCategories(nil, cfg, v, nil, nil, chunks, summaries, finalSummary, cb)
+}
+
+// ShelvingExample is one document the user personally shelved
+// (category_user): every manual correction or pin is a teaching signal.
+// The tagger shows the most textually similar ones as few-shot guidance,
+// so the user's shelving judgment propagates to future auto-filing —
+// correcting a PLT paper from "machine-learning" to
+// "programming-languages" makes the next similar paper land in
+// programming-languages.
+type ShelvingExample struct {
+	Title    string
+	Authors  string
+	Category string
+}
+
+// exampleStopwords keeps the overlap score about subject matter rather
+// than articles and library boilerplate.
+var exampleStopwords = map[string]bool{
+	"the": true, "and": true, "for": true, "with": true, "from": true,
+	"that": true, "this": true, "are": true, "was": true, "were": true,
+	"into": true, "about": true, "their": true, "which": true,
+	"how": true, "what": true, "why": true, "can": true, "its": true,
+	"one": true, "two": true, "new": true, "study": true, "using": true,
+	"paper": true, "document": true, "introduction": true, "abstract": true,
+	"chapter": true, "section": true,
+}
+
+// tokenize splits text into lowercase word tokens for example matching.
+func tokenize(s string) []string {
+	return strings.FieldsFunc(strings.ToLower(s), func(r rune) bool {
+		// keep ASCII letters/digits and non-ASCII (CJK runs count as
+		// one token per run — enough for overlap scoring)
+		return (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') &&
+			(r < '0' || r > '9') && r < 128
+	})
+}
+
+// bestExamples picks up to n examples sharing the most distinctive terms
+// with the document's text — cheap keyword overlap, deterministic, no
+// model call. Examples matching fewer than 2 terms are dropped (noise).
+func bestExamples(examples []ShelvingExample, text string, n int) []ShelvingExample {
+	if len(examples) == 0 {
+		return nil
+	}
+	docTerms := map[string]bool{}
+	for _, t := range tokenize(text) {
+		if len(t) > 2 && !exampleStopwords[t] {
+			docTerms[t] = true
+		}
+	}
+	type scored struct {
+		ex    ShelvingExample
+		score int
+	}
+	var hits []scored
+	for _, ex := range examples {
+		seen := map[string]bool{}
+		score := 0
+		for _, t := range tokenize(ex.Title + " " + ex.Authors) {
+			if len(t) > 2 && !exampleStopwords[t] && docTerms[t] && !seen[t] {
+				seen[t] = true
+				score++
+			}
+		}
+		if score >= 2 {
+			hits = append(hits, scored{ex, score})
+		}
+	}
+	sort.Slice(hits, func(i, j int) bool {
+		if hits[i].score != hits[j].score {
+			return hits[i].score > hits[j].score
+		}
+		return hits[i].ex.Title < hits[j].ex.Title
+	})
+	if len(hits) > n {
+		hits = hits[:n]
+	}
+	out := make([]ShelvingExample, 0, len(hits))
+	for _, h := range hits {
+		out = append(out, h.ex)
+	}
+	return out
+}
+
+// examplesBlock renders the few-shot section of tagPrompt ("" when there
+// is nothing to teach).
+func examplesBlock(examples []ShelvingExample) string {
+	if len(examples) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("The user PERSONALLY shelved these similar documents in this library —\n" +
+		"file an alike document the same way:\n")
+	for _, ex := range examples {
+		line := "- \"" + ex.Title + "\""
+		if ex.Authors != "" {
+			line += " (" + ex.Authors + ")"
+		}
+		b.WriteString(line + " → " + ex.Category + "\n")
+	}
+	return b.String()
 }
 
 // TagDocumentWithCategories is TagDocument plus the library's existing
 // categories, which the model is told to reuse when one fits (so
 // auto-categorization consolidates shelves instead of inventing one per
-// document).
+// document), plus the user's shelving examples (their manual corrections
+// teach future auto-filing).
 func TagDocumentWithCategories(ctx context.Context, cfg *config.Config, v *vocab.Vocabulary,
-	categories []string, chunks, summaries []string, finalSummary string,
+	categories []string, examples []ShelvingExample,
+	chunks, summaries []string, finalSummary string,
 	cb ProgressFunc) (*TagResult, error) {
 	ctx = orBG(ctx)
 
@@ -369,6 +474,8 @@ func TagDocumentWithCategories(ctx context.Context, cfg *config.Config, v *vocab
 		}
 		return strings.Join(categories, ", ")
 	}())
+	prompt = strings.ReplaceAll(prompt, "{examples}",
+		examplesBlock(bestExamples(examples, input, 3)))
 	prompt = strings.ReplaceAll(prompt, "{text}", input)
 
 	out, err := chat(ctx, cfg, prompt, tagSchema(v.SortedKeys()))

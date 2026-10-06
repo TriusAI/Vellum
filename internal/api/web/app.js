@@ -184,8 +184,11 @@ function closeDocPages(docId) {
 }
 
 // refreshPage (re)loads a page's data and renders its content. The token
-// guards async content: a newer refresh always wins the race (same guard
-// the old renderDetailTabs had — never render stale data).
+// guards async content: a newer refresh always wins the race. To avoid
+// visual flashing on updates, the "loading…" placeholder only shows on
+// the FIRST load, a re-render is skipped entirely when the document data
+// did not change, and the content scroll position is preserved when it
+// did.
 async function refreshPage(page) {
   if (page.kind === "library") {
     if (!allDocs.length) page.content.replaceChildren(el("p", { class: "hint" }, "loading…"));
@@ -193,13 +196,19 @@ async function refreshPage(page) {
     return;
   }
   const token = ++page.token;
-  page.content.replaceChildren(el("div", { class: "hint" }, "loading…"));
+  if (!page.data)
+    page.content.replaceChildren(el("div", { class: "hint" }, "loading…"));
   try {
     const data = await api(`/api/documents/${page.docId}`);
     if (token !== page.token) return; // a newer refresh won
+    const unchanged = page.data && JSON.stringify(data) === JSON.stringify(page.data);
     page.data = data;
     updatePageTitle(page);
-    renderPageContent(page);
+    if (!unchanged) {
+      const scrollTop = page.content.scrollTop;
+      renderPageContent(page);
+      page.content.scrollTop = scrollTop;
+    }
   } catch (e) {
     if (token !== page.token) return;
     page.content.replaceChildren(el("p", { class: "hint" }, "error: " + e.message));
@@ -287,6 +296,12 @@ async function refresh() {
 function renderList(docs) {
   const list = $("#list");
   if (!list) return;
+  // preserve what the user is looking at across re-renders: the scroll
+  // position and which groups they collapsed (no visual flash on save)
+  const scrollTop = list.scrollTop;
+  const collapsed = new Set();
+  for (const g of list.querySelectorAll("details.group"))
+    if (!g.open && g.dataset.path) collapsed.add(g.dataset.path);
   list.replaceChildren();
   if (!docs.length) {
     const p = el("p", { class: "hint" });
@@ -317,7 +332,7 @@ function renderList(docs) {
   }
   const renderGroup = (node, path, plain) => {
     const ul = el("ul", { class: "cat-items" });
-    for (const d of node.docs) ul.append(docRow(d));
+    for (const d of node.docs) ul.append(docRow(d, { inTree: true }));
     const kids = [...node.children.entries()].sort((a, b) =>
       a[0].localeCompare(b[0]));
     for (const [child, childNode] of kids) {
@@ -334,8 +349,11 @@ function renderList(docs) {
       title: "rename this shelf (the whole subtree moves with it)",
       onclick: (ev) => { ev.stopPropagation(); ev.preventDefault(); openRenameDialog(path); },
     }, "✎"));
-    return el("details", { class: "group" + (plain ? " group-plain" : ""), open: true },
+    const det = el("details", { class: "group" + (plain ? " group-plain" : ""), open: true },
       sum, ul);
+    det.dataset.path = path;
+    if (collapsed.has(path)) det.open = false;
+    return det;
   };
   for (const [cat, node] of [...root.children.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
     list.append(renderGroup(node, cat, false));
@@ -347,13 +365,17 @@ function renderList(docs) {
       { docs: root.docs, children: new Map(), total: root.docs.length },
       "uncategorized", true));
   }
+  list.scrollTop = scrollTop;
 }
 
-// Items are compact list rows: title, category, tags — the details
-// (summary, status, metadata, processing) live in document pages.
+// Items are compact list rows: title, status, tags — the details
+// (summary, metadata, processing) live in document pages.
 // A quick status signal still rides along: pending / error / OCR-needed
 // documents are marked so triage does not require opening each one.
-function docRow(d) {
+// The category chip only shows OUTSIDE the tree (search results): inside
+// it, the group header already says the category — repeating it per row
+// is noise.
+function docRow(d, opts = {}) {
   const title = d.title || d.path.split("/").pop();
   const chips = el("div", { class: "chips" });
   if (d.status === "error")
@@ -362,7 +384,7 @@ function docRow(d) {
     chips.append(el("span", { class: "chip pend", title: "not processed yet" }, "pending"));
   if (d.ocr_pending)
     chips.append(el("span", { class: "chip pend", title: "thin text layer — processing will OCR it" }, "ocr"));
-  if (d.category) chips.append(el("span", { class: "chip sug" }, esc(d.category)));
+  if (d.category && !opts.inTree) chips.append(el("span", { class: "chip sug" }, esc(d.category)));
   for (const t of d.tags) chips.append(el("span", { class: "chip" }, esc(t)));
   return el("li", { class: "item", onclick: () => openPage("summary", d.id) },
     el("span", { class: "item-title" }, esc(title)),

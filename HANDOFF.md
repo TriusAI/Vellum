@@ -134,7 +134,13 @@ Fast paths by kind (`internal/classify` + `produceSummary` in ingest):
 - categories: `vellum category ID [VALUE|-]`, auto-filed at processing
   (the tag call proposes one; existing shelves are fed to the prompt to
   consolidate; user-pinned shelves are never re-filed), category chips on
-  rows, shelf tree in the UI (collapsible, nested).
+  rows (outside the tree — the group header already says it there),
+  shelf tree in the UI (collapsible, nested, ✎ rename).
+  Auto-filing LEARNS: user-shelved documents (category_user) are matched
+  by keyword overlap to the document being processed and the top-3 fed
+  as few-shot examples to the tagging call — corrections propagate
+  (see `ShelvingExample`/`bestExamples` in internal/summarize, fetched
+  by `userShelvingExamples` in ingest).
 - per-field regeneration: `vellum regenerate ID [meta|summary|tags|
   category|kind ...]` — cheap individual rebuilds, no full reprocess
   (meta = one constrained call on the opening text; kind = deterministic
