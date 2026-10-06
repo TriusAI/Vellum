@@ -1,4 +1,10 @@
-/* Vellum web UI — vanilla JS over the /api/ JSON surface. */
+/* Vellum web UI — vanilla JS over the /api/ JSON surface.
+ *
+ * The main frame below the top bar is a horizontal strip of PAGES: the
+ * document tree is the "All Documents" page, and every document view
+ * (summary / preview / text / ask) opens as its own page with a title bar
+ * ("[Preview] a.pdf"). Pages can be re-ordered, drag-resized and expanded
+ * to fill the remaining width; all pages share the frame's height. */
 "use strict";
 
 const $ = (sel) => document.querySelector(sel);
@@ -28,6 +34,179 @@ function notice(msg) { $("#notice").textContent = msg || ""; }
 const isPdf = (path) => /\.pdf$/i.test(path);
 const hasCover = (path) => /\.(pdf|epub|mobi|azw3?)$/i.test(path);
 
+/* ------------------------------------------------------------------ pages */
+
+const PAGE_KINDS = {
+  library: { label: null },
+  summary: { label: "Summary" },
+  preview: { label: "Preview" },
+  text:    { label: "Text" },
+  ask:     { label: "Ask" },
+};
+
+let pages = [];        // ordered: the strip order IS the array order
+let activePage = null; // last-interacted page (Esc closes it)
+
+const pageKey = (kind, docId) => (kind === "library" ? "library" : kind + ":" + docId);
+const libraryPage = () => pages.find((p) => p.kind === "library");
+
+// openPage opens (or focuses) one page. opts.page seeds the preview page
+// number (jump-to-page from search results or the text page).
+function openPage(kind, docId, opts = {}) {
+  const key = pageKey(kind, docId);
+  let page = pages.find((p) => p.key === key);
+  if (!page) {
+    page = {
+      key, kind, docId: docId || 0, data: null, token: 0,
+      width: kind === "library" ? 480 : 430,
+      pageNo: opts.page || 0, expanded: false,
+    };
+    pages.push(page);
+    buildPageChrome(page);
+    $("#pages").append(page.el);
+  }
+  if (opts.page && kind === "preview") page.pageNo = opts.page;
+  markActive(page);
+  page.el.scrollIntoView({ block: "nearest", inline: "nearest" });
+  refreshPage(page);
+  return page;
+}
+
+// buildPageChrome creates the page's frame (title bar + content area +
+// resize handle). The frame lives as long as the page is open — content
+// updates replace only page.content, so in-flight states (ask streaming,
+// scroll positions) survive re-ordering and content refreshes.
+function buildPageChrome(page) {
+  const title = el("span", { class: "page-title" }, "…");
+  const controls = el("span", { class: "page-controls" });
+  const mkBtn = (label, tip, onclick) => el("button", {
+    title: tip,
+    onclick: (ev) => { ev.stopPropagation(); onclick(); },
+  }, label);
+  controls.append(mkBtn("◀", "move page left", () => movePage(page, -1)));
+  controls.append(mkBtn("▶", "move page right", () => movePage(page, 1)));
+  controls.append(mkBtn("⤢", "expand to fill the frame / restore width",
+    () => toggleExpand(page)));
+  if (page.kind !== "library")
+    controls.append(mkBtn("✕", "close page", () => closePage(page)));
+  const head = el("div", { class: "page-head" }, title, controls);
+  const content = el("div", { class: "page-body" });
+  if (page.kind === "library") content.id = "list";
+  const resize = el("div", { class: "page-resize", title: "drag to resize" });
+  resize.addEventListener("mousedown", (ev) => startResize(ev, page));
+  page.el = el("section", { class: "page" }, head, content, resize);
+  page.el.style.flexBasis = page.width + "px";
+  // the strip is a plain <main>; a mousedown anywhere in the page marks it
+  // active (visible focus ring + Esc target)
+  page.el.addEventListener("mousedown", () => markActive(page), true);
+  page.content = content;
+  page.titleEl = title;
+  updatePageTitle(page);
+}
+
+function updatePageTitle(page) {
+  if (page.kind === "library") { page.titleEl.textContent = "All Documents"; return; }
+  const d = page.data?.document;
+  const name = d ? (d.title || d.path.split("/").pop()) : "#" + page.docId;
+  page.titleEl.textContent = `[${PAGE_KINDS[page.kind].label}] ${name}`;
+}
+
+function markActive(page) {
+  activePage = page;
+  for (const p of pages) p.el.classList.toggle("active", p === page);
+}
+
+function movePage(page, dir) {
+  const i = pages.indexOf(page);
+  const j = i + dir;
+  if (j < 0 || j >= pages.length) return;
+  pages.splice(i, 1);
+  pages.splice(j, 0, page);
+  const cont = $("#pages");
+  for (const p of pages) cont.append(p.el); // re-append in order (moves nodes)
+  page.el.scrollIntoView({ block: "nearest", inline: "nearest" });
+  markActive(page);
+}
+
+function toggleExpand(page) {
+  page.expanded = !page.expanded;
+  page.el.classList.toggle("expanded", page.expanded);
+  page.el.style.flexBasis = page.expanded ? "" : page.width + "px";
+}
+
+function startResize(ev, page) {
+  ev.preventDefault();
+  const startX = ev.clientX;
+  const startW = page.width;
+  const onMove = (e) => {
+    page.width = Math.max(260, startW + (e.clientX - startX));
+    page.expanded = false;
+    page.el.classList.remove("expanded");
+    page.el.style.flexBasis = page.width + "px";
+  };
+  const onUp = () => {
+    document.removeEventListener("mousemove", onMove);
+    document.removeEventListener("mouseup", onUp);
+  };
+  document.addEventListener("mousemove", onMove);
+  document.addEventListener("mouseup", onUp);
+}
+
+function closePage(page) {
+  const i = pages.indexOf(page);
+  if (i >= 0) pages.splice(i, 1);
+  page.el.remove();
+  if (activePage === page)
+    activePage = pages[Math.min(i, pages.length - 1)] || null;
+}
+
+function closeDocPages(docId) {
+  for (const p of [...pages])
+    if (p.docId === docId && p.kind !== "library") closePage(p);
+}
+
+// refreshPage (re)loads a page's data and renders its content. The token
+// guards async content: a newer refresh always wins the race (same guard
+// the old renderDetailTabs had — never render stale data).
+async function refreshPage(page) {
+  if (page.kind === "library") {
+    if (!allDocs.length) page.content.replaceChildren(el("p", { class: "hint" }, "loading…"));
+    else renderList(allDocs);
+    return;
+  }
+  const token = ++page.token;
+  page.content.replaceChildren(el("div", { class: "hint" }, "loading…"));
+  try {
+    const data = await api(`/api/documents/${page.docId}`);
+    if (token !== page.token) return; // a newer refresh won
+    page.data = data;
+    updatePageTitle(page);
+    renderPageContent(page);
+  } catch (e) {
+    if (token !== page.token) return;
+    page.content.replaceChildren(el("p", { class: "hint" }, "error: " + e.message));
+  }
+}
+
+function refreshDocPages(docId) {
+  for (const p of pages)
+    if (p.docId === docId && p.kind !== "library") refreshPage(p);
+}
+
+function refreshAllDocPages() {
+  for (const p of pages)
+    if (p.kind !== "library") refreshPage(p);
+}
+
+function renderPageContent(page) {
+  switch (page.kind) {
+    case "summary": page.content.replaceChildren(summaryContent(page)); break;
+    case "preview": page.content.replaceChildren(previewContent(page)); break;
+    case "text":    page.content.replaceChildren(textContent(page)); break;
+    case "ask":     page.content.replaceChildren(askPanel(page)); break;
+  }
+}
+
 /* ------------------------------------------------------------------ list */
 
 let allDocs = [];
@@ -50,7 +229,8 @@ const hasFilters = () => {
 async function loadDocs() {
   const p = filterParams();
   allDocs = await api("/api/documents" + (p.toString() ? "?" + p : ""));
-  renderList(allDocs);
+  const page = libraryPage();
+  if (page) renderList(allDocs);
 }
 
 async function loadCategories() {
@@ -86,28 +266,19 @@ async function refresh() {
   return status;
 }
 
-function renderList(docs, flat) {
+function renderList(docs) {
   const list = $("#list");
+  if (!list) return;
   list.replaceChildren();
   if (!docs.length) {
     const p = el("p", { class: "hint" });
-    if (flat) {
-      p.append("no matches");
-    } else if (hasFilters()) {
+    if (hasFilters()) {
       p.append("no documents match the current filters — ");
       p.append(el("a", { class: "link", onclick: clearFilters }, "clear filters"));
     } else {
       p.append("Nothing here yet — use Ingest to index some files or directories.");
     }
     list.append(p);
-    return;
-  }
-  if (flat) {
-    // search results keep relevance order: one flat group
-    const ul = el("ul", { class: "cat-items" });
-    for (const d of docs) ul.append(docRow(d));
-    list.append(el("details", { class: "group", open: true },
-      el("summary", {}, "matches", el("span", { class: "count" }, String(docs.length))), ul));
     return;
   }
   // item tree: grouped by category first. Categories are SLASHED PATHS
@@ -126,22 +297,27 @@ function renderList(docs, flat) {
     }
     node.docs.push(d);
   }
-  const renderGroup = (node, name, plain) => {
+  const renderGroup = (node, path, plain) => {
     const ul = el("ul", { class: "cat-items" });
     for (const d of node.docs) ul.append(docRow(d));
     const kids = [...node.children.entries()].sort((a, b) =>
       a[0].localeCompare(b[0]));
     for (const [child, childNode] of kids) {
-      ul.append(renderGroup(childNode, child, false));
+      ul.append(renderGroup(childNode, path ? path + "/" + child : child, false));
     }
-    const det = el("details", { class: "group" + (plain ? " group-plain" : ""), open: true },
-      el("summary", {}, name,
-        el("span", { class: "count" },
-          node.children.size
-            ? `${node.docs.length} + ${node.total - node.docs.length} nested`
-            : String(node.total))),
-      ul);
-    return det;
+    const sum = el("summary", {},
+      path.split("/").pop(),
+      el("span", { class: "count" },
+        node.children.size
+          ? `${node.docs.length} + ${node.total - node.docs.length} nested`
+          : String(node.total)));
+    if (!plain) sum.append(el("button", {
+      class: "mini plain",
+      title: "rename this shelf (the whole subtree moves with it)",
+      onclick: (ev) => { ev.stopPropagation(); ev.preventDefault(); openRenameDialog(path); },
+    }, "✎"));
+    return el("details", { class: "group" + (plain ? " group-plain" : ""), open: true },
+      sum, ul);
   };
   for (const [cat, node] of [...root.children.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
     list.append(renderGroup(node, cat, false));
@@ -156,7 +332,7 @@ function renderList(docs, flat) {
 }
 
 // Items are compact list rows: title, category, tags — the details
-// (summary, status, metadata, processing) live in the detail pane.
+// (summary, status, metadata, processing) live in document pages.
 // A quick status signal still rides along: pending / error / OCR-needed
 // documents are marked so triage does not require opening each one.
 function docRow(d) {
@@ -170,16 +346,47 @@ function docRow(d) {
     chips.append(el("span", { class: "chip pend", title: "thin text layer — processing will OCR it" }, "ocr"));
   if (d.category) chips.append(el("span", { class: "chip sug" }, esc(d.category)));
   for (const t of d.tags) chips.append(el("span", { class: "chip" }, esc(t)));
-  return el("li", { class: "item", onclick: () => showDetail(d.id) },
+  return el("li", { class: "item", onclick: () => openPage("summary", d.id) },
     el("span", { class: "item-title" }, esc(title)),
     chips);
 }
 
-// keep the sticky notice just below the sticky header on any header wrap
-const syncNoticeTop = () => document.documentElement.style.setProperty(
-  "--notice-top", document.querySelector("header").getBoundingClientRect().height + "px");
-window.addEventListener("resize", syncNoticeTop);
-syncNoticeTop();
+/* ---------------------------------------------------- category rename UI */
+
+let renameFrom = "";
+
+function openRenameDialog(path) {
+  renameFrom = path;
+  $("#rename-from").value = path;
+  $("#rename-to").value = path;
+  $("#rename-msg").textContent = "";
+  $("#dlg-rename").showModal();
+  $("#rename-to").focus();
+}
+
+$("#rename-cancel").onclick = () => $("#dlg-rename").close();
+$("#rename-go").onclick = () => renameCategory();
+$("#rename-to").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") renameCategory();
+});
+
+async function renameCategory() {
+  const to = $("#rename-to").value.trim().replace(/^\/+|\/+$/g, "");
+  $("#rename-msg").textContent = "";
+  try {
+    const res = await api("/api/categories/rename", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ from: renameFrom, to }),
+    });
+    $("#dlg-rename").close();
+    notice(`Renamed "${renameFrom}" → "${res.to}" (${res.updated} document(s) moved).`);
+    await loadCategories();
+    await loadDocs();
+  } catch (e) { $("#rename-msg").textContent = e.message; }
+}
+
+/* ----------------------------------------------------------- job progress */
 
 let progressTimer = null;
 let activeJobId = null; // the job behind the op we are awaiting (for cancel)
@@ -253,6 +460,7 @@ async function processIds(ids) {
     stopProgressPolling();
     await loadDocs();
     await refresh();
+    refreshAllDocPages();
   } catch (e) { notice("process: " + e.message); }
   stopProgressPolling();
 }
@@ -260,13 +468,12 @@ async function processIds(ids) {
 /* ask panel: chat with an external LLM about this document */
 
 let askConfig = null;
+const askHistory = {};
 
-async function askPanel(id, d) {
+function askPanel(page) {
+  const id = page.docId;
   const wrap = el("div", { class: "ask-panel" });
-  if (!askConfig) {
-    try { askConfig = await api("/api/ask/config"); }
-    catch (e) { askConfig = { enabled: false, provider: "none" }; }
-  }
+  if (!askConfig) askConfig = { enabled: false, provider: "none" };
   const cfgBox = el("details", { class: "ask-cfg" },
     el("summary", {},
       "LLM: " + (askConfig.enabled ? `${askConfig.provider} / ${askConfig.model || "(model)"}` 
@@ -326,8 +533,8 @@ async function askPanel(id, d) {
   wrap.append(cfgBox);
 
   // transcript (session-local: the chat is not stored) — restored from
-  // askHistory when the tab is re-rendered, so switching tabs and back
-  // does not blank the conversation
+  // askHistory when the page re-renders, so switching pages does not
+  // blank the conversation
   const log = el("div", { class: "ask-log" });
   const hist = askHistory[id] || [];
   for (let i = 0; i < hist.length; i += 2) {
@@ -346,7 +553,7 @@ async function askPanel(id, d) {
     input.value = "";
     setBusy(true);
     const turn = el("div", { class: "ask-turn" }, el("div", { class: "q" }, esc(q)),
-      el("div", { class: "a", id: "…" }));
+      el("div", { class: "a" }));
     log.append(turn);
     const answer = turn.querySelector(".a");
     try {
@@ -387,16 +594,14 @@ async function askPanel(id, d) {
   wrap.append(log, el("div", { class: "row" }, input, sendBtn,
     hist.length ? el("button", { class: "plain", onclick: () => {
       delete askHistory[id];
-      renderDetailTabs("ask");
+      refreshPage(page);
     } }, "clear chat") : null));
   wrap.append(el("p", { class: "hint" },
     "The model sees the metadata, summary, and opening text of this document. This chat is session-local."));
   return wrap;
 }
 
-const askHistory = {};
-
-/* shared chunk-row builder (Text tab = full rows, Preview rail = compact) */
+/* shared chunk-row builder (Text page = full rows, Preview rail = compact) */
 
 const rangeExpand = (s) => {
   const out = [];
@@ -408,9 +613,9 @@ const rangeExpand = (s) => {
   return out;
 };
 
-function buildChunkRows(data, opts) {
+function buildChunkRows(data, opts, page) {
   const d = data.document;
-  const id = currentDetail.id;
+  const id = page.docId;
   const skipSet = new Set(rangeExpand(d.skip_pages || ""));
   const list = el("div", { class: "chunklist" + (opts.compact ? " compact" : "") });
   const rows = [];
@@ -419,19 +624,19 @@ function buildChunkRows(data, opts) {
     if (c.page > 0 && skipSet.has(c.page)) { skipped.push(c); continue; }
 
     if (opts.compact) {
-      const row = el("div", { class: "chunk-row" + (c.page === currentDetail.page ? " open" : "") },
+      const row = el("div", { class: "chunk-row" + (c.page === page.pageNo ? " open" : "") },
         el("span", { class: "loc" }, c.page > 0 ? `p. ${c.page}` : `${c.seq}`),
         el("span", { class: "chunk-text" }, esc(c.text.slice(0, 90) + (c.text.length > 90 ? "…" : ""))));
       if (c.page > 0) row.addEventListener("click", () => {
-        currentDetail.page = c.page;
-        const frame = $("#pv-frame");
-        if (frame && frame.parentElement) {
-          frame.parentElement.replaceChildren(el("iframe", {
-            class: "preview-frame", id: "pv-frame",
+        page.pageNo = c.page;
+        const holder = page.content.querySelector(".pv-left");
+        if (holder) {
+          holder.replaceChildren(el("iframe", {
+            class: "preview-frame",
             src: `/api/documents/${id}/file#page=${c.page}` }));
         }
-        [...row.parentElement.children].forEach((r) => r.classList.remove("open"));
-        row.classList.add("open");
+        for (const r of page.content.querySelectorAll(".chunk-row"))
+          r.classList.toggle("open", r === row);
       });
       rows.push(row);
       list.append(row);
@@ -441,11 +646,10 @@ function buildChunkRows(data, opts) {
     const loc = c.page > 0 ? `p. ${c.page}` : `chunk ${c.seq}`;
     const textPre = el("div", { class: "chunk-text" }, esc(c.text));
     const jump = c.page > 0 && isPdf(d.path) ? el("button", {
-      class: "mini", title: "open this page in Preview",
+      class: "mini", title: "open this page in a Preview page",
       onclick: (ev) => {
         ev.stopPropagation();
-        currentDetail.page = c.page;
-        renderDetailTabs("preview");
+        openPage("preview", id, { page: c.page });
       },
     }, "⤢") : null;
     const fix = c.page > 0 && isPdf(d.path) ? el("button", {
@@ -454,7 +658,7 @@ function buildChunkRows(data, opts) {
         ev.stopPropagation();
         ev.target.textContent = "OCR…";
         ev.target.disabled = true;
-        try { await reextractPage(d.id, c.page); } finally {
+        try { await reextractPage(id, c.page); } finally {
           ev.target.textContent = "OCR";
           ev.target.disabled = false;
         }
@@ -465,7 +669,7 @@ function buildChunkRows(data, opts) {
       onclick: async (ev) => {
         ev.stopPropagation();
         ev.target.disabled = true;
-        try { await toggleSkip(id, c.page, true); } finally { ev.target.disabled = false; }
+        try { await toggleSkip(page, c.page, true); } finally { ev.target.disabled = false; }
       },
     }, "⤫") : null;
     const head = el("div", { class: "chunk-head" },
@@ -481,189 +685,69 @@ function buildChunkRows(data, opts) {
   return { list, rows, skipped };
 }
 
-// toggleSkip changes one page's skipped state and re-renders the tab.
-async function toggleSkip(id, page, skip) {
-  const data = await api(`/api/documents/${id}`);
+// toggleSkip changes one page's skipped state and refreshes the
+// document's open pages (Text page chips, Preview rail).
+async function toggleSkip(page, pageNo, skip) {
+  const data = await api(`/api/documents/${page.docId}`);
   const cur = new Set(rangeExpand(data.document.skip_pages || ""));
-  if (skip) cur.add(page); else cur.delete(page);
+  if (skip) cur.add(pageNo); else cur.delete(pageNo);
   const list = [...cur].sort((a, b) => a - b).join(",");
-  await api(`/api/documents/${id}`, {
+  await api(`/api/documents/${page.docId}`, {
     method: "PATCH", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ skip_pages: list }),
   });
-  const again = await api(`/api/documents/${id}`);
-  currentDetail = { id, data: again };
-  renderDetailTabs(currentDetailTab || "text");
+  refreshDocPages(page.docId);
 }
 
-async function reextractPage(id, page) {
-  notice(`Force-OCR page ${page} — live progress below…`);
-  startProgressPolling(`Force-OCR page ${page}`);
+async function reextractPage(id, pageNo) {
+  notice(`Force-OCR page ${pageNo} — live progress below…`);
+  startProgressPolling(`Force-OCR page ${pageNo}`);
   try {
     await api(`/api/documents/${id}/reextract`, {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ force: true, pages: [page] }),
+      body: JSON.stringify({ force: true, pages: [pageNo] }),
     });
-    notice(`Page ${page} OCR'd → text replaced; document pending re-processing.`);
+    notice(`Page ${pageNo} OCR'd → text replaced; document pending re-processing.`);
     await loadDocs();
     await loadCategories();
-    const again = await api(`/api/documents/${id}`);
-    currentDetail = { id, data: again };
-    renderDetailTabs(currentDetailTab || "text");
+    refreshDocPages(id);
   } catch (e) { notice("reextract: " + e.message); }
   stopProgressPolling();
 }
 
-async function reextract(id, force, pages) {
+async function reextract(page, force, pageNos) {
   const prefix = force ? "Force-OCR re-extract" : "Re-extract";
   notice(`${prefix} — live progress below…`);
   startProgressPolling(prefix);
   try {
-    await api(`/api/documents/${id}/reextract`, {
+    await api(`/api/documents/${page.docId}/reextract`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(pages ? { force: true, pages } : { force }),
+      body: JSON.stringify(pageNos ? { force: true, pages: pageNos } : { force }),
     });
     notice(`${prefix} done — text replaced; the document is pending re-processing.`);
     await loadDocs();
     await loadCategories();
-    // reopen the detail with fresh data
-    const again = await api(`/api/documents/${id}`);
-    currentDetail = { id, data: again };
-    renderDetailTabs("text");
+    refreshDocPages(page.docId);
   } catch (e) { notice("reextract: " + e.message); }
   stopProgressPolling();
 }
 
-/* ---------------------------------------------------------------- detail */
+/* -------------------------------------------------------- document pages */
 
-let currentDetail = null;
-
-async function showDetail(id, tab = "summary", page = 0) {
-  const data = await api(`/api/documents/${id}`);
-  currentDetail = { id, data };
-  if (page) currentDetail.page = page; // where "preview" should open (0 = page 1)
-  $("#detail").classList.remove("hidden");
-  renderDetailTabs(tab);
-}
-
-let detailRenderToken = 0;
-let currentDetailTab = "summary";
-
-function renderDetailTabs(active) {
-  currentDetailTab = active;
-  const d = currentDetail.data.document;
-  const tabs = el("div", { class: "tabs" });
-  const mk = (id, label) => el("div", {
-    class: "tab" + (active === id ? " active" : ""),
-    onclick: () => renderDetailTabs(id),
-  }, label);
-  tabs.append(mk("summary", "Summary"));
-  tabs.append(mk("preview", "Preview" + (isPdf(d.path) ? "" : " (file)")));
-  tabs.append(mk("text", `Text (${currentDetail.data.chunks.length})`));
-  tabs.append(mk("ask", "Ask an LLM"));
-  const body = $("#detail-body");
-  const token = ++detailRenderToken;
-  // detailContent may be async; replace the loading placeholder when it
-  // resolves — a newer tab switch wins the race
-  const node = detailContent(active);
-  if (node instanceof Node) {
-    body.replaceChildren(tabs, node);
-  } else {
-    body.replaceChildren(tabs, el("div", { class: "hint" }, "loading…"));
-    Promise.resolve(node).then((content) => {
-      if (token === detailRenderToken) body.replaceChildren(tabs, content);
-    });
-  }
-}
-
-function detailContent(tab) {
-  const { data, id } = currentDetail;
+// summaryContent: cover + metadata editing + tags (+ page openers).
+function summaryContent(page) {
+  const data = page.data;
+  const id = page.docId;
   const d = data.document;
 
-  if (tab === "preview") {
-    if (isPdf(d.path)) {
-      // side-by-side: the rendered page(s) next to the extracted text
-      const chunks = buildChunkRows(data, { compact: true });
-      const iframeHolder = el("div", { class: "pv-left" },
-        el("iframe", { class: "preview-frame",
-          id: "pv-frame",
-          src: `/api/documents/${id}/file#page=${currentDetail.page || 1}` }));
-      const gotoPage = (page) => {
-        const frame = $("#pv-frame");
-        const holder = $(".pv-left", iframeHolder.parentElement) || iframeHolder;
-        holder.replaceChildren(el("iframe", { class: "preview-frame",
-          id: "pv-frame",
-          src: `/api/documents/${id}/file#page=${page}` }));
-      };
-      const grid = el("div", { class: "pv-grid" }, iframeHolder,
-        el("div", { class: "pv-right" },
-          el("p", { class: "hint" }, "extracted text — click a row to jump; ⤫ page-skip hides it"),
-          chunks.list,
-          el("p", { class: "hint" })));
-      return grid;
-    }
-    return el("p", { class: "hint" }, "No inline preview for this file type — ",
-      el("a", { class: "link", href: `/api/documents/${id}/file?dl=1` }, "download the file"), ".");
-  }
+  const body = el("div");
+  body.append(el("div", { class: "row" },
+    el("span", { class: "hint" }, "open page:"),
+    el("button", { class: "small", onclick: () => openPage("preview", id) }, "Preview"),
+    el("button", { class: "small", onclick: () => openPage("text", id) }, "Text"),
+    el("button", { class: "small", onclick: () => openPage("ask", id) }, "Ask an LLM")));
 
-  if (tab === "ask") {
-    return askPanel(id, d);
-  }
-
-  if (tab === "text") {
-    const wrap = el("div", {});
-    if (d.ocr_pending) {
-      wrap.append(el("div", { class: "hint" },
-        "text layer is thin or garbled — processing will OCR the raster first; or fix it now:"));
-      wrap.append(el("div", { class: "row" },
-        el("button", {
-          onclick: async (ev) => {
-            const btn = ev.target;
-            btn.textContent = "Fixing…";
-            btn.disabled = true;
-            try { await reextract(d.id, false); } finally {
-              btn.textContent = "Re-extract";
-              btn.disabled = false;
-            }
-          },
-        }, "Re-extract"),
-        el("button", {
-          onclick: async (ev) => {
-            const btn = ev.target;
-            btn.textContent = "OCR-ing every page…";
-            btn.disabled = true;
-            try { await reextract(d.id, true); } finally {
-              btn.textContent = "Force OCR";
-              btn.disabled = false;
-            }
-          },
-        }, "Force OCR")));
-    }
-    // collapsible chunk list with per-chunk actions
-    const chunks = buildChunkRows(data, { compact: false });
-    const chunksEls = chunks.rows;
-    if (chunks.skipped.length) {
-      const bar = el("div", { class: "row" },
-        el("span", { class: "hint" }, `hidden: `));
-      for (const s of chunks.skipped) {
-        bar.append(el("span", { class: "chip", title: "click to un-hide",
-          onclick: () => toggleSkip(id, s.page, false) }, `p.${s.page} ✕`));
-      }
-      wrap.append(bar);
-    }
-    wrap.append(el("div", { class: "row" },
-      el("button", { class: "small", onclick: () =>
-        chunksEls.forEach((r) => r.classList.add("open")) }, "expand all"),
-      el("button", { class: "small", onclick: () =>
-        chunksEls.forEach((r) => r.classList.remove("open")) }, "collapse all"),
-      el("span", { class: "hint" },
-        `${chunksEls.length} sections — click a row to expand`)));
-    wrap.append(chunks.list);
-    return wrap;
-  }
-
-  // summary tab: cover + metadata editing + tags
   const cover = hasCover(d.path) ? el("img", {
     class: "cover", src: `/api/documents/${id}/cover`,
     alt: "first page", loading: "lazy",
@@ -678,7 +762,7 @@ function detailContent(tab) {
   const head = el("div", { class: "detail-head" });
   if (cover) head.append(cover);
   head.append(headRight);
-  const body = el("div", {}, head);
+  body.append(head);
   if (d.status !== "done")
     body.append(el("div", { class: "hint" },
       `status: ${esc(d.status)} ${d.error ? "— " + esc(d.error) : ""}`));
@@ -718,9 +802,7 @@ function detailContent(tab) {
       stopProgressPolling();
       await loadDocs();
       await loadCategories();
-      const again = await api(`/api/documents/${id}`);
-      currentDetail = { id, data: again };
-      renderDetailTabs("summary");
+      refreshDocPages(id);
     },
   }, label);
   regenRow.append(regen(["meta"], "metadata"));
@@ -749,18 +831,19 @@ function detailContent(tab) {
       notice("Saved.");
       await loadDocs();
       await loadCategories();
+      refreshDocPages(id);
     },
   }, "Save metadata"));
   saveRow.append(el("button", { class: "plain", onclick: () => processIds([id]) },
     "Re-run summarize + tag"));
   saveRow.append(el("button", { class: "plain", onclick: async () => {
-    const doc = currentDetail.data.document;
+    const doc = page.data.document;
     if (!confirm(`Remove "${doc.title || doc.path}" from the library?\n` +
         "(The file itself stays on disk; re-ingesting it adds it back.)")) return;
     try {
       await api(`/api/documents/${id}`, { method: "DELETE" });
       notice(`Removed "${doc.title || doc.path.split("/").pop()}" from the library — the file stays on disk.`);
-      $("#detail").classList.add("hidden");
+      closeDocPages(id);
       await loadDocs();
       await loadCategories();
       await refresh();
@@ -778,6 +861,7 @@ function detailContent(tab) {
       body: JSON.stringify({ tags: Object.keys(data.tag_sources) }),
     });
     await loadDocs();
+    refreshDocPages(id);
   };
   const renderChips = () => {
     chips.replaceChildren();
@@ -810,20 +894,81 @@ function detailContent(tab) {
   return body;
 }
 
-$("#detail-close").onclick = () => $("#detail").classList.add("hidden");
-
-// Escape closes the detail pane (it's an aside, not a dialog — the
-// dialogs close natively); "/" focuses the search box from anywhere.
-document.addEventListener("keydown", (e) => {
-  if (document.querySelector("dialog[open]")) return;
-  const inField = /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement?.tagName || "");
-  if (e.key === "Escape" && !$("#detail").classList.contains("hidden")) {
-    $("#detail").classList.add("hidden");
-  } else if (e.key === "/" && !inField) {
-    e.preventDefault();
-    $("#q").focus();
+// previewContent: side-by-side rendered page + extracted text rail.
+function previewContent(page) {
+  const data = page.data;
+  const id = page.docId;
+  const d = data.document;
+  if (!isPdf(d.path)) {
+    return el("p", { class: "hint" }, "No inline preview for this file type — ",
+      el("a", { class: "link", href: `/api/documents/${id}/file?dl=1` }, "download the file"), ".");
   }
-});
+  const chunks = buildChunkRows(data, { compact: true }, page);
+  return el("div", { class: "pv-grid" },
+    el("div", { class: "pv-left" },
+      el("iframe", { class: "preview-frame",
+        src: `/api/documents/${id}/file#page=${page.pageNo || 1}` })),
+    el("div", { class: "pv-right" },
+      el("p", { class: "hint" }, "extracted text — click a row to jump; ⤫ page-skip hides it"),
+      chunks.list,
+      el("p", { class: "hint" })));
+}
+
+// textContent: collapsible chunk list with per-chunk actions.
+function textContent(page) {
+  const data = page.data;
+  const id = page.docId;
+  const d = data.document;
+  const wrap = el("div");
+  if (d.ocr_pending) {
+    wrap.append(el("div", { class: "hint" },
+      "text layer is thin or garbled — processing will OCR the raster first; or fix it now:"));
+    wrap.append(el("div", { class: "row" },
+      el("button", {
+        onclick: async (ev) => {
+          const btn = ev.target;
+          btn.textContent = "Fixing…";
+          btn.disabled = true;
+          try { await reextract(page, false); } finally {
+            btn.textContent = "Re-extract";
+            btn.disabled = false;
+          }
+        },
+      }, "Re-extract"),
+      el("button", {
+        onclick: async (ev) => {
+          const btn = ev.target;
+          btn.textContent = "OCR-ing every page…";
+          btn.disabled = true;
+          try { await reextract(page, true); } finally {
+            btn.textContent = "Force OCR";
+            btn.disabled = false;
+          }
+        },
+      }, "Force OCR")));
+  }
+  // collapsible chunk list with per-chunk actions
+  const chunks = buildChunkRows(data, { compact: false }, page);
+  const chunksEls = chunks.rows;
+  if (chunks.skipped.length) {
+    const bar = el("div", { class: "row" },
+      el("span", { class: "hint" }, `hidden: `));
+    for (const s of chunks.skipped) {
+      bar.append(el("span", { class: "chip", title: "click to un-hide",
+        onclick: () => toggleSkip(page, s.page, false) }, `p.${s.page} ✕`));
+    }
+    wrap.append(bar);
+  }
+  wrap.append(el("div", { class: "row" },
+    el("button", { class: "small", onclick: () =>
+      chunksEls.forEach((r) => r.classList.add("open")) }, "expand all"),
+    el("button", { class: "small", onclick: () =>
+      chunksEls.forEach((r) => r.classList.remove("open")) }, "collapse all"),
+    el("span", { class: "hint" },
+      `${chunksEls.length} sections — click a row to expand`)));
+  wrap.append(chunks.list);
+  return wrap;
+}
 
 /* ---------------------------------------------------------------- search */
 
@@ -863,6 +1008,7 @@ async function doSearch() {
 // preview at that page. The API caps at the limit (25) — say so.
 function renderHits(hits, mode, q) {
   const list = $("#list");
+  if (!list) return;
   list.replaceChildren();
   if (!hits.length) { list.append(el("p", { class: "hint" }, "no matches")); return; }
   const terms = q.toLowerCase().split(/\s+/).filter(Boolean);
@@ -887,13 +1033,13 @@ function renderHits(hits, mode, q) {
     }
     if (page > 0 && isPdf(h.path))
       chips.append(el("span", { class: "chip", title: "open this page in Preview",
-        onclick: (ev) => { ev.stopPropagation(); showDetail(h.doc_id, "preview", page); } },
+        onclick: (ev) => { ev.stopPropagation(); openPage("preview", h.doc_id, { page }); } },
         `→ p. ${page}`));
     if (d.status === "error")
       chips.append(el("span", { class: "chip status" }, "error"));
     if (d.category) chips.append(el("span", { class: "chip sug" }, esc(d.category)));
     for (const t of d.tags) chips.append(el("span", { class: "chip" }, esc(t)));
-    const row = el("li", { class: "item hit", onclick: () => showDetail(h.doc_id) },
+    const row = el("li", { class: "item hit", onclick: () => openPage("summary", h.doc_id) },
       el("span", { class: "item-title" }, esc(title)),
       chips);
     if (snippet) {
@@ -1119,7 +1265,7 @@ $("#vocab-add").onclick = async () => {
 };
 
 // loadVocabNames fills the tag datalist (used by the tag filter and the
-// detail pane's tag input) without opening the vocab dialog.
+// summary page's tag input) without opening the vocab dialog.
 async function loadVocabNames() {
   try {
     const v = await api("/api/vocab");
@@ -1133,6 +1279,11 @@ async function loadVocabNames() {
 
 (async () => {
   try {
+    openPage("library");
+    // the ask page renders synchronously — the provider config is loaded
+    // once here (never awaited inside a page render: [object Promise])
+    try { askConfig = await api("/api/ask/config"); }
+    catch (e) { askConfig = { enabled: false, provider: "none" }; }
     const st = await refresh();
     if (!st.llm_up) notice("Model server is not running — search still works, but summarize/tag/semantic need the llama-servers (start via vellum.sh).");
     await loadDocs();
@@ -1146,29 +1297,46 @@ async function loadVocabNames() {
 /* ---------------------------------------------------------------- settings */
 
 const settings = {};
-const SETTINGS_FIELDS = [
-  ["llm", "backend", "select", ["llama-server", "ollama"], "chat backend"],
-  ["llm", "model", "input", null, "chat model name (ollama)"],
-  ["llm", "external", "check", null, "external chat server (own llama.cpp)"],
-  ["llm", "url", "input", null, "chat server url"],
-  ["llm", "num_ctx", "number", null, "context window (match the server's -c)"],
-  ["llm", "temperature", "number", null, "temperature"],
-  ["llm", "think", "check", null, "allow thinking models to reason"],
-  ["embed", "provider", "select", ["llama-server", "ollama"], "embedding backend"],
-  ["embed", "external", "check", null, "external embedding server"],
-  ["embed", "model", "input", null, "embedding model name (ollama)"],
-  ["embed", "url", "input", null, "embedding server url"],
-  ["embed", "batch", "number", null, "embedding batch size"],
-  ["ocr", "langs", "input", null, "tesseract languages (plus-joined: eng+fin)"],
-  ["ocr", "dpi", "number", null, "ocr render dpi (300 recommended)"],
-  ["ocr", "workers", "number", null, "parallel ocr workers"],
-  ["ocr", "min_chars_per_page", "number", null, "min text-layer chars per page"],
-  ["summarize", "chunk_chars", "number", null, "map chunk size (chars)"],
-  ["summarize", "max_tags", "number", null, "max tags per document"],
-  ["ask", "provider", "select2", ["none", "openai", "anthropic", "ollama"], "ask provider (chat tab)"],
-  ["ask", "model", "input", null, "ask model"],
-  ["ask", "base_url", "input", null, "ask base url"],
-  ["ask", "api_key", "key", null, "ask api key"],
+const SETTINGS_GROUPS = [
+  ["Chat backend (summarize + tag)",
+   "grammar-constrained tagging survives every backend switch",
+   [
+     ["llm", "backend", "select", ["llama-server", "ollama"], "backend"],
+     ["llm", "model", "input", null, "chat model name (ollama)"],
+     ["llm", "external", "check", null, "external chat server (own llama.cpp)"],
+     ["llm", "url", "input", null, "chat server url"],
+     ["llm", "num_ctx", "number", null, "context window — must match the server's -c"],
+     ["llm", "temperature", "number", null, "temperature (0 = deterministic-ish)"],
+     ["llm", "think", "check", null, "allow thinking models to reason"],
+   ]],
+  ["Embeddings (semantic search)", null,
+   [
+     ["embed", "provider", "select", ["llama-server", "ollama"], "embedding backend"],
+     ["embed", "external", "check", null, "external embedding server"],
+     ["embed", "model", "input", null, "embedding model name (ollama)"],
+     ["embed", "url", "input", null, "embedding server url"],
+     ["embed", "batch", "number", null, "embedding batch size"],
+   ]],
+  ["OCR", null,
+   [
+     ["ocr", "langs", "input", null, "tesseract languages (plus-joined: eng+fin)"],
+     ["ocr", "dpi", "number", null, "ocr render dpi (300 recommended)"],
+     ["ocr", "workers", "number", null, "parallel ocr workers"],
+     ["ocr", "min_chars_per_page", "number", null, "min text-layer chars per page"],
+   ]],
+  ["Summarization + tagging", null,
+   [
+     ["summarize", "chunk_chars", "number", null, "map chunk size (chars)"],
+     ["summarize", "max_tags", "number", null, "max tags per document"],
+   ]],
+  ["Ask an LLM (chat page)",
+   "freeform chat about one document — runs on an external provider",
+   [
+     ["ask", "provider", "select2", ["none", "openai", "anthropic", "ollama"], "provider"],
+     ["ask", "model", "input", null, "ask model"],
+     ["ask", "base_url", "input", null, "ask base url"],
+     ["ask", "api_key", "key", null, "ask api key"],
+   ]],
 ];
 
 const $field = (sec, key) => settings.inputs?.[sec + "." + key];
@@ -1180,28 +1348,33 @@ async function settingsOpen() {
   const body = $("#settings-body");
   body.replaceChildren();
   settings.inputs = {};
-  for (const [sec, key, kind, options, label] of SETTINGS_FIELDS) {
-    const value = cfg[sec]?.[key];
-    const row = el("div", { class: "row" });
-    let input;
-    if (kind === "select" || kind === "select2") {
-      input = el("select", {}, ...options.map((o) =>
-        el("option", { value: o }, o)));
-      input.value = value ?? options[0];
-    } else if (kind === "check") {
-      input = el("input", { type: "checkbox" });
-      if (value) input.checked = true;
-    } else if (kind === "number") {
-      input = el("input", { type: "number", value: value ?? "" });
-    } else if (kind === "key") {
-      input = el("input", { type: "password", placeholder: value ? "(stored)" : "(unset)" });
-    } else {
-      input = el("input", { type: "text", value: value ?? "" });
+  for (const [groupTitle, groupHint, fields] of SETTINGS_GROUPS) {
+    body.append(el("h3", {}, groupTitle));
+    if (groupHint) body.append(el("p", { class: "hint", style: "margin:.1rem 0 .5rem" }, groupHint));
+    for (const [sec, key, kind, options, label] of fields) {
+      const value = cfg[sec]?.[key];
+      let input;
+      if (kind === "select" || kind === "select2") {
+        input = el("select", {}, ...options.map((o) =>
+          el("option", { value: o }, o)));
+        input.value = value ?? options[0];
+      } else if (kind === "check") {
+        input = el("input", { type: "checkbox" });
+        if (value) input.checked = true;
+      } else if (kind === "number") {
+        input = el("input", { type: "number", value: value ?? "" });
+      } else if (kind === "key") {
+        input = el("input", { type: "password", placeholder: value ? "(stored)" : "(unset)" });
+      } else {
+        input = el("input", { type: "text", value: value ?? "" });
+      }
+      settings.inputs[sec + "." + key] = input;
+      body.append(el("div", { class: "settings-row" },
+        el("label", {},
+          el("div", { class: "set-name" }, `${sec}.${key}`),
+          el("div", { class: "hint" }, label)),
+        input));
     }
-    settings.inputs[sec + "." + key] = input;
-    row.append(el("label", { style: "min-width:16rem" }, `${sec}.${key.replace(/_/g, " ")} — ${label}`));
-    row.append(input);
-    body.append(row);
   }
   $("#settings-msg").textContent = "";
 }
@@ -1211,17 +1384,27 @@ $("#btn-settings").onclick = () => settingsOpen().catch((e) =>
 $("#settings-cancel").onclick = () => $("#dlg-settings").close();
 $("#settings-save").onclick = async () => {
   const payload = { llm: {}, embed: {}, ocr: {}, summarize: {}, ask: {} };
-  for (const [sec, key, kind] of SETTINGS_FIELDS) {
-    const input = $field(sec, key);
-    if (!input) continue;
-    if (kind === "select" || kind === "select2") {
-      payload[sec][key] = input.value;
-      continue;
+  for (const [, , fields] of SETTINGS_GROUPS) {
+    for (const [sec, key, kind] of fields) {
+      const input = $field(sec, key);
+      if (!input) continue;
+      if (kind === "select" || kind === "select2") {
+        payload[sec][key] = input.value;
+      } else if (kind === "check") {
+        payload[sec][key] = input.checked;
+      } else if (kind === "number") {
+        const n = Number(input.value);
+        if (input.value !== "" && (!isFinite(n) || n <= 0)) {
+          $("#settings-msg").textContent = `${sec}.${key}: expected a positive number`;
+          return;
+        }
+        payload[sec][key] = input.value === "" ? 0 : n;
+      } else if (kind === "key") {
+        if (input.value) payload[sec][key] = input.value;
+      } else {
+        payload[sec][key] = input.value;
+      }
     }
-    if (kind === "check") { payload[sec][key] = input.checked; continue; }
-    if (kind === "number") { payload[sec][key] = Number(input.value); continue; }
-    if (kind === "key") { if (input.value) payload[sec][key] = input.value; continue; }
-    payload[sec][key] = input.value;
   }
   try {
     await api("/api/config", {
@@ -1242,8 +1425,7 @@ $("#settings-test").onclick = async () => {
   } catch (e) { msg.textContent = "test failed: " + e.message; }
 };
 
-
-/* ---------------------------------------------------------------- jobs */
+/* ------------------------------------------------------------------- jobs */
 
 let jobsTimer = null;
 let jobsOpen = false;
@@ -1300,3 +1482,18 @@ $("#jobs-close").onclick = () => {
   jobsTimer = null;
   refresh();
 };
+
+/* --------------------------------------------------------------- keyboard */
+
+// Escape closes the active document page (dialogs close natively);
+// "/" focuses the search box from anywhere.
+document.addEventListener("keydown", (e) => {
+  if (document.querySelector("dialog[open]")) return;
+  const inField = /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement?.tagName || "");
+  if (e.key === "Escape") {
+    if (activePage && activePage.kind !== "library") closePage(activePage);
+  } else if (e.key === "/" && !inField) {
+    e.preventDefault();
+    $("#q").focus();
+  }
+});

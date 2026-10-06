@@ -203,6 +203,7 @@ func (s *Server) Mux() http.Handler {
 	mux.HandleFunc("GET /api/progress", s.getProgress)
 	mux.HandleFunc("GET /api/documents", s.documents)
 	mux.HandleFunc("GET /api/categories", s.categories)
+	mux.HandleFunc("POST /api/categories/rename", s.renameCategory)
 	mux.HandleFunc("GET /api/documents/{id}", s.document)
 	mux.HandleFunc("DELETE /api/documents/{id}", s.deleteDocument)
 	mux.HandleFunc("GET /api/documents/{id}/file", s.file)
@@ -494,6 +495,61 @@ WHERE category != '' GROUP BY category ORDER BY category`)
 		out = append(out, map[string]any{"category": cat, "documents": n})
 	}
 	writeJSON(w, 200, out)
+}
+
+// renameCategory renames a category everywhere and moves its whole
+// subtree with it: {"from":"machine-learning",
+// "to":"computer-science/machine-learning"} turns category
+// "machine-learning/transformers" into
+// "computer-science/machine-learning/transformers". Renaming onto an
+// existing shelf merges the two. User-pinned shelves move too — this is
+// the user reorganizing their shelving, not the model re-filing.
+func (s *Server) renameCategory(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		From string `json:"from"`
+		To   string `json:"to"`
+	}
+	if err := decodeBody(r, &body); err != nil {
+		writeErr(w, 400, "bad JSON body: "+err.Error())
+		return
+	}
+	from := strings.Trim(body.From, "/")
+	to := strings.Trim(body.To, "/")
+	if from == "" || to == "" {
+		writeErr(w, 400, "from and to are required")
+		return
+	}
+	if to == from || strings.HasPrefix(to, from+"/") {
+		writeErr(w, 400, "cannot nest a category inside itself")
+		return
+	}
+	tx, err := s.conn.Begin()
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	defer tx.Rollback()
+	res, err := tx.Exec("UPDATE documents SET category=? WHERE category=?", to, from)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	n, _ := res.RowsAffected()
+	// subtree: "<from>/x..." -> "<to>/x..." (substr is 1-based; the
+	// second half keeps the "/x..." part)
+	res, err = tx.Exec(
+		"UPDATE documents SET category=?||substr(category,?) WHERE substr(category,1,?)=?",
+		to, len(from)+1, len(from)+1, from+"/")
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	n2, _ := res.RowsAffected()
+	if err := tx.Commit(); err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]any{"from": from, "to": to, "updated": n + n2})
 }
 
 func (s *Server) document(w http.ResponseWriter, r *http.Request) {

@@ -76,6 +76,8 @@ vellum search "attention" --tag transformer --kind paper
 # auto-categorization: processing files unshelved documents into
 # categories (reusing your existing shelves; user-set shelves are kept)
 vellum category 3 theology      # pin or re-file manually
+# reorganize shelves: renames the shelf everywhere, subtree included
+vellum rename-category machine-learning computer-science/machine-learning
 
 # 3. inspect
 vellum show all
@@ -90,11 +92,13 @@ vellum vocab review                          # what the LLM suggested beyond the
 vellum vocab promote marine-biology "Study of ocean life"   # adopt a suggested tag
 vellum vocab add my-new-tag "what it covers"
 
-# 5. browse: local web UI (search, read summaries/chunks, edit metadata,
-#    curate tags, trigger ingest/process — all in the browser; ingest picks
-#    files with a built-in filesystem picker; search results show the
-#    matching snippet with a jump to the page; pending/error documents are
-#    marked in the list; long jobs get a cancel button in the notice bar)
+# 5. browse: local web UI. The main frame is a horizontal strip of
+#    pages: "All Documents" (the shelf tree, with per-shelf rename) plus
+#    one page per document view — [Summary], [Preview], [Text], [Ask].
+#    Pages can be re-ordered, drag-resized and expanded; search results
+#    show the matching snippet with a jump to the page; pending/error
+#    documents are marked in the list; long jobs get a cancel button in
+#    the notice bar
 vellum serve --open
 ```
 

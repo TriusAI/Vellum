@@ -37,6 +37,8 @@ Commands:
                         full-text (default) or semantic search
   show all | ID         list library or show one document
   remove ID...         remove documents from the library (files stay on disk)
+  rename-category OLD NEW
+                        rename a shelf; its whole subtree moves with it
   vocab list|add|remove|review|promote
                         manage the controlled tag vocabulary
   embed                 embed chunks lacking embeddings
@@ -50,7 +52,7 @@ file (FTS5). Models served locally by llama.cpp llama-server.
 `
 
 // versionString is reported by --version, /api/status and `vellum agent`.
-const versionString = "0.13.0"
+const versionString = "0.14.0"
 
 // documentColumns is the explicit projection used everywhere (never SELECT *,
 // so the scan order is fixed even if the schema gains columns).
@@ -144,6 +146,8 @@ func main() {
 		cmdKind(cfg, args[1:])
 	case "category":
 		cmdCategory(cfg, args[1:])
+	case "rename-category":
+		cmdRenameCategory(cfg, args[1:])
 	case "reextract":
 		cmdReextract(cfg, args[1:])
 	case "remove":
@@ -650,6 +654,53 @@ func cmdCategory(cfg *config.Config, args []string) {
 		log.Fatalf("category: %s", err)
 	}
 	fmt.Printf("#%d: category set to %q (user-pinned; the model will not re-file it)\n", id, value)
+}
+
+// cmdRenameCategory renames a category everywhere, moving its whole
+// subtree ("machine-learning" -> "computer-science/machine-learning"
+// turns "machine-learning/transformers" into
+// "computer-science/machine-learning/transformers"). Renaming onto an
+// existing shelf merges them.
+//
+//	vellum rename-category OLD NEW
+func cmdRenameCategory(cfg *config.Config, args []string) {
+	if len(args) != 2 {
+		log.Fatalf("usage: vellum rename-category OLD NEW   (the whole subtree moves)")
+	}
+	from := strings.Trim(args[0], "/")
+	to := strings.Trim(args[1], "/")
+	if from == "" || to == "" {
+		log.Fatalf("rename-category: from and to are required")
+	}
+	if to == from || strings.HasPrefix(to, from+"/") {
+		log.Fatalf("rename-category: cannot nest a category inside itself")
+	}
+	conn := mustOpen(cfg)
+	tx, err := conn.Begin()
+	if err != nil {
+		log.Fatalf("rename-category: %s", err)
+	}
+	defer tx.Rollback()
+	res, err := tx.Exec("UPDATE documents SET category=? WHERE category=?", to, from)
+	if err != nil {
+		log.Fatalf("rename-category: %s", err)
+	}
+	n, _ := res.RowsAffected()
+	res, err = tx.Exec(
+		"UPDATE documents SET category=?||substr(category,?) WHERE substr(category,1,?)=?",
+		to, len(from)+1, len(from)+1, from+"/")
+	if err != nil {
+		log.Fatalf("rename-category: %s", err)
+	}
+	n2, _ := res.RowsAffected()
+	if err := tx.Commit(); err != nil {
+		log.Fatalf("rename-category: %s", err)
+	}
+	if jsonOut {
+		printJSON(map[string]any{"from": from, "to": to, "updated": n + n2})
+		return
+	}
+	fmt.Printf("renamed %q -> %q (%d document(s) moved)\n", from, to, n+n2)
 }
 
 // allowedDocs returns the set of document ids matching the filters, or nil

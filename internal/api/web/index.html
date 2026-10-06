@@ -37,13 +37,7 @@
 
 <div id="notice"></div>
 
-<main>
-  <aside id="detail" class="hidden">
-    <button id="detail-close" class="plain">✕ close</button>
-    <div id="detail-body"></div>
-  </aside>
-  <div id="list"></div>
-</main>
+<main id="pages"></main>
 
 <dialog id="dlg-ingest">
   <h2>Ingest files or directories</h2>
@@ -93,6 +87,20 @@
     <button id="settings-save">Save</button>
   </div>
   <pre id="settings-msg" class="hint" style="margin:0.2rem 0 0"></pre>
+</dialog>
+<dialog id="dlg-rename">
+  <h2>Rename category</h2>
+  <p class="hint">Renames the shelf everywhere it is used and moves its whole
+    subtree with it (e.g. <code>machine-learning</code> →
+    <code>computer-science/machine-learning</code>). Slashes nest
+    subcategories; renaming onto an existing shelf merges the two.</p>
+  <div class="row"><label class="w6">current</label><input id="rename-from" readonly></div>
+  <div class="row"><label class="w6">new name</label><input id="rename-to" list="category-list"></div>
+  <pre id="rename-msg" class="hint" style="margin:.2rem 0 0"></pre>
+  <div class="row right">
+    <button class="plain" id="rename-cancel">Cancel</button>
+    <button id="rename-go">Rename</button>
+  </div>
 </dialog>
 <datalist id="tag-list"></datalist>
 <datalist id="category-list"></datalist>

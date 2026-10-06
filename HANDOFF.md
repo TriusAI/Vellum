@@ -141,7 +141,12 @@ Fast paths by kind (`internal/classify` + `produceSummary` in ingest):
   classify and lifts the pin only when explicitly regenerated).
 - remove: `vellum remove ID [ID...]` / `DELETE /api/documents/{id}` —
   index-only removal (chunks + tags + FTS rows + cover cache go; the FILE
-  stays on disk). Also a "Remove from library…" button in the UI detail.
+  stays on disk). Also a "Remove from library…" button in the UI.
+- rename category: `vellum rename-category OLD NEW` /
+  `POST /api/categories/rename` — renames a shelf everywhere and moves
+  its whole subtree (machine-learning → computer-science/machine-learning
+  also moves machine-learning/transformers; renaming onto an existing
+  shelf merges). ✎ button on shelf headers in the UI tree.
 - re-extract/repair: `vellum reextract ID [--force-ocr] [--pages 3,7-12]`
 - skip: `vellum skip ID [PAGES|-]`
 - jobs: every slow op is a Job; FIFO queue; per-job cancel (queued =
@@ -181,9 +186,13 @@ Fast paths by kind (`internal/classify` + `produceSummary` in ingest):
 4. **No rounded corners in the UI** (explicit user preference). Check with
    `grep -c border-radius internal/api/web/style.css` (0 today).
 5. The UI is vanilla JS (`internal/api/web/app.js`), no build step; syntax
-   check with `node --check`. Detail-tab content may be async — anything
-   returning a promise must go through the guarded renderer in
-   `renderDetailTabs` (there was an `[object Promise]` bug once).
+   check with `node --check`. The main frame is a horizontal strip of
+   PAGES (library + per-document summary/preview/text/ask); page frames
+   are built once and only their content is re-rendered, so streaming
+   state survives reordering. Page content may be async — the data load
+   goes through the per-page token guard in `refreshPage` (a newer
+   refresh always wins; there was an `[object Promise]` bug once — page
+   content renderers themselves must stay synchronous).
 6. LLM-returned metadata is NEVER trusted raw (`cleanMetaValue` +
    validators at every boundary).
 

@@ -320,6 +320,34 @@ func TestAPI(t *testing.T) {
 	request("DELETE", "/api/vocab/test-tag", "", nil, 200)
 	request("DELETE", "/api/vocab/test-tag", "", nil, 404)
 
+	// ---- category rename: subtree move + invalid nesting rejected
+	request("PATCH", "/api/documents/"+pdfID,
+		`{"category":"cs/ml/transformers"}`, nil, 200)
+	var ren map[string]any
+	request("POST", "/api/categories/rename",
+		`{"from":"cs","to":"computer-science"}`, &ren, 200)
+	if ren["updated"].(float64) != 1 {
+		t.Fatalf("rename should move 1 document: %v", ren)
+	}
+	request("GET", "/api/documents/"+pdfID, "", &detail2, 200)
+	if detail2.Document["category"] != "computer-science/ml/transformers" {
+		t.Fatalf("rename did not move the subtree: %v", detail2.Document["category"])
+	}
+	request("POST", "/api/categories/rename",
+		`{"from":"computer-science","to":"computer-science/x"}`, nil, 400)
+	request("POST", "/api/categories/rename",
+		`{"from":"","to":"x"}`, nil, 400)
+	// rename onto an existing shelf merges (no error, doc still reachable)
+	request("PATCH", "/api/documents/"+pdfID,
+		`{"category":"shelf-b"}`, nil, 200)
+	request("PATCH", fmt.Sprintf("/api/documents/%d", mdID),
+		`{"category":"shelf-a"}`, nil, 200)
+	request("POST", "/api/categories/rename",
+		`{"from":"shelf-a","to":"shelf-b"}`, &ren, 200)
+	if ren["updated"].(float64) != 1 {
+		t.Fatalf("merge-rename should move 1 document: %v", ren)
+	}
+
 	// ---- document delete: index-only removal (the file stays on disk)
 	var delRes map[string]any
 	request("DELETE", fmt.Sprintf("/api/documents/%d", mdID), "", &delRes, 200)
