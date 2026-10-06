@@ -210,12 +210,18 @@ go build ./...                  # the binary: cmd/vellum
 go test ./internal/...          # unit tests (fast; no external deps)
 
 # e2e — env-driven; starts its OWN llama-servers on EPHEMERAL ports
-# (they conflict neither with a running user serve nor each other):
+# (they conflict neither with a running user serve nor each other).
+# IMPORTANT: when LLAMA_SERVER_BIN/QWEN_GGUF/NOMIC_GGUF are set, the
+# suite ALWAYS starts dedicated ephemeral servers — it never shares the
+# user's live 8081/8082 servers (whose load once starved a run past the
+# 10m default timeout; explicit env vars mean "isolated run"). Without
+# the env vars it still reuses up-servers on the fixed ports (pack /
+# entrypoint case), and without either the LLM part skips cleanly.
 MUTOOL=/path/to/mutool \
 LLAMA_SERVER_BIN=/path/to/llama-server \
 QWEN_GGUF=/path/to/qwen3.gguf \
 NOMIC_GGUF=/path/to/nomic-embed.gguf \
-    go test -timeout 90m ./tests/ -v
+    go test -timeout 40m ./tests/ -v
 ```
 
 - Without the env vars the LLM part of the e2e skips cleanly (ingest +
@@ -334,18 +340,15 @@ Docker: `pack/Dockerfile` + `docker-entrypoint.sh`; Hub is proxy-blocked
 
 ## 10. Where things state-wise
 
-- HEAD: v0.14.1 (`593f22b`), all tests green. Pages UI: the main frame is
-  a horizontal strip of pages (All Documents + per-document
-  Summary/Preview/Text/Ask; close/reorder/expand/drag-resize in each
-  title bar); the notice bar is a transient OVERLAY over the pages
-  (close button + 7s auto-dismiss, no reserved space); Preview page is
-  full-bleed (no embedded text rail — Text is its own page); settings
-  dialog grouped by section; category rename (subtree move, merges;
-  vellum rename-category / POST /api/categories/rename / ✎ on shelf
-  headers).
-- Pack stage `pack/stage/vellum-593f22b-linux-amd64/` (user's live
-  library inside) updated to the 0.14.1 binary; distributable tarball
-  `pack/vellum-593f22b-linux-x86_64.tar.gz` (clean of the DB — verified
+- HEAD: v0.15.0 (`876ed48`), all tests green. Since 0.14: Import/Export
+  (backup = VACUUM INTO snapshot; import validates, keeps
+  <db>.pre-import-<ts>, swaps in-process; UI dialog + CLI + API); settings
+  dialog is two-column (group tabs in a sidebar); All Documents page
+  scrolls (legacy #list overflow:hidden pinned it); e2e env vars now
+  force dedicated ephemeral servers (never the user's loaded 8081/8082).
+- Pack stage `pack/stage/vellum-876ed48-linux-amd64/` (user's live
+  library inside) updated to the 0.15.0 binary; distributable tarball
+  `pack/vellum-876ed48-linux-x86_64.tar.gz` (clean of the DB — verified
   with tar -tzf | grep -c library.db = 0). The user's long-running serve
   (PID from an OLDER deleted stage, port 8097) still runs its old binary
   and DB copy — the new one takes effect on the next ./vellum.sh serve.
