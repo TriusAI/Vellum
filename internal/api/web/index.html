@@ -29,6 +29,7 @@
   <div class="actions">
     <button id="btn-ingest">Ingest…</button>
     <button id="btn-process">Process pending <span id="pending-n"></span></button>
+    <button id="btn-lib">Import/Export…</button>
     <button id="btn-vocab">Vocabulary</button>
     <button id="btn-settings">Settings…</button>
     <button id="btn-jobs">Jobs <span id="jobs-n"></span></button>
@@ -88,6 +89,26 @@
     <button id="settings-save">Save</button>
   </div>
   <pre id="settings-msg" class="hint" style="margin:0.2rem 0 0"></pre>
+</dialog>
+<dialog id="dlg-lib">
+  <h2>Import / Export</h2>
+  <p class="hint">The whole library is one SQLite file: <span id="lib-db-path"></span></p>
+  <h3>Export (backup)</h3>
+  <p class="hint">Downloads a consistent snapshot of the library — safe to run any
+    time, even while processing. A backup is a plain database file; keep it
+    anywhere, restore it below.</p>
+  <div class="row"><button id="lib-export">Download backup</button></div>
+  <h3>Import (restore)</h3>
+  <p class="hint">Replaces the live library with the chosen backup file. Jobs must
+    be idle. A copy of the current library is kept next to it as
+    <code>library.db.pre-import-&lt;timestamp&gt;</code> — an import is always
+    recoverable.</p>
+  <div class="row">
+    <input type="file" id="lib-file" accept=".db,.sqlite,.sqlite3">
+    <button id="lib-import">Import and replace…</button>
+  </div>
+  <pre id="lib-msg" class="hint" style="margin:.2rem 0 0"></pre>
+  <div class="row right"><button class="plain" id="lib-close">Close</button></div>
 </dialog>
 <dialog id="dlg-rename">
   <h2>Rename category</h2>

@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -377,4 +378,52 @@ func TestAPI(t *testing.T) {
 			t.Fatal("deleted document still in FTS results")
 		}
 	}
+
+	// ---- library export/import (backup + reload)
+	reqExp, _ := http.NewRequest("GET", ts.URL+"/api/library/export", nil)
+	respExp, err := ts.Client().Do(reqExp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snap, err := io.ReadAll(respExp.Body)
+	respExp.Body.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if respExp.StatusCode != 200 || !bytes.HasPrefix(snap, []byte("SQLite format 3\x00")) {
+		t.Fatalf("export: status=%d, %d bytes", respExp.StatusCode, len(snap))
+	}
+	snapFile := filepath.Join(dir, "snapshot.db")
+	if err := os.WriteFile(snapFile, snap, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := db.ValidateLibrary(snapFile); err != nil || n != 1 {
+		t.Fatalf("exported snapshot: n=%d err=%v (want 1 document)", n, err)
+	}
+	// import the snapshot back (replaces the live db; old kept aside)
+	reqImp, _ := http.NewRequest("POST", ts.URL+"/api/library/import", bytes.NewReader(snap))
+	reqImp.Header.Set("Content-Type", "application/octet-stream")
+	respImp, err := ts.Client().Do(reqImp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var impRes map[string]any
+	json.NewDecoder(respImp.Body).Decode(&impRes)
+	respImp.Body.Close()
+	if respImp.StatusCode != 200 || impRes["documents"].(float64) != 1 {
+		t.Fatalf("import: status=%d res=%v", respImp.StatusCode, impRes)
+	}
+	var docsReloaded []map[string]any
+	request("GET", "/api/documents", "", &docsReloaded, 200)
+	if len(docsReloaded) != 1 {
+		t.Fatalf("expected 1 document after import, got %d", len(docsReloaded))
+	}
+	// a pre-import copy must exist next to the replaced library
+	if _, err := os.Stat(cfg.DBPath + ".pre-import-"); err != nil {
+		if matches, _ := filepath.Glob(cfg.DBPath+".pre-import-*"); len(matches) == 0 {
+			t.Fatalf("no pre-import backup found: %v", err)
+		}
+	}
+	// garbage uploads must be rejected
+	request("POST", "/api/library/import", "this is not a database", nil, 400)
 }

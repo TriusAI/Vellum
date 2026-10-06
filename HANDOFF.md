@@ -147,6 +147,13 @@ Fast paths by kind (`internal/classify` + `produceSummary` in ingest):
   its whole subtree (machine-learning → computer-science/machine-learning
   also moves machine-learning/transformers; renaming onto an existing
   shelf merges). ✎ button on shelf headers in the UI tree.
+- backup: `vellum export [PATH]` / `GET /api/library/export` downloads a
+  consistent snapshot (VACUUM INTO — safe during processing);
+  `vellum import PATH` (CLI: stop serve first!) /
+  `POST /api/library/import` (loopback-only, jobs-idle-checked, the
+  replaced library is kept as `<db>.pre-import-<timestamp>`, server
+  closes+reopens its connection) swaps a backup in. "Import/Export…"
+  dialog in the UI.
 - re-extract/repair: `vellum reextract ID [--force-ocr] [--pages 3,7-12]`
 - skip: `vellum skip ID [PAGES|-]`
 - jobs: every slow op is a Job; FIFO queue; per-job cancel (queued =

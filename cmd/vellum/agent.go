@@ -26,6 +26,11 @@ Everything is local; no network calls except the local model servers.
     vellum process ID [ID...]    # ...or specific documents, by id
     vellum search QUERY           # FTS5 keyword search
     vellum search QUERY --semantic
+    vellum export [PATH]         # consistent snapshot of the library (backup)
+                                  # (safe while processing runs)
+    vellum import PATH           # replace the library with a backup
+                                  # (STOP a running serve first — it holds
+                                  #  the old file; the UI import swaps live)
     vellum show all | ID          # inspect
     vellum remove ID [ID...]      # remove documents from the library index
                                   # (the files stay on disk — indexed in place)
@@ -143,6 +148,16 @@ url}, embed {...}, ocr {langs, dpi, workers, min_chars_per_page},
 summarize {chunk_chars, max_tags}, ask {...}. Absent fields keep their
 current settings. NOTE: server lifecycle (starting/stopping the
 bundled llama-servers) still needs a launcher rerun.
+
+## Library backup (export/import)
+The library is ONE SQLite file — a backup is a consistent snapshot of it
+(VACUUM INTO; safe to take while processing runs). Import validates the
+upload (query-only: must have a documents table), refuses while jobs are
+queued/running, keeps the replaced library as <db>.pre-import-<timestamp>
+and reopens it. UI: the "Import/Export…" dialog.
+    GET  /api/library/export     # download the snapshot (attachment)
+    POST /api/library/import     # request body = the backup file
+                                 # (loopback-only, like /api/fs)
 
 ## Ask an LLM (about one document)
 A freeform streaming chat per document, powered by an EXTERNAL model

@@ -67,10 +67,22 @@ func requireMutool(t *testing.T) string {
 //	QWEN_GGUF         chat model GGUF
 //	NOMIC_GGUF        embedding model GGUF
 //
-// Returns the URLs (and they are killed at test cleanup). If llama-servers
-// are already up at the default ports, those are used instead.
+// Returns the URLs (and they are killed at test cleanup). If
+// LLAMA_SERVER_BIN/QWEN_GGUF/NOMIC_GGUF are set, dedicated ephemeral-
+// port servers are ALWAYS started — explicit env vars mean the caller
+// wants an isolated, reproducible run, not a share of whatever is (still
+// busy?) on the fixed ports. Without env vars, llama-servers already up
+// at the default ports are used instead (portable pack / docker
+// entrypoint case); if none are up, the LLM part is skipped.
 func startLLaMAServers(t *testing.T) (llmURL, embedURL string) {
 	t.Helper()
+
+	bin := os.Getenv("LLAMA_SERVER_BIN")
+	qwen := os.Getenv("QWEN_GGUF")
+	nomic := os.Getenv("NOMIC_GGUF")
+	if bin != "" && qwen != "" && nomic != "" {
+		return startEphemeralLLaMAServers(t, bin, qwen, nomic)
+	}
 
 	// already running? (e.g. the portable pack or docker entrypoint did it)
 	for _, cand := range [][2]string{
@@ -81,13 +93,15 @@ func startLLaMAServers(t *testing.T) (llmURL, embedURL string) {
 		}
 	}
 
-	bin := os.Getenv("LLAMA_SERVER_BIN")
-	qwen := os.Getenv("QWEN_GGUF")
-	nomic := os.Getenv("NOMIC_GGUF")
-	if bin == "" || qwen == "" || nomic == "" {
-		t.Log("NOTE: no llama-servers up and LLAMA_SERVER_BIN/QWEN_GGUF/NOMIC_GGUF not set — LLM part skipped")
-		return "", ""
-	}
+	t.Log("NOTE: no llama-servers up and LLAMA_SERVER_BIN/QWEN_GGUF/NOMIC_GGUF not set — LLM part skipped")
+	return "", ""
+}
+
+// startEphemeralLLaMAServers starts llama-server instances for the chat
+// and embedding models on free ports (llama.cpp serves one model per
+// process). Kills them at test cleanup.
+func startEphemeralLLaMAServers(t *testing.T, bin, qwen, nomic string) (llmURL, embedURL string) {
+	t.Helper()
 
 	// ephemeral ports: fixed ports silently reuse whatever stale server
 	// happens to be listening — a leftover from a previous run then

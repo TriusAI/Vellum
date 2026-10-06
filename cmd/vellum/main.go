@@ -8,12 +8,14 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"vellum/internal/classify"
 	"vellum/internal/config"
@@ -39,6 +41,8 @@ Commands:
   remove ID...         remove documents from the library (files stay on disk)
   rename-category OLD NEW
                         rename a shelf; its whole subtree moves with it
+  export [PATH]        write a consistent snapshot of the library (backup)
+  import PATH          replace the library with a backup (old kept aside)
   vocab list|add|remove|review|promote
                         manage the controlled tag vocabulary
   embed                 embed chunks lacking embeddings
@@ -52,7 +56,7 @@ file (FTS5). Models served locally by llama.cpp llama-server.
 `
 
 // versionString is reported by --version, /api/status and `vellum agent`.
-const versionString = "0.14.1"
+const versionString = "0.15.0"
 
 // documentColumns is the explicit projection used everywhere (never SELECT *,
 // so the scan order is fixed even if the schema gains columns).
@@ -148,6 +152,10 @@ func main() {
 		cmdCategory(cfg, args[1:])
 	case "rename-category":
 		cmdRenameCategory(cfg, args[1:])
+	case "export":
+		cmdExport(cfg, args[1:])
+	case "import":
+		cmdImport(cfg, args[1:])
 	case "reextract":
 		cmdReextract(cfg, args[1:])
 	case "remove":
@@ -701,6 +709,92 @@ func cmdRenameCategory(cfg *config.Config, args []string) {
 		return
 	}
 	fmt.Printf("renamed %q -> %q (%d document(s) moved)\n", from, to, n+n2)
+}
+
+// cmdExport writes a consistent snapshot of the library to PATH (a
+// plain SQLite file — restore it with `vellum import` or the UI's
+// Import/Export dialog). Safe to run any time, even while `vellum serve`
+// is processing.
+//
+//	vellum export [PATH]
+func cmdExport(cfg *config.Config, args []string) {
+	fs := flag.NewFlagSet("export", flag.ExitOnError)
+	fs.Parse(args)
+	out := "vellum-library-" + time.Now().Format("20060102-150405") + ".db"
+	if fs.NArg() > 0 {
+		out = fs.Arg(0)
+	}
+	if _, err := os.Stat(out); err == nil {
+		log.Fatalf("export: %s already exists", out)
+	}
+	conn := mustOpen(cfg)
+	defer conn.Close()
+	if _, err := conn.Exec(
+		"VACUUM INTO '" + strings.ReplaceAll(out, "'", "''") + "'"); err != nil {
+		log.Fatalf("export: %s", err)
+	}
+	if jsonOut {
+		printJSON(map[string]any{"path": out})
+		return
+	}
+	fmt.Printf("library snapshot -> %s   (restore with: vellum import %s)\n", out, out)
+}
+
+// cmdImport replaces the library database with a backup file (validated
+// first: it must be a vellum library). The current library is moved aside
+// to <db>.pre-import-<timestamp>, so nothing is lost. STOP a running
+// `vellum serve` before importing from the CLI — a live serve holds the
+// old file open and keeps using it (the UI's import does the swap
+// live-safely via the API).
+//
+//	vellum import PATH
+func cmdImport(cfg *config.Config, args []string) {
+	fs := flag.NewFlagSet("import", flag.ExitOnError)
+	fs.Parse(args)
+	if fs.NArg() != 1 {
+		log.Fatalf("usage: vellum import PATH   (a backup .db from vellum export)")
+	}
+	src := fs.Arg(0)
+	n, err := db.ValidateLibrary(src)
+	if err != nil {
+		log.Fatalf("import: %s is not a vellum library database: %s", src, err)
+	}
+	if _, err := os.Stat(cfg.DBPath); err == nil {
+		backup := cfg.DBPath + ".pre-import-" + time.Now().Format("20060102-150405")
+		if err := os.Rename(cfg.DBPath, backup); err != nil {
+			log.Fatalf("import: %s", err)
+		}
+		os.Remove(cfg.DBPath + "-wal") // stale WAL of the old library
+		os.Remove(cfg.DBPath + "-shm")
+		fmt.Printf("current library kept at %s\n", backup)
+	}
+	in, err := os.Open(src)
+	if err != nil {
+		log.Fatalf("import: %s", err)
+	}
+	defer in.Close()
+	out, err := os.Create(cfg.DBPath)
+	if err != nil {
+		log.Fatalf("import: %s", err)
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		log.Fatalf("import: %s", err)
+	}
+	if err := out.Close(); err != nil {
+		log.Fatalf("import: %s", err)
+	}
+	conn, err := db.Open(cfg.DBPath) // applies any pending migrations
+	if err != nil {
+		log.Fatalf("import: the file failed to open as a library: %s", err)
+	}
+	conn.Close()
+	if jsonOut {
+		printJSON(map[string]any{"imported": n, "path": src})
+		return
+	}
+	fmt.Printf("imported %d document(s) from %s\n", n, src)
+	fmt.Fprintln(os.Stderr, "note: stop vellum serve before importing from the CLI — a running serve keeps using the old file")
 }
 
 // allowedDocs returns the set of document ids matching the filters, or nil

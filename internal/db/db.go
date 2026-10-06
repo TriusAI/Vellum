@@ -7,6 +7,7 @@ package db
 
 import (
 	"database/sql"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -256,6 +257,23 @@ type Chunk struct {
 	Seq  int
 	Page int // 1-based; 0 = unpaginated source
 	Text string
+}
+
+// ValidateLibrary checks that path is a readable SQLite database with a
+// vellum documents table — WITHOUT modifying it (query-only open) — and
+// returns its document count. Used before an import replaces the live
+// library, so a random/garbage upload never gets swapped in.
+func ValidateLibrary(path string) (int, error) {
+	conn, err := sql.Open("sqlite", "file:"+path+"?_pragma=query_only(1)")
+	if err != nil {
+		return 0, err
+	}
+	defer conn.Close()
+	var n int
+	if err := conn.QueryRow("SELECT COUNT(*) FROM documents").Scan(&n); err != nil {
+		return 0, fmt.Errorf("no documents table: %w", err)
+	}
+	return n, nil
 }
 
 // ExistingCategories lists distinct non-empty categories in the library

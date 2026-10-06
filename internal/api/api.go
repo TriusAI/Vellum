@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"net"
 	"net/http"
@@ -220,6 +221,8 @@ func (s *Server) Mux() http.Handler {
 	mux.HandleFunc("POST /api/ask/test", s.testAsk)
 	mux.HandleFunc("GET /api/config", s.getConfig)
 	mux.HandleFunc("PUT /api/config", s.putConfig)
+	mux.HandleFunc("GET /api/library/export", s.exportLibrary)
+	mux.HandleFunc("POST /api/library/import", s.importLibrary)
 	mux.HandleFunc("POST /api/documents/{id}/ask", s.postAsk)
 	mux.HandleFunc("GET /api/jobs", s.jobList)
 	mux.HandleFunc("POST /api/jobs/{id}/cancel", s.jobCancel)
@@ -1716,6 +1719,111 @@ func (s *Server) putConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.getConfig(w, r)
+}
+
+// ------------------------------- library backup ---------------------------
+
+// exportLibrary streams a consistent snapshot of the whole library
+// (VACUUM INTO a temp copy, served as a download). Safe any time — even
+// while processing runs, VACUUM INTO reads a consistent snapshot.
+func (s *Server) exportLibrary(w http.ResponseWriter, r *http.Request) {
+	tmp, err := os.CreateTemp("", "vellum-export-*.db")
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	name := tmp.Name()
+	tmp.Close()
+	os.Remove(name) // VACUUM INTO requires a NOT-yet-existing target
+	defer os.Remove(name)
+	if _, err := s.conn.Exec(
+		"VACUUM INTO '" + strings.ReplaceAll(name, "'", "''") + "'"); err != nil {
+		writeErr(w, 500, "snapshot failed: "+err.Error())
+		return
+	}
+	f, err := os.Open(name)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	defer f.Close()
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Disposition",
+		"attachment; filename=\"vellum-library-"+time.Now().Format("20060102-150405")+".db\"")
+	http.ServeContent(w, r, "vellum-library.db", time.Now(), f)
+}
+
+// importLibrary replaces the live library with an uploaded vellum
+// database (the request body IS the backup file). The current library is
+// moved aside to "<db>.pre-import-<timestamp>" first, so an import is
+// always recoverable. Loopback-only (like /api/fs); refuses while jobs
+// are queued/running. Requests in flight during the swap may error — a
+// single-user tool, the UI reloads right after.
+func (s *Server) importLibrary(w http.ResponseWriter, r *http.Request) {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err == nil {
+		host = strings.Trim(host, "[]")
+	}
+	if err != nil || (host != "127.0.0.1" && host != "::1") {
+		writeErr(w, 403, "library import is loopback-only")
+		return
+	}
+	s.jobsMu.Lock()
+	busy := s.jobRunning != nil || len(s.waiters) > 0
+	s.jobsMu.Unlock()
+	if busy {
+		writeErr(w, 503, "jobs are queued/running — cancel them or let them finish first")
+		return
+	}
+	if r.ContentLength <= 0 {
+		writeErr(w, 400, "empty upload — POST the backup database as the request body")
+		return
+	}
+	tmp, err := os.CreateTemp("", "vellum-import-*.db")
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	name := tmp.Name()
+	defer os.Remove(name)
+	if _, err := io.Copy(tmp, r.Body); err != nil {
+		tmp.Close()
+		writeErr(w, 400, "upload failed: "+err.Error())
+		return
+	}
+	tmp.Close()
+	n, err := db.ValidateLibrary(name)
+	if err != nil {
+		writeErr(w, 400, "not a vellum library database: "+err.Error())
+		return
+	}
+	// swap: close the live connection (checkpoints the WAL), move the
+	// current library aside, put the uploaded one in its place, reopen
+	// (the reopen also migrates older libraries).
+	s.conn.Close()
+	os.Remove(s.cfg.DBPath + "-wal")
+	os.Remove(s.cfg.DBPath + "-shm")
+	backup := s.cfg.DBPath + ".pre-import-" + time.Now().Format("20060102-150405")
+	if err := os.Rename(s.cfg.DBPath, backup); err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	if err := os.Rename(name, s.cfg.DBPath); err != nil {
+		os.Rename(backup, s.cfg.DBPath) // put it back
+		writeErr(w, 500, err.Error())
+		return
+	}
+	newConn, err := db.Open(s.cfg.DBPath)
+	if err != nil {
+		// the uploaded file was rejected on open — restore the old library
+		os.Remove(s.cfg.DBPath)
+		os.Rename(backup, s.cfg.DBPath)
+		s.conn, _ = db.Open(s.cfg.DBPath)
+		writeErr(w, 500, "import failed: "+err.Error())
+		return
+	}
+	s.conn = newConn
+	writeJSON(w, 200, map[string]any{"documents": n, "backup": backup})
 }
 
 // errJobCancelled marks a cooperative cancel inside runJob work.

@@ -83,6 +83,11 @@ vellum rename-category machine-learning computer-science/machine-learning
 vellum show all
 vellum show 42
 
+# backup / restore the whole library (one SQLite file)
+vellum export                 # writes vellum-library-YYYYMMDD-HHMMSS.db
+vellum import vellum-library-20261007-033000.db   # replace (old kept aside)
+# (the web UI has the same feature in "Import/Export…")
+
 # remove documents from the index (files stay on disk — indexed in place)
 vellum remove 42 43
 

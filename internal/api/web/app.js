@@ -1184,6 +1184,44 @@ $("#ingest-go").onclick = async () => {
   btn.textContent = "Ingest";
 };
 
+/* ---------------------------------------------------------- import/export */
+
+// The library is one SQLite file: export streams a consistent snapshot
+// (VACUUM INTO — safe during processing); import validates an upload,
+// moves the current library aside (timestamped copy) and swaps it in.
+$("#btn-lib").onclick = async () => {
+  $("#lib-msg").textContent = "";
+  $("#lib-file").value = "";
+  try {
+    const st = await api("/api/status");
+    $("#lib-db-path").textContent = st.db;
+  } catch (e) { /* the notice bar shows API errors */ }
+  $("#dlg-lib").showModal();
+};
+$("#lib-close").onclick = () => $("#dlg-lib").close();
+$("#lib-export").onclick = () => { location.href = "/api/library/export"; };
+$("#lib-import").onclick = async () => {
+  const f = $("#lib-file").files[0];
+  const msg = $("#lib-msg");
+  msg.textContent = "";
+  if (!f) { msg.textContent = "choose a backup file first"; return; }
+  if (!confirm(`Replace the whole library with "${f.name}"?\n` +
+      "A copy of the current library is kept (library.db.pre-import-<timestamp>); " +
+      "the library reloads right after.")) return;
+  msg.textContent = "uploading…";
+  try {
+    const res = await api("/api/library/import", { method: "POST", body: f });
+    notice(`Library replaced — ${res.documents} document(s) loaded ` +
+      `(previous library kept at ${res.backup.split("/").pop()}).`);
+    $("#dlg-lib").close();
+    // the new library may have entirely different ids — close all pages
+    for (const p of [...pages]) if (p.kind !== "library") closePage(p);
+    await refresh();
+    await loadDocs();
+    await loadCategories();
+  } catch (e) { msg.textContent = "import failed: " + e.message; }
+};
+
 /* --------------------------------------------------------------- process */
 
 $("#btn-process").onclick = () => processIds([]);
@@ -1333,6 +1371,11 @@ const SETTINGS_GROUPS = [
 
 const $field = (sec, key) => settings.inputs?.[sec + "." + key];
 
+// settingsOpen builds the two-column layout: a sidebar with one entry
+// per group, and a pane per group (only the active one visible — all
+// inputs stay in the DOM so Save collects every field).
+let settingsGroup = 0;
+
 async function settingsOpen() {
   $("#dlg-settings").showModal();
   $("#settings-msg").textContent = "loading…";
@@ -1340,9 +1383,21 @@ async function settingsOpen() {
   const body = $("#settings-body");
   body.replaceChildren();
   settings.inputs = {};
-  for (const [groupTitle, groupHint, fields] of SETTINGS_GROUPS) {
-    body.append(el("h3", {}, groupTitle));
-    if (groupHint) body.append(el("p", { class: "hint", style: "margin:.1rem 0 .5rem" }, groupHint));
+  settings.groupOf = {};
+  const side = el("div", { class: "settings-side" });
+  const main = el("div", { class: "settings-main" });
+  const panes = [];
+  const tabs = [];
+  const showGroup = (i) => {
+    settingsGroup = i;
+    panes.forEach((p, j) => p.classList.toggle("hidden", j !== i));
+    tabs.forEach((b, j) => b.classList.toggle("active", j === i));
+  };
+  SETTINGS_GROUPS.forEach(([groupTitle, groupHint, fields], i) => {
+    const pane = el("div", { class: "settings-pane hidden" });
+    pane.append(el("h3", {}, groupTitle));
+    if (groupHint)
+      pane.append(el("p", { class: "hint", style: "margin:.1rem 0 .6rem" }, groupHint));
     for (const [sec, key, kind, options, label] of fields) {
       const value = cfg[sec]?.[key];
       let input;
@@ -1361,13 +1416,21 @@ async function settingsOpen() {
         input = el("input", { type: "text", value: value ?? "" });
       }
       settings.inputs[sec + "." + key] = input;
-      body.append(el("div", { class: "settings-row" },
+      settings.groupOf[sec + "." + key] = i;
+      pane.append(el("div", { class: "settings-row" },
         el("label", {},
           el("div", { class: "set-name" }, `${sec}.${key}`),
           el("div", { class: "hint" }, label)),
         input));
     }
-  }
+    panes.push(pane);
+    main.append(pane);
+    const tab = el("button", { onclick: () => showGroup(i) }, groupTitle);
+    tabs.push(tab);
+    side.append(tab);
+  });
+  body.append(side, main);
+  showGroup(settingsGroup); // remember the last-open group
   $("#settings-msg").textContent = "";
 }
 
@@ -1387,6 +1450,8 @@ $("#settings-save").onclick = async () => {
       } else if (kind === "number") {
         const n = Number(input.value);
         if (input.value !== "" && (!isFinite(n) || n <= 0)) {
+          const gi = settings.groupOf?.[sec + "." + key] ?? 0;
+          document.querySelectorAll("#settings-body .settings-side button")[gi]?.click();
           $("#settings-msg").textContent = `${sec}.${key}: expected a positive number`;
           return;
         }
