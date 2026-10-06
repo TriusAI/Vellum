@@ -327,15 +327,18 @@ Docker: `pack/Dockerfile` + `docker-entrypoint.sh`; Hub is proxy-blocked
 
 ## 10. Where things state-wise
 
-- HEAD: v0.14.0 (`04cefb8`), all tests green. Pages UI: the main frame is
+- HEAD: v0.14.1 (`593f22b`), all tests green. Pages UI: the main frame is
   a horizontal strip of pages (All Documents + per-document
   Summary/Preview/Text/Ask; close/reorder/expand/drag-resize in each
-  title bar), settings dialog grouped by section, and category rename
-  (subtree move, merges; vellum rename-category / POST
-  /api/categories/rename / ✎ on shelf headers).
-- Pack stage `pack/stage/vellum-04cefb8-linux-amd64/` (user's live
-  library inside) updated to the 0.14.0 binary; distributable tarball
-  `pack/vellum-04cefb8-linux-x86_64.tar.gz` (clean of the DB — verified
+  title bar); the notice bar is a transient OVERLAY over the pages
+  (close button + 7s auto-dismiss, no reserved space); Preview page is
+  full-bleed (no embedded text rail — Text is its own page); settings
+  dialog grouped by section; category rename (subtree move, merges;
+  vellum rename-category / POST /api/categories/rename / ✎ on shelf
+  headers).
+- Pack stage `pack/stage/vellum-593f22b-linux-amd64/` (user's live
+  library inside) updated to the 0.14.1 binary; distributable tarball
+  `pack/vellum-593f22b-linux-x86_64.tar.gz` (clean of the DB — verified
   with tar -tzf | grep -c library.db = 0). The user's long-running serve
   (PID from an OLDER deleted stage, port 8097) still runs its old binary
   and DB copy — the new one takes effect on the next ./vellum.sh serve.
