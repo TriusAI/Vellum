@@ -27,6 +27,8 @@ Everything is local; no network calls except the local model servers.
     vellum search QUERY           # FTS5 keyword search
     vellum search QUERY --semantic
     vellum show all | ID          # inspect
+    vellum remove ID [ID...]      # remove documents from the library index
+                                  # (the files stay on disk — indexed in place)
     vellum vocab list|review|promote|add|remove
     vellum serve [--listen ADDR] # local web UI + JSON API (see below)
 
@@ -213,6 +215,7 @@ Editing vocab.yaml by hand is also fine (name: description, YAML map).
                                     #   ?kind=&category=&tag=&tag= (AND)'
     GET  /api/categories            # distinct categories + counts
     GET  /api/documents/{id}        # + chunks, tag_sources
+    DELETE /api/documents/{id}      # remove from the library (file stays on disk)
     GET  /api/documents/{id}/file    # the original file (?dl=1 to download)
     PATCH /api/documents/{id}       # {"title":..,"authors":..,"year":..,
                                     #  "summary":..,"kind":..,"category":..}

@@ -81,6 +81,9 @@ vellum category 3 theology      # pin or re-file manually
 vellum show all
 vellum show 42
 
+# remove documents from the index (files stay on disk — indexed in place)
+vellum remove 42 43
+
 # 4. curate the vocabulary
 vellum vocab list
 vellum vocab review                          # what the LLM suggested beyond the vocabulary
@@ -89,7 +92,9 @@ vellum vocab add my-new-tag "what it covers"
 
 # 5. browse: local web UI (search, read summaries/chunks, edit metadata,
 #    curate tags, trigger ingest/process — all in the browser; ingest picks
-#    files with a built-in filesystem picker)
+#    files with a built-in filesystem picker; search results show the
+#    matching snippet with a jump to the page; pending/error documents are
+#    marked in the list; long jobs get a cancel button in the notice bar)
 vellum serve --open
 ```
 

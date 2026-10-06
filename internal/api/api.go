@@ -204,6 +204,7 @@ func (s *Server) Mux() http.Handler {
 	mux.HandleFunc("GET /api/documents", s.documents)
 	mux.HandleFunc("GET /api/categories", s.categories)
 	mux.HandleFunc("GET /api/documents/{id}", s.document)
+	mux.HandleFunc("DELETE /api/documents/{id}", s.deleteDocument)
 	mux.HandleFunc("GET /api/documents/{id}/file", s.file)
 	mux.HandleFunc("GET /api/documents/{id}/cover", s.cover)
 	mux.HandleFunc("PATCH /api/documents/{id}", s.patchDocument)
@@ -633,6 +634,34 @@ func (s *Server) putTags(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.document(w, r)
+}
+
+// deleteDocument removes a document from the library index. The FILE on
+// disk is never touched (files are indexed in place) — only the index
+// rows go: chunks and tags cascade (ON DELETE CASCADE), the FTS rows
+// follow via the chunks_ad trigger, and the cached cover PNG is dropped.
+func (s *Server) deleteDocument(w http.ResponseWriter, r *http.Request) {
+	id, err := pathID(r)
+	if err != nil {
+		writeErr(w, 400, "bad document id")
+		return
+	}
+	var path string
+	err = s.conn.QueryRow("SELECT path FROM documents WHERE id=?", id).Scan(&path)
+	if err == sql.ErrNoRows {
+		writeErr(w, 404, "no such document")
+		return
+	}
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	if _, err := s.conn.Exec("DELETE FROM documents WHERE id=?", id); err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	os.Remove(filepath.Join(s.cfg.BaseDir, "covers", fmt.Sprintf("cover-%d.png", id)))
+	writeJSON(w, 200, map[string]any{"deleted": id, "path": path})
 }
 
 // fsList backs the ingest file picker: lists ONE directory's entries

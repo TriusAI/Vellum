@@ -319,4 +319,34 @@ func TestAPI(t *testing.T) {
 	}
 	request("DELETE", "/api/vocab/test-tag", "", nil, 200)
 	request("DELETE", "/api/vocab/test-tag", "", nil, 404)
+
+	// ---- document delete: index-only removal (the file stays on disk)
+	var delRes map[string]any
+	request("DELETE", fmt.Sprintf("/api/documents/%d", mdID), "", &delRes, 200)
+	if delRes["deleted"] == nil {
+		t.Fatal("delete returned no id")
+	}
+	request("GET", fmt.Sprintf("/api/documents/%d", mdID), "", nil, 404)
+	request("DELETE", fmt.Sprintf("/api/documents/%d", mdID), "", nil, 404)
+	var docsAfter []map[string]any
+	request("GET", "/api/documents", "", &docsAfter, 200)
+	if len(docsAfter) != len(docs)-1 {
+		t.Fatalf("expected %d documents after delete, got %d",
+			len(docs)-1, len(docsAfter))
+	}
+	// chunks and tags must have cascaded with the row
+	var nChunks, nTags int
+	conn.QueryRow("SELECT COUNT(*) FROM chunks WHERE doc_id=?", mdID).Scan(&nChunks)
+	conn.QueryRow("SELECT COUNT(*) FROM doc_tags WHERE doc_id=?", mdID).Scan(&nTags)
+	if nChunks != 0 || nTags != 0 {
+		t.Fatalf("orphaned rows after delete: %d chunks, %d tags", nChunks, nTags)
+	}
+	// FTS must no longer return the deleted doc's text
+	var hitsAfter []map[string]any
+	request("GET", "/api/search?q=cryptography&mode=keyword", "", &hitsAfter, 200)
+	for _, h := range hitsAfter {
+		if int64(h["doc_id"].(float64)) == mdID {
+			t.Fatal("deleted document still in FTS results")
+		}
+	}
 }

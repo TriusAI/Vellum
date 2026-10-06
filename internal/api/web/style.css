@@ -75,6 +75,10 @@ main { display: flex; align-items: flex-start; gap: 1rem; padding: 1.2rem; }
 .chunk .loc { color: var(--accent); font-size: .78rem; }
 .preview-frame { width: 100%; height: 62vh; border: 1px solid var(--line); background: #fff; }
 .hint { color: var(--muted); font-size: .85rem; }
+a.link { color: var(--accent); cursor: pointer; text-decoration: underline; }
+#notice button { margin-left: .8rem; padding: .1rem .7rem; font-size: .8rem; }
+.chip.pend { background: transparent; border: 1px dashed var(--muted); color: var(--muted); }
+.chip[onclick] { cursor: pointer; }
 dialog { border: 1px solid var(--line); padding: 1.2rem 1.4rem;
   min-width: min(34rem, 90vw); background: var(--card); color: var(--fg); }
 dialog::backdrop { background: rgba(30, 28, 20, .35); }
@@ -220,6 +224,14 @@ button.mini { font-size: .72rem; padding: 0 .45rem; }
 .chunk-row .loc { color: var(--accent); font-size: .74rem; min-width: 2.4rem; }
 .chunk-row .chunk-text { font: 12px/1.4 Georgia, serif; color: #44423c;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+
+/* search hits: title + chips row, snippet on its own wrapped line */
+#list .item.hit { flex-wrap: wrap; }
+#list .item.hit .hit-snippet {
+  flex: 1 0 100%; font: 12px/1.5 Georgia, serif; color: #44423c;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  margin-top: .15rem;
+}
 
 /* jobs dialog */
 .job-row { display: flex; gap: .6rem; align-items: center;

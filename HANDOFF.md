@@ -139,6 +139,9 @@ Fast paths by kind (`internal/classify` + `produceSummary` in ingest):
   category|kind ...]` — cheap individual rebuilds, no full reprocess
   (meta = one constrained call on the opening text; kind = deterministic
   classify and lifts the pin only when explicitly regenerated).
+- remove: `vellum remove ID [ID...]` / `DELETE /api/documents/{id}` —
+  index-only removal (chunks + tags + FTS rows + cover cache go; the FILE
+  stays on disk). Also a "Remove from library…" button in the UI detail.
 - re-extract/repair: `vellum reextract ID [--force-ocr] [--pages 3,7-12]`
 - skip: `vellum skip ID [PAGES|-]`
 - jobs: every slow op is a Job; FIFO queue; per-job cancel (queued =
@@ -315,9 +318,19 @@ Docker: `pack/Dockerfile` + `docker-entrypoint.sh`; Hub is proxy-blocked
 
 ## 10. Where things state-wise
 
-- HEAD: v0.12.0 (`ad058cd`), all tests green, pack stage
-  `pack/stage/vellum-ad058cd-linux-amd64/` (user's live library inside),
-  tarball `pack/vellum-ad058cd-linux-x86_64.tar.gz` (clean of the DB).
+- HEAD: v0.13.0 (`4ce4606`), all tests green (TESSDATA_PREFIX=tessdata
+  needed for the OCR tests). UI/UX pass: browse filters fixed (a shadowed
+  loadDocs made kind/category/tag filters dead), search results show the
+  matching snippet (highlighted) + a jump-to-page chip, rows carry
+  pending/error/ocr chips, the notice bar offers an inline cancel while a
+  UI-started job runs, the Ask tab transcript survives tab switches
+  (+ clear chat), Esc closes the detail pane, "/" focuses search, and
+  documents can be REMOVED from the index (vellum remove ID / DELETE
+  /api/documents/{id} / UI button — files stay on disk).
+- Pack stage `pack/stage/vellum-ad058cd-linux-amd64/` (user's live
+  library inside) and tarball
+  `pack/vellum-ad058cd-linux-x86_64.tar.gz` are STILL 0.12.0 — rebuild
+  per §7 ("Updating the live stage") to give the user the new binary.
 - The user runs `./vellum.sh serve` (their own llama-servers on 8081/8082
   are LONG-RUNNING — do not kill them; kill only ephemeral test ones).
 - `AGENTS.md` (repo root) carries the agent-focused subset of this

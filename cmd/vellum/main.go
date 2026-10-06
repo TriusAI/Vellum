@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -35,6 +36,7 @@ Commands:
   search QUERY [--semantic] [--limit N]
                         full-text (default) or semantic search
   show all | ID         list library or show one document
+  remove ID...         remove documents from the library (files stay on disk)
   vocab list|add|remove|review|promote
                         manage the controlled tag vocabulary
   embed                 embed chunks lacking embeddings
@@ -48,7 +50,7 @@ file (FTS5). Models served locally by llama.cpp llama-server.
 `
 
 // versionString is reported by --version, /api/status and `vellum agent`.
-const versionString = "0.12.0"
+const versionString = "0.13.0"
 
 // documentColumns is the explicit projection used everywhere (never SELECT *,
 // so the scan order is fixed even if the schema gains columns).
@@ -144,6 +146,8 @@ func main() {
 		cmdCategory(cfg, args[1:])
 	case "reextract":
 		cmdReextract(cfg, args[1:])
+	case "remove":
+		cmdRemove(cfg, args[1:])
 	case "backends":
 		cmdBackends(cfg, args[1:])
 	case "skip":
@@ -1094,4 +1098,41 @@ func cmdSkip(cfg *config.Config, args []string) {
 		log.Fatalf("skip: %s", err)
 	}
 	fmt.Printf("#%d: skip_pages set to %q\n", id, value)
+}
+
+// cmdRemove removes documents from the library index. The files on disk
+// are never touched — "indexed in place" means the index can also be
+// un-indexed. Chunks/tags cascade; the cached cover PNG is dropped.
+//
+//	vellum remove ID [ID...]
+func cmdRemove(cfg *config.Config, args []string) {
+	if len(args) < 1 {
+		log.Fatalf("usage: vellum remove ID [ID...]   (files stay on disk)")
+	}
+	conn := mustOpen(cfg)
+	removed := []map[string]any{}
+	for _, a := range args {
+		id, err := strconv.ParseInt(a, 10, 64)
+		if err != nil {
+			log.Fatalf("remove expects numeric document ids (got %q)", a)
+		}
+		var path string
+		err = conn.QueryRow("SELECT path FROM documents WHERE id=?", id).Scan(&path)
+		if err == sql.ErrNoRows {
+			fmt.Printf("#%d: not found (skipped)\n", id)
+			continue
+		}
+		if err != nil {
+			log.Fatalf("remove: %s", err)
+		}
+		if _, err := conn.Exec("DELETE FROM documents WHERE id=?", id); err != nil {
+			log.Fatalf("remove: %s", err)
+		}
+		os.Remove(filepath.Join(cfg.BaseDir, "covers", fmt.Sprintf("cover-%d.png", id)))
+		fmt.Printf("#%d: removed from the library — %s stays on disk\n", id, path)
+		removed = append(removed, map[string]any{"removed": id, "path": path})
+	}
+	if jsonOut && len(removed) > 0 {
+		printJSON(removed)
+	}
 }

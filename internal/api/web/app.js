@@ -72,6 +72,13 @@ $("#f-tags").addEventListener("keydown", (e) => {
   if (e.key === "Enter" && !$("#q").value.trim()) loadDocs();
 });
 
+function clearFilters() {
+  $("#f-kind").value = "";
+  $("#f-category").value = "";
+  $("#f-tags").value = "";
+  loadDocs();
+}
+
 async function refresh() {
   const status = await api("/api/status");
   $("#pending-n").textContent = status.pending ? `(${status.pending})` : "";
@@ -79,17 +86,20 @@ async function refresh() {
   return status;
 }
 
-async function loadDocs() {
-  allDocs = await api("/api/documents");
-  renderList(allDocs);
-}
-
 function renderList(docs, flat) {
   const list = $("#list");
   list.replaceChildren();
   if (!docs.length) {
-    list.append(el("p", { class: "hint" },
-      "Nothing here yet — use Ingest to index some files or directories."));
+    const p = el("p", { class: "hint" });
+    if (flat) {
+      p.append("no matches");
+    } else if (hasFilters()) {
+      p.append("no documents match the current filters — ");
+      p.append(el("a", { class: "link", onclick: clearFilters }, "clear filters"));
+    } else {
+      p.append("Nothing here yet — use Ingest to index some files or directories.");
+    }
+    list.append(p);
     return;
   }
   if (flat) {
@@ -147,9 +157,17 @@ function renderList(docs, flat) {
 
 // Items are compact list rows: title, category, tags — the details
 // (summary, status, metadata, processing) live in the detail pane.
+// A quick status signal still rides along: pending / error / OCR-needed
+// documents are marked so triage does not require opening each one.
 function docRow(d) {
   const title = d.title || d.path.split("/").pop();
   const chips = el("div", { class: "chips" });
+  if (d.status === "error")
+    chips.append(el("span", { class: "chip status", title: d.error || "processing error" }, "error"));
+  else if (d.status === "ingested")
+    chips.append(el("span", { class: "chip pend", title: "not processed yet" }, "pending"));
+  if (d.ocr_pending)
+    chips.append(el("span", { class: "chip pend", title: "thin text layer — processing will OCR it" }, "ocr"));
   if (d.category) chips.append(el("span", { class: "chip sug" }, esc(d.category)));
   for (const t of d.tags) chips.append(el("span", { class: "chip" }, esc(t)));
   return el("li", { class: "item", onclick: () => showDetail(d.id) },
@@ -164,13 +182,46 @@ window.addEventListener("resize", syncNoticeTop);
 syncNoticeTop();
 
 let progressTimer = null;
+let activeJobId = null; // the job behind the op we are awaiting (for cancel)
+let jobFloor = 0;       // job ids <= floor existed BEFORE our op started
 
+// startProgressPolling tracks the op's job through the Jobs API: our job
+// is the first one ABOVE jobFloor, which lets the notice bar offer a
+// precise cancel button while it runs. Only one poller exists at a time —
+// a second start clears the first (the notice is a single line anyway).
 function startProgressPolling(prefix) {
+  stopProgressPolling();
+  api("/api/jobs").then((d) => {
+    for (const j of d.jobs || []) jobFloor = Math.max(jobFloor, j.id);
+  }).catch(() => {});
   const poll = async () => {
+    let job = null;
+    try {
+      const d = await api("/api/jobs");
+      if (activeJobId === null) {
+        const mine = (d.jobs || []).filter((j) =>
+          j.id > jobFloor && (j.status === "queued" || j.status === "running"));
+        if (mine.length) activeJobId = mine[mine.length - 1].id;
+      }
+      if (activeJobId !== null)
+        job = (d.jobs || []).find((j) => j.id === activeJobId) || null;
+    } catch (e) { /* transient */ }
     try {
       const p = await api("/api/progress");
-      if (p.running && p.message)
-        notice(`${prefix} — ${p.message}…`);
+      let msg = null;
+      if (p.running && p.message) msg = `${prefix} — ${p.message}…`;
+      else if (job && job.status === "queued") msg = `${prefix} — waiting in the job queue…`;
+      if (!msg) return;
+      const box = $("#notice");
+      box.replaceChildren(document.createTextNode(msg));
+      if (job && (job.status === "queued" || job.status === "running"))
+        box.append(el("button", {
+          class: "small",
+          onclick: async () => {
+            try { await api(`/api/jobs/${job.id}/cancel`, { method: "POST" }); }
+            catch (e) { /* already finished — nothing left to cancel */ }
+          },
+        }, "cancel"));
     } catch (e) { /* transient */ }
   };
   progressTimer = setInterval(poll, 2000);
@@ -178,6 +229,7 @@ function startProgressPolling(prefix) {
 
 function stopProgressPolling() {
   if (progressTimer) { clearInterval(progressTimer); progressTimer = null; }
+  activeJobId = null;
 }
 
 async function processIds(ids) {
@@ -273,8 +325,17 @@ async function askPanel(id, d) {
     cfgRow));
   wrap.append(cfgBox);
 
-  // transcript (session-local: the chat is not stored)
+  // transcript (session-local: the chat is not stored) — restored from
+  // askHistory when the tab is re-rendered, so switching tabs and back
+  // does not blank the conversation
   const log = el("div", { class: "ask-log" });
+  const hist = askHistory[id] || [];
+  for (let i = 0; i < hist.length; i += 2) {
+    const turn = el("div", { class: "ask-turn" },
+      el("div", { class: "q" }, esc(hist[i].content)));
+    if (hist[i + 1]) turn.append(el("div", { class: "a" }, esc(hist[i + 1].content)));
+    log.append(turn);
+  }
   const input = el("textarea", { rows: 2, placeholder: "ask about this document…" });
   let busy = false;
   const sendBtn = el("button", { onclick: send, disabled: !askConfig?.enabled }, "Send");
@@ -323,7 +384,11 @@ async function askPanel(id, d) {
   input.addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey && !busy) { e.preventDefault(); send(); }
   });
-  wrap.append(log, el("div", { class: "row" }, input, sendBtn));
+  wrap.append(log, el("div", { class: "row" }, input, sendBtn,
+    hist.length ? el("button", { class: "plain", onclick: () => {
+      delete askHistory[id];
+      renderDetailTabs("ask");
+    } }, "clear chat") : null));
   wrap.append(el("p", { class: "hint" },
     "The model sees the metadata, summary, and opening text of this document. This chat is session-local."));
   return wrap;
@@ -474,10 +539,10 @@ async function reextract(id, force, pages) {
 
 let currentDetail = null;
 
-async function showDetail(id, tab = "summary") {
+async function showDetail(id, tab = "summary", page = 0) {
   const data = await api(`/api/documents/${id}`);
-  const d = data.document;
   currentDetail = { id, data };
+  if (page) currentDetail.page = page; // where "preview" should open (0 = page 1)
   $("#detail").classList.remove("hidden");
   renderDetailTabs(tab);
 }
@@ -538,8 +603,8 @@ function detailContent(tab) {
           el("p", { class: "hint" })));
       return grid;
     }
-    return el("p", { class: "hint" },
-      `No inline preview for this file type — download: /api/documents/${id}/file?dl=1`);
+    return el("p", { class: "hint" }, "No inline preview for this file type — ",
+      el("a", { class: "link", href: `/api/documents/${id}/file?dl=1` }, "download the file"), ".");
   }
 
   if (tab === "ask") {
@@ -688,6 +753,19 @@ function detailContent(tab) {
   }, "Save metadata"));
   saveRow.append(el("button", { class: "plain", onclick: () => processIds([id]) },
     "Re-run summarize + tag"));
+  saveRow.append(el("button", { class: "plain", onclick: async () => {
+    const doc = currentDetail.data.document;
+    if (!confirm(`Remove "${doc.title || doc.path}" from the library?\n` +
+        "(The file itself stays on disk; re-ingesting it adds it back.)")) return;
+    try {
+      await api(`/api/documents/${id}`, { method: "DELETE" });
+      notice(`Removed "${doc.title || doc.path.split("/").pop()}" from the library — the file stays on disk.`);
+      $("#detail").classList.add("hidden");
+      await loadDocs();
+      await loadCategories();
+      await refresh();
+    } catch (e) { notice("remove: " + e.message); }
+  } }, "Remove from library…"));
   body.append(saveRow);
 
   // tags
@@ -734,7 +812,37 @@ function detailContent(tab) {
 
 $("#detail-close").onclick = () => $("#detail").classList.add("hidden");
 
+// Escape closes the detail pane (it's an aside, not a dialog — the
+// dialogs close natively); "/" focuses the search box from anywhere.
+document.addEventListener("keydown", (e) => {
+  if (document.querySelector("dialog[open]")) return;
+  const inField = /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement?.tagName || "");
+  if (e.key === "Escape" && !$("#detail").classList.contains("hidden")) {
+    $("#detail").classList.add("hidden");
+  } else if (e.key === "/" && !inField) {
+    e.preventDefault();
+    $("#q").focus();
+  }
+});
+
 /* ---------------------------------------------------------------- search */
+
+const escRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+// highlight returns DOM nodes for a snippet with the query terms marked.
+function highlight(text, terms) {
+  const re = terms.length
+    ? new RegExp("(" + terms.map(escRe).join("|") + ")", "gi") : null;
+  const nodes = [];
+  let last = 0;
+  if (re) for (const m of text.matchAll(re)) {
+    if (m.index > last) nodes.push(document.createTextNode(text.slice(last, m.index)));
+    nodes.push(el("mark", {}, m[0]));
+    last = m.index + m[0].length;
+  }
+  if (last < text.length) nodes.push(document.createTextNode(text.slice(last)));
+  return nodes.length ? nodes : [document.createTextNode(text)];
+}
 
 async function doSearch() {
   const q = $("#q").value.trim();
@@ -742,39 +850,63 @@ async function doSearch() {
   if (!q) { loadDocs(); return; }
   notice("");
   try {
+    if (!allDocs.length) await loadDocs(); // for chips (category/tags) of hits
     const fp = filterParams();
     const hits = await api(`/api/search?q=${encodeURIComponent(q)}&mode=${mode}&limit=25`
       + (fp.toString() ? "&" + fp : ""));
-    if (mode === "semantic") {
-      const list = $("#list");
-      list.replaceChildren();
-      if (!hits.length) { list.append(el("p", { class: "hint" }, "no matches")); return; }
-      const ul = el("ul", { class: "cat-items" });
-      for (const h of hits) {
-        const d = allDocs.find((x) => x.id === h.doc_id) ||
-          { id: h.doc_id, title: h.title, path: h.path, tags: [] };
-        const chips = el("div", { class: "chips" });
-        if (h.snippets && h.snippets[0])
-          chips.append(el("span", { class: "chip" },
-            `cos ${h.snippets[0].score.toFixed(3)}`));
-        if (d.category) chips.append(el("span", { class: "chip sug" }, esc(d.category)));
-        for (const t of d.tags) chips.append(el("span", { class: "chip" }, esc(t)));
-        ul.append(el("li", { class: "item", onclick: () => showDetail(h.doc_id) },
-          el("span", { class: "item-title" }, esc(d.title || h.path.split("/").pop())),
-          chips));
-      }
-      list.append(el("details", { class: "group", open: true },
-        el("summary", {}, "results",
-          el("span", { class: "count" }, String(hits.length))), ul));
-    } else {
-      if (!allDocs.length) await loadDocs();
-      const ids = [...new Set(hits.map((h) => h.doc_id))];
-      const order = new Map(ids.map((id, i) => [id, i]));
-      const docs = allDocs.filter((d) => ids.includes(d.id));
-      docs.sort((a, b) => order.get(a.id) - order.get(b.id));
-      renderList(docs, true);
-    }
+    renderHits(hits, mode, q);
   } catch (e) { notice("search: " + e.message); }
+}
+
+// renderHits shows WHY each result matched: the matched snippet with the
+// query terms highlighted, the page, and a jump straight into the PDF
+// preview at that page. The API caps at the limit (25) — say so.
+function renderHits(hits, mode, q) {
+  const list = $("#list");
+  list.replaceChildren();
+  if (!hits.length) { list.append(el("p", { class: "hint" }, "no matches")); return; }
+  const terms = q.toLowerCase().split(/\s+/).filter(Boolean);
+  const ul = el("ul", { class: "cat-items" });
+  for (const h of hits) {
+    const d = allDocs.find((x) => x.id === h.doc_id) ||
+      { id: h.doc_id, title: h.title, path: h.path, tags: [] };
+    const title = d.title || h.path.split("/").pop();
+    const chips = el("div", { class: "chips" });
+    let snippet = "", page = 0;
+    if (mode === "semantic") {
+      const s0 = h.snippets && h.snippets[0];
+      if (s0) {
+        chips.append(el("span", { class: "chip", title: "cosine similarity" },
+          `cos ${s0.score.toFixed(3)}`));
+        snippet = s0.text;
+        page = s0.page;
+      }
+    } else {
+      snippet = h.snippet || "";
+      page = h.page;
+    }
+    if (page > 0 && isPdf(h.path))
+      chips.append(el("span", { class: "chip", title: "open this page in Preview",
+        onclick: (ev) => { ev.stopPropagation(); showDetail(h.doc_id, "preview", page); } },
+        `→ p. ${page}`));
+    if (d.status === "error")
+      chips.append(el("span", { class: "chip status" }, "error"));
+    if (d.category) chips.append(el("span", { class: "chip sug" }, esc(d.category)));
+    for (const t of d.tags) chips.append(el("span", { class: "chip" }, esc(t)));
+    const row = el("li", { class: "item hit", onclick: () => showDetail(h.doc_id) },
+      el("span", { class: "item-title" }, esc(title)),
+      chips);
+    if (snippet) {
+      const clipped = snippet.length > 240 ? snippet.slice(0, 240) + "…" : snippet;
+      row.append(el("div", { class: "hit-snippet" }, ...highlight(clipped, terms)));
+    }
+    ul.append(row);
+  }
+  const capped = hits.length >= 25;
+  list.append(el("details", { class: "group", open: true },
+    el("summary", {}, mode === "semantic" ? "results" : "matches",
+      el("span", { class: "count" },
+        String(hits.length) + (capped ? " (first 25 — refine the query)" : ""))), ul));
 }
 
 $("#btn-search").onclick = doSearch;
@@ -829,6 +961,7 @@ async function fsOpen(path) {
         : Math.max(1, Math.round(e.size / 1024)) + " kB";
       const row = el("div", { class: "fs-row file" }, e.name,
         el("span", { class: "size" }, kb));
+      row.dataset.path = full;
       if (!e.supported) {
         row.classList.add("unsupported");
         row.title = "unsupported file type";
@@ -847,7 +980,15 @@ function fsToggle(path, row) {
   if (i >= 0) fsSelected.splice(i, 1);
   else fsSelected.push(path);
   if (row) row.classList.toggle("sel", i < 0);
+  else fsSyncRows(); // toggled from a chip: sync the visible rows
   fsChips();
+}
+
+// fsSyncRows re-syncs the picker rows' selected highlight with fsSelected
+// (selection can change from the chips without a row reference at hand).
+function fsSyncRows() {
+  for (const row of document.querySelectorAll("#fs-list .fs-row.file"))
+    row.classList.toggle("sel", fsSelected.includes(row.dataset.path));
 }
 
 function fsChips() {
@@ -919,9 +1060,7 @@ $("#vocab-close").onclick = () => $("#dlg-vocab").close();
 
 async function renderVocab() {
   const vocab = await api("/api/vocab");
-  vocabNames = vocab.map((t) => t.name);
-  const dl = $("#tag-list");
-  if (dl) { dl.replaceChildren(); for (const n of vocabNames) dl.append(el("option", { value: n })); }
+  await loadVocabNames(); // refreshes the tag datalist too
 
   const list = $("#vocab-list");
   list.replaceChildren();
@@ -979,15 +1118,26 @@ $("#vocab-add").onclick = async () => {
   await renderVocab();
 };
 
+// loadVocabNames fills the tag datalist (used by the tag filter and the
+// detail pane's tag input) without opening the vocab dialog.
+async function loadVocabNames() {
+  try {
+    const v = await api("/api/vocab");
+    vocabNames = v.map((t) => t.name);
+    const dl = $("#tag-list");
+    if (dl) { dl.replaceChildren(); for (const n of vocabNames) dl.append(el("option", { value: n })); }
+  } catch (e) { /* the vocab dialog surfaces load errors */ }
+}
+
 /* ------------------------------------------------------------------- boot */
 
 (async () => {
   try {
-    await refresh();
-    const st = await api("/api/status");
+    const st = await refresh();
     if (!st.llm_up) notice("Model server is not running — search still works, but summarize/tag/semantic need the llama-servers (start via vellum.sh).");
     await loadDocs();
     await loadCategories();
+    await loadVocabNames();
   } catch (e) {
     notice("API error: " + e.message);
   }
