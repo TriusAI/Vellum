@@ -327,21 +327,21 @@ Docker: `pack/Dockerfile` + `docker-entrypoint.sh`; Hub is proxy-blocked
 
 ## 10. Where things state-wise
 
-- HEAD: v0.13.0 (`900db98`), all tests green (TESSDATA_PREFIX=tessdata
-  needed for the OCR tests). UI/UX pass: browse filters fixed (a shadowed
-  loadDocs made kind/category/tag filters dead), search results show the
-  matching snippet (highlighted) + a jump-to-page chip, rows carry
-  pending/error/ocr chips, the notice bar offers an inline cancel while a
-  UI-started job runs, the Ask tab transcript survives tab switches
-  (+ clear chat), Esc closes the detail pane, "/" focuses search, and
-  documents can be REMOVED from the index (vellum remove ID / DELETE
-  /api/documents/{id} / UI button — files stay on disk).
-- Pack stage `pack/stage/vellum-900db98-linux-amd64/` (user's live
-  library inside) updated to the 0.13.0 binary; distributable tarball
-  `pack/vellum-900db98-linux-x86_64.tar.gz` (clean of the DB — verified
+- HEAD: v0.14.0 (`04cefb8`), all tests green. Pages UI: the main frame is
+  a horizontal strip of pages (All Documents + per-document
+  Summary/Preview/Text/Ask; close/reorder/expand/drag-resize in each
+  title bar), settings dialog grouped by section, and category rename
+  (subtree move, merges; vellum rename-category / POST
+  /api/categories/rename / ✎ on shelf headers).
+- Pack stage `pack/stage/vellum-04cefb8-linux-amd64/` (user's live
+  library inside) updated to the 0.14.0 binary; distributable tarball
+  `pack/vellum-04cefb8-linux-x86_64.tar.gz` (clean of the DB — verified
   with tar -tzf | grep -c library.db = 0). The user's long-running serve
   (PID from an OLDER deleted stage, port 8097) still runs its old binary
   and DB copy — the new one takes effect on the next ./vellum.sh serve.
+  NOTE: that serve's library.db exists only via its open fds (its stage
+  dir was deleted); if it was used for real work, recover it from
+  /proc/701/fd BEFORE stopping it.
 - The user runs `./vellum.sh serve` (their own llama-servers on 8081/8082
   are LONG-RUNNING — do not kill them; kill only ephemeral test ones).
 - `AGENTS.md` (repo root) carries the agent-focused subset of this
