@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -41,6 +42,59 @@ type Server struct {
 
 	mu       sync.Mutex
 	progress map[string]any // live processing state (single-user tool)
+
+	// llmJobs FIFO-serializes the slow mutating operations (process,
+	// regenerate, reextract, ingest): a second request queues until the
+	// first finishes, fulfilling requests strictly in arrival order.
+	queueMu     sync.Mutex
+	jobsBusy    bool
+	jobsWaiters []chan struct{}
+}
+
+// takeTurn blocks until it is this caller's turn and returns the
+// release function. FIFO: first requester first served.
+func (s *Server) takeTurn() func() {
+	s.queueMu.Lock()
+	if !s.jobsBusy {
+		s.jobsBusy = true
+		s.queueMu.Unlock()
+		return func() {
+			s.queueMu.Lock()
+			s.jobsBusy = false
+			if n := len(s.jobsWaiters); n > 0 {
+				w := s.jobsWaiters[0]
+				s.jobsWaiters = s.jobsWaiters[1:]
+				s.jobsBusy = true // handed to the waiter
+				close(w)
+			}
+			s.queueMu.Unlock()
+		}
+	}
+	done := make(chan struct{})
+	s.jobsWaiters = append(s.jobsWaiters, done)
+	depth := len(s.jobsWaiters)
+	s.queueMu.Unlock()
+
+	s.mu.Lock()
+	s.progress = map[string]any{
+		"running": true,
+		"message": fmt.Sprintf("queued — %d job(s) ahead of you", depth),
+		"updated": time.Now().Format(time.RFC3339),
+	}
+	s.mu.Unlock()
+	<-done
+	return func() {
+		s.queueMu.Lock()
+		if n := len(s.jobsWaiters); n > 0 {
+			w := s.jobsWaiters[0]
+			s.jobsWaiters = s.jobsWaiters[1:]
+			s.jobsBusy = true
+			close(w)
+		} else {
+			s.jobsBusy = false
+		}
+		s.queueMu.Unlock()
+	}
 }
 
 // New creates a Server.
@@ -117,6 +171,7 @@ type documentJSON struct {
 	SummarySource string   `json:"summary_source,omitempty"`
 	Category      string   `json:"category,omitempty"`
 	OcrPending    bool     `json:"ocr_pending,omitempty"`
+	SkipPages     string   `json:"skip_pages,omitempty"`
 	Tags          []string `json:"tags"`
 	OCRPages      int      `json:"ocr_pages"`
 	NPages        int      `json:"n_pages"`
@@ -127,7 +182,7 @@ type documentJSON struct {
 
 const docColumns = "id, path, title, authors, year, summary, status, " +
 	"kind, summary_source, category, error, ocr_pages, n_pages, ocr_pending, " +
-	"added_at, processed_at"
+	"skip_pages, added_at, processed_at"
 
 type scanDoc struct {
 	id                            int64
@@ -138,13 +193,14 @@ type scanDoc struct {
 	processedAt                   sql.NullString
 	ocrPages, nPages              sql.NullInt64
 	ocrPending                    sql.NullInt64
+	skipPages                     sql.NullString
 }
 
 func scanDocRow(sc interface{ Scan(...any) error }) (scanDoc, error) {
 	var d scanDoc
 	err := sc.Scan(&d.id, &d.path, &d.title, &d.authors, &d.year, &d.summary,
 		&d.status, &d.kind, &d.summarySource, &d.category, &d.err, &d.ocrPages,
-		&d.nPages, &d.ocrPending, &d.addedAt, &d.processedAt)
+		&d.nPages, &d.ocrPending, &d.skipPages, &d.addedAt, &d.processedAt)
 	return d, err
 }
 
@@ -156,6 +212,7 @@ func (d scanDoc) toJSON() documentJSON {
 		Kind: d.kind.String, SummarySource: d.summarySource.String,
 		Category:   d.category.String,
 		OcrPending: d.ocrPending.Int64 > 0,
+		SkipPages:  d.skipPages.String,
 		OCRPages:   int(d.ocrPages.Int64), NPages: int(d.nPages.Int64),
 		Error: d.err.String, AddedAt: d.addedAt,
 		ProcessedAt: d.processedAt.String, Tags: []string{},
@@ -403,6 +460,7 @@ func (s *Server) patchDocument(w http.ResponseWriter, r *http.Request) {
 	}
 	var body struct {
 		Title, Authors, Year, Summary, Kind, Category *string
+		SkipPages                                     *string
 	}
 	if err := decodeBody(r, &body); err != nil {
 		writeErr(w, 400, "bad JSON body: "+err.Error())
@@ -411,7 +469,8 @@ func (s *Server) patchDocument(w http.ResponseWriter, r *http.Request) {
 	set := map[string]string{}
 	for col, p := range map[string]*string{
 		"title": body.Title, "authors": body.Authors, "year": body.Year,
-		"summary": body.Summary, "kind": body.Kind, "category": body.Category} {
+		"summary": body.Summary, "kind": body.Kind, "category": body.Category,
+		"skip_pages": body.SkipPages} {
 		if p != nil {
 			set[col] = *p
 		}
@@ -419,6 +478,12 @@ func (s *Server) patchDocument(w http.ResponseWriter, r *http.Request) {
 	if len(set) == 0 {
 		writeErr(w, 400, "nothing to update (title/authors/year/summary)")
 		return
+	}
+	if body.SkipPages != nil && *body.SkipPages != "" {
+		if _, err := parsePageList(*body.SkipPages); err != nil {
+			writeErr(w, 400, "bad skip_pages: "+err.Error())
+			return
+		}
 	}
 	assignments := ""
 	args := []any{}
@@ -533,6 +598,36 @@ func (s *Server) fsList(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, out)
 }
 
+var reSkipPagePart = regexp.MustCompile(`^[0-9]{1,4}(-[0-9]{1,4})?$`)
+
+// parsePageList validates a page csv like \x223,7-12\x22 (shared by the
+// skip_pages PATCH).
+func parsePageList(s string) ([]int, error) {
+	out := []int{}
+	for _, part := range strings.Split(s, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			return nil, fmt.Errorf("empty page in %q", s)
+		}
+		if !reSkipPagePart.MatchString(part) {
+			return nil, fmt.Errorf("bad page expression %q", part)
+		}
+		lo, hi := part, part
+		if a, b, ok := strings.Cut(part, "-"); ok {
+			lo, hi = a, b
+		}
+		low, _ := strconv.Atoi(lo)
+		high, _ := strconv.Atoi(hi)
+		if high < low {
+			return nil, fmt.Errorf("bad page range %q", part)
+		}
+		for pp := low; pp <= high && pp < 10000; pp++ {
+			out = append(out, pp)
+		}
+	}
+	return out, nil
+}
+
 // vellumParseStoredPages decodes the ocr_done_pages csv ("all"/"" -> nil).
 func vellumParseStoredPages(s string) []int {
 	if s == "all" || s == "" {
@@ -579,6 +674,8 @@ func (s *Server) postIngest(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "paths[] required")
 		return
 	}
+	release := s.takeTurn()
+	defer release()
 	s.mu.Lock()
 	s.progress = map[string]any{"running": true, "message": "ingesting", "updated": time.Now().Format(time.RFC3339)}
 	s.mu.Unlock()
@@ -680,6 +777,8 @@ func (s *Server) reextract(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 409, "source file missing: "+path)
 		return
 	}
+	release := s.takeTurn()
+	defer release()
 	progress := func(msg string) {
 		s.mu.Lock()
 		s.progress = map[string]any{"running": true, "message": msg,
@@ -777,6 +876,8 @@ func (s *Server) postProcess(w http.ResponseWriter, r *http.Request) {
 			" — start it with the vellum launcher")
 		return
 	}
+	release := s.takeTurn()
+	defer release()
 	s.mu.Lock()
 	s.progress = map[string]any{"running": true, "message": "starting", "updated": time.Now().Format(time.RFC3339)}
 	s.mu.Unlock()
@@ -1110,6 +1211,8 @@ func (s *Server) regenerate(w http.ResponseWriter, r *http.Request) {
 			" (llm.backend="+s.cfg.LLM.Backend+")")
 		return
 	}
+	regenRelease := s.takeTurn()
+	defer regenRelease()
 	progress := func(msg string) {
 		s.mu.Lock()
 		s.progress = map[string]any{"running": true, "message": msg,

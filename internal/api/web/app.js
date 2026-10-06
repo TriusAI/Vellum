@@ -330,6 +330,124 @@ async function askPanel(id, d) {
 
 const askHistory = {};
 
+/* shared chunk-row builder (Text tab = full rows, Preview rail = compact) */
+
+const rangeExpand = (s) => {
+  const out = [];
+  for (const part of String(s).split(",").map((x) => x.trim()).filter(Boolean)) {
+    const m = part.match(/^(\d+)-(\d+)$/);
+    if (m) for (let p = +m[1]; p <= Math.min(+m[2], +m[1] + 5000); p++) out.push(p);
+    else if (/^\d+$/.test(part)) out.push(+part);
+  }
+  return out;
+};
+
+function buildChunkRows(data, opts) {
+  const d = data.document;
+  const id = currentDetail.id;
+  const skipSet = new Set(rangeExpand(d.skip_pages || ""));
+  const list = el("div", { class: "chunklist" + (opts.compact ? " compact" : "") });
+  const rows = [];
+  const skipped = [];
+  for (const c of data.chunks) {
+    if (c.page > 0 && skipSet.has(c.page)) { skipped.push(c); continue; }
+
+    if (opts.compact) {
+      const row = el("div", { class: "chunk-row" + (c.page === currentDetail.page ? " open" : "") },
+        el("span", { class: "loc" }, c.page > 0 ? `p. ${c.page}` : `${c.seq}`),
+        el("span", { class: "chunk-text" }, esc(c.text.slice(0, 90) + (c.text.length > 90 ? "…" : ""))));
+      if (c.page > 0) row.addEventListener("click", () => {
+        currentDetail.page = c.page;
+        const frame = $("#pv-frame");
+        if (frame && frame.parentElement) {
+          frame.parentElement.replaceChildren(el("iframe", {
+            class: "preview-frame", id: "pv-frame",
+            src: `/api/documents/${id}/file#page=${c.page}` }));
+        }
+        [...row.parentElement.children].forEach((r) => r.classList.remove("open"));
+        row.classList.add("open");
+      });
+      rows.push(row);
+      list.append(row);
+      continue;
+    }
+
+    const loc = c.page > 0 ? `p. ${c.page}` : `chunk ${c.seq}`;
+    const textPre = el("div", { class: "chunk-text" }, esc(c.text));
+    const jump = c.page > 0 && isPdf(d.path) ? el("button", {
+      class: "mini", title: "open this page in Preview",
+      onclick: (ev) => {
+        ev.stopPropagation();
+        currentDetail.page = c.page;
+        renderDetailTabs("preview");
+      },
+    }, "⤢") : null;
+    const fix = c.page > 0 && isPdf(d.path) ? el("button", {
+      class: "mini", title: "OCR just this page (repair)",
+      onclick: async (ev) => {
+        ev.stopPropagation();
+        ev.target.textContent = "OCR…";
+        ev.target.disabled = true;
+        try { await reextractPage(d.id, c.page); } finally {
+          ev.target.textContent = "OCR";
+          ev.target.disabled = false;
+        }
+      },
+    }, "OCR") : null;
+    const skipBtn = c.page > 0 ? el("button", {
+      class: "mini plain", title: "hide this page (also excluded from summaries)",
+      onclick: async (ev) => {
+        ev.stopPropagation();
+        ev.target.disabled = true;
+        try { await toggleSkip(id, c.page, true); } finally { ev.target.disabled = false; }
+      },
+    }, "⤫") : null;
+    const head = el("div", { class: "chunk-head" },
+      el("span", { class: "loc" }, esc(loc)), jump, fix, skipBtn);
+    const row = el("div", { class: "chunk" }, head, textPre);
+    head.addEventListener("click", (ev) => {
+      if (ev.target.tagName === "BUTTON") return;
+      row.classList.toggle("open");
+    });
+    rows.push(row);
+    list.append(row);
+  }
+  return { list, rows, skipped };
+}
+
+// toggleSkip changes one page's skipped state and re-renders the tab.
+async function toggleSkip(id, page, skip) {
+  const data = await api(`/api/documents/${id}`);
+  const cur = new Set(rangeExpand(data.document.skip_pages || ""));
+  if (skip) cur.add(page); else cur.delete(page);
+  const list = [...cur].sort((a, b) => a - b).join(",");
+  await api(`/api/documents/${id}`, {
+    method: "PATCH", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ skip_pages: list }),
+  });
+  const again = await api(`/api/documents/${id}`);
+  currentDetail = { id, data: again };
+  renderDetailTabs(currentDetailTab || "text");
+}
+
+async function reextractPage(id, page) {
+  notice(`Force-OCR page ${page} — live progress below…`);
+  startProgressPolling(`Force-OCR page ${page}`);
+  try {
+    await api(`/api/documents/${id}/reextract`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ force: true, pages: [page] }),
+    });
+    notice(`Page ${page} OCR'd → text replaced; document pending re-processing.`);
+    await loadDocs();
+    await loadCategories();
+    const again = await api(`/api/documents/${id}`);
+    currentDetail = { id, data: again };
+    renderDetailTabs(currentDetailTab || "text");
+  } catch (e) { notice("reextract: " + e.message); }
+  stopProgressPolling();
+}
+
 async function reextract(id, force, pages) {
   const prefix = force ? "Force-OCR re-extract" : "Re-extract";
   notice(`${prefix} — live progress below…`);
@@ -364,8 +482,10 @@ async function showDetail(id, tab = "summary") {
 }
 
 let detailRenderToken = 0;
+let currentDetailTab = "summary";
 
 function renderDetailTabs(active) {
+  currentDetailTab = active;
   const d = currentDetail.data.document;
   const tabs = el("div", { class: "tabs" });
   const mk = (id, label) => el("div", {
@@ -397,12 +517,25 @@ function detailContent(tab) {
 
   if (tab === "preview") {
     if (isPdf(d.path)) {
-      const wrap = el("div", {},
-        el("p", { class: "hint" },
-          "Original file, rendered by the browser. Click a chunk under Text to jump to its page."),
+      // side-by-side: the rendered page(s) next to the extracted text
+      const chunks = buildChunkRows(data, { compact: true });
+      const iframeHolder = el("div", { class: "pv-left" },
         el("iframe", { class: "preview-frame",
+          id: "pv-frame",
           src: `/api/documents/${id}/file#page=${currentDetail.page || 1}` }));
-      return wrap;
+      const gotoPage = (page) => {
+        const frame = $("#pv-frame");
+        const holder = $(".pv-left", iframeHolder.parentElement) || iframeHolder;
+        holder.replaceChildren(el("iframe", { class: "preview-frame",
+          id: "pv-frame",
+          src: `/api/documents/${id}/file#page=${page}` }));
+      };
+      const grid = el("div", { class: "pv-grid" }, iframeHolder,
+        el("div", { class: "pv-right" },
+          el("p", { class: "hint" }, "extracted text — click a row to jump; ⤫ page-skip hides it"),
+          chunks.list,
+          el("p", { class: "hint" })));
+      return grid;
     }
     return el("p", { class: "hint" },
       `No inline preview for this file type — download: /api/documents/${id}/file?dl=1`);
@@ -441,39 +574,17 @@ function detailContent(tab) {
           },
         }, "Force OCR")));
     }
-    // collapsible chunk list: each row expands to the FULL text; the
-    // per-chunk buttons jump to the Preview pane or force-OCR that page
-    const list = el("div", { class: "chunklist" });
-    const chunksEls = [];
-    for (const c of data.chunks) {
-      const loc = c.page > 0 ? `p. ${c.page}` : `chunk ${c.seq}`;
-      const textPre = el("div", { class: "chunk-text" }, esc(c.text));
-      const jump = c.page > 0 && isPdf(d.path) ? el("button", {
-        class: "mini", title: "open this page in Preview",
-        onclick: (ev) => {
-          ev.stopPropagation();
-          currentDetail.page = c.page;
-          renderDetailTabs("preview");
-        },
-      }, "⤢") : null;
-      const fix = c.page > 0 && isPdf(d.path) ? el("button", {
-        class: "mini", title: "OCR just this page (repair)",
-        onclick: async (ev) => {
-          ev.stopPropagation();
-          ev.target.textContent = "OCR…";
-          ev.target.disabled = true;
-          try { await reextractPage(d.id, c.page); } finally {
-            ev.target.textContent = "OCR";
-            ev.target.disabled = false;
-          }
-        },
-      }, "OCR") : null;
-      const head = el("div", { class: "chunk-head" },
-        el("span", { class: "loc" }, esc(loc)), jump, fix);
-      const row = el("div", { class: "chunk" }, head, textPre);
-      head.addEventListener("click", () => row.classList.toggle("open"));
-      chunksEls.push(row);
-      list.append(row);
+    // collapsible chunk list with per-chunk actions
+    const chunks = buildChunkRows(data, { compact: false });
+    const chunksEls = chunks.rows;
+    if (chunks.skipped.length) {
+      const bar = el("div", { class: "row" },
+        el("span", { class: "hint" }, `hidden: `));
+      for (const s of chunks.skipped) {
+        bar.append(el("span", { class: "chip", title: "click to un-hide",
+          onclick: () => toggleSkip(id, s.page, false) }, `p.${s.page} ✕`));
+      }
+      wrap.append(bar);
     }
     wrap.append(el("div", { class: "row" },
       el("button", { class: "small", onclick: () =>
@@ -481,8 +592,8 @@ function detailContent(tab) {
       el("button", { class: "small", onclick: () =>
         chunksEls.forEach((r) => r.classList.remove("open")) }, "collapse all"),
       el("span", { class: "hint" },
-        `${chunksEls.length} sections — click a row to expand; OCR replaces that page's text and re-queues processing`)));
-    wrap.append(list);
+        `${chunksEls.length} sections — click a row to expand`)));
+    wrap.append(chunks.list);
     return wrap;
   }
 

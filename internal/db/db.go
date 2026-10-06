@@ -9,6 +9,8 @@ import (
 	"database/sql"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 
 	_ "modernc.org/sqlite"
 )
@@ -39,7 +41,8 @@ CREATE TABLE IF NOT EXISTS documents(
   ocr_pending INTEGER DEFAULT 0,
   kind_user INTEGER DEFAULT 0,
   category_user INTEGER DEFAULT 0,
-  ocr_done_pages TEXT DEFAULT ''
+  ocr_done_pages TEXT DEFAULT '',
+  skip_pages TEXT DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS chunks(
@@ -109,6 +112,7 @@ func migrate(conn *sql.DB) error {
 		{"documents", "kind_user", "ALTER TABLE documents ADD COLUMN kind_user INTEGER DEFAULT 0"},
 		{"documents", "category_user", "ALTER TABLE documents ADD COLUMN category_user INTEGER DEFAULT 0"},
 		{"documents", "ocr_done_pages", "ALTER TABLE documents ADD COLUMN ocr_done_pages TEXT DEFAULT ''"},
+		{"documents", "skip_pages", "ALTER TABLE documents ADD COLUMN skip_pages TEXT DEFAULT ''"},
 	}
 	for _, m := range migrations {
 		rows, err := conn.Query("PRAGMA table_info(" + m.table + ")")
@@ -200,9 +204,25 @@ func SetTags(conn *sql.DB, docID int64, pairs [][2]string) error {
 	return nil
 }
 
-// DocumentText concatenates a document's chunks in reading order.
+// DocumentText concatenates a document's chunks in reading order,
+// EXCLUDING skipped pages (documents.skip_pages — pages the user hid
+// must not inform summarization or regeneration either).
 func DocumentText(conn *sql.DB, docID int64) (string, error) {
-	rows, err := conn.Query("SELECT text FROM chunks WHERE doc_id=? ORDER BY seq", docID)
+	var skipPages string
+	if err := conn.QueryRow("SELECT skip_pages FROM documents WHERE id=?", docID).
+		Scan(&skipPages); err != nil && err != sql.ErrNoRows {
+		return "", err
+	}
+	skip := map[int]struct{}{}
+	if skipPages != "" && skipPages != "all" {
+		for _, part := range strings.Split(skipPages, ",") {
+			if n, err := strconv.Atoi(strings.TrimSpace(part)); err == nil {
+				skip[n] = struct{}{}
+			}
+		}
+	}
+	rows, err := conn.Query(
+		"SELECT text, page_no FROM chunks WHERE doc_id=? ORDER BY seq", docID)
 	if err != nil {
 		return "", err
 	}
@@ -211,8 +231,16 @@ func DocumentText(conn *sql.DB, docID int64) (string, error) {
 	first := true
 	for rows.Next() {
 		var t string
-		if err := rows.Scan(&t); err != nil {
+		var page any
+		if err := rows.Scan(&t, &page); err != nil {
 			return "", err
+		}
+		if page != nil {
+			if p, ok := page.(int64); ok {
+				if _, hidden := skip[int(p)]; hidden {
+					continue
+				}
+			}
 		}
 		if !first {
 			out += "\n\n"

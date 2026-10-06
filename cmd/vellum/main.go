@@ -48,7 +48,7 @@ file (FTS5). Models served locally by llama.cpp llama-server.
 `
 
 // versionString is reported by --version, /api/status and `vellum agent`.
-const versionString = "0.10.1"
+const versionString = "0.11.0"
 
 // documentColumns is the explicit projection used everywhere (never SELECT *,
 // so the scan order is fixed even if the schema gains columns).
@@ -146,6 +146,8 @@ func main() {
 		cmdReextract(cfg, args[1:])
 	case "backends":
 		cmdBackends(cfg, args[1:])
+	case "skip":
+		cmdSkip(cfg, args[1:])
 	case "regenerate":
 		cmdRegenerate(cfg, args[1:])
 	case "serve":
@@ -1056,4 +1058,40 @@ func mustSaveVocab(v *vocab.Vocabulary) {
 	if err := v.Save(); err != nil {
 		log.Fatalf("vocab save: %s", err)
 	}
+}
+
+// cmdSkip hides pages in the Text view (and from summarization):
+//
+//	vellum skip ID 3,7-12    # skip those pages
+//	vellum skip ID -         # clear the skip list
+//	vellum skip ID           # show the current list
+func cmdSkip(cfg *config.Config, args []string) {
+	if len(args) < 1 {
+		log.Fatalf("usage: vellum skip ID [PAGES] (e.g. 3,7-12; '' clears)")
+	}
+	id, err := strconv.ParseInt(args[0], 10, 64)
+	if err != nil {
+		log.Fatalf("skip expects a numeric document id")
+	}
+	conn := mustOpen(cfg)
+	if len(args) < 2 {
+		var skip sql.NullString
+		if err := conn.QueryRow("SELECT skip_pages FROM documents WHERE id=?", id).
+			Scan(&skip); err != nil {
+			log.Fatalf("skip: %s", err)
+		}
+		fmt.Printf("#%d: skip_pages=%q\n", id, skip.String)
+		return
+	}
+	value := strings.TrimSpace(args[1])
+	if value == "-" || value == "" || value == "none" {
+		value = ""
+	} else if _, err := parsePageList(value); err != nil {
+		log.Fatalf("skip: %s", err)
+	}
+	if _, err := conn.Exec("UPDATE documents SET skip_pages=? WHERE id=?",
+		value, id); err != nil {
+		log.Fatalf("skip: %s", err)
+	}
+	fmt.Printf("#%d: skip_pages set to %q\n", id, value)
 }

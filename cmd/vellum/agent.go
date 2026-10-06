@@ -102,6 +102,15 @@ text. The heavy work happens in process:
 So after ingesting scans, just run process and watch the progress
 line; ingest "hang" on big scans is fixed.
 
+## Skipping pages
+pages hidden from the Text tab AND excluded from document text
+(summarization/regeneration/ask-context). Stored on documents.skip_pages
+as a csv ("3,7-12"); searchable until re-extracted (skip != delete).
+    vellum skip ID 3,7-12
+    vellum skip ID -          # clear
+    PATCH /api/documents/{id} {"skip_pages": "3,7-12"}
+The UI Text tab has a per-page skip button and un-hide chips.
+
 ## Regenerate individual metadata
 Per-field rebuilds WITHOUT a full reprocess ("meta" = title/authors/year
 via one cheap call; "summary" = the kind's fast path; "tags"/"category"
@@ -110,6 +119,11 @@ reclassify on current text — user-kind pins LIFT only when the user
 explicitly re-generates kind/category):
     vellum regenerate ID [meta|summary|tags|category|kind ...]
     POST /api/documents/{id}/regenerate {"fields":["summary","tags"]}
+
+## Queued execution
+process / regenerate / reextract / ingest run through ONE FIFO queue:
+a second request waits its turn ("queued — N job(s) ahead" appears in
+/api/progress); results arrive strictly in request order.
 
 ## Settings API (live config)
     GET /api/config                 # editable subset (api keys masked)
