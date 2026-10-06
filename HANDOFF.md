@@ -318,7 +318,7 @@ Docker: `pack/Dockerfile` + `docker-entrypoint.sh`; Hub is proxy-blocked
 
 ## 10. Where things state-wise
 
-- HEAD: v0.13.0 (`4ce4606`), all tests green (TESSDATA_PREFIX=tessdata
+- HEAD: v0.13.0 (`900db98`), all tests green (TESSDATA_PREFIX=tessdata
   needed for the OCR tests). UI/UX pass: browse filters fixed (a shadowed
   loadDocs made kind/category/tag filters dead), search results show the
   matching snippet (highlighted) + a jump-to-page chip, rows carry
@@ -327,10 +327,12 @@ Docker: `pack/Dockerfile` + `docker-entrypoint.sh`; Hub is proxy-blocked
   (+ clear chat), Esc closes the detail pane, "/" focuses search, and
   documents can be REMOVED from the index (vellum remove ID / DELETE
   /api/documents/{id} / UI button — files stay on disk).
-- Pack stage `pack/stage/vellum-ad058cd-linux-amd64/` (user's live
-  library inside) and tarball
-  `pack/vellum-ad058cd-linux-x86_64.tar.gz` are STILL 0.12.0 — rebuild
-  per §7 ("Updating the live stage") to give the user the new binary.
+- Pack stage `pack/stage/vellum-900db98-linux-amd64/` (user's live
+  library inside) updated to the 0.13.0 binary; distributable tarball
+  `pack/vellum-900db98-linux-x86_64.tar.gz` (clean of the DB — verified
+  with tar -tzf | grep -c library.db = 0). The user's long-running serve
+  (PID from an OLDER deleted stage, port 8097) still runs its old binary
+  and DB copy — the new one takes effect on the next ./vellum.sh serve.
 - The user runs `./vellum.sh serve` (their own llama-servers on 8081/8082
   are LONG-RUNNING — do not kill them; kill only ephemeral test ones).
 - `AGENTS.md` (repo root) carries the agent-focused subset of this
