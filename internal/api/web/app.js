@@ -29,7 +29,24 @@ const esc = (s) =>
   String(s ?? "").replace(/[&<>"']/g, (c) =>
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
-function notice(msg) { $("#notice").textContent = msg || ""; }
+function notice(msg) { setNotice(msg ? [document.createTextNode(msg)] : []); }
+
+// The notice bar overlays the pages (it has no space of its own): it
+// carries a manual close button on the right and auto-dismisses a few
+// seconds after the last update — progress polling rewrites it every
+// tick, so a running job stays visible until it goes quiet.
+let noticeTimer = null;
+function setNotice(children) {
+  const box = $("#notice");
+  clearTimeout(noticeTimer);
+  box.replaceChildren(...children);
+  if (!children.length) return;
+  box.append(el("button", {
+    class: "notice-close", title: "dismiss",
+    onclick: () => setNotice([]),
+  }, "✕"));
+  noticeTimer = setTimeout(() => setNotice([]), 7000);
+}
 
 const isPdf = (path) => /\.pdf$/i.test(path);
 const hasCover = (path) => /\.(pdf|epub|mobi|azw3?)$/i.test(path);
@@ -92,6 +109,7 @@ function buildPageChrome(page) {
   const head = el("div", { class: "page-head" }, title, controls);
   const content = el("div", { class: "page-body" });
   if (page.kind === "library") content.id = "list";
+  if (page.kind === "preview") content.style.padding = "0"; // full-bleed viewer
   const resize = el("div", { class: "page-resize", title: "drag to resize" });
   resize.addEventListener("mousedown", (ev) => startResize(ev, page));
   page.el = el("section", { class: "page" }, head, content, resize);
@@ -419,16 +437,16 @@ function startProgressPolling(prefix) {
       if (p.running && p.message) msg = `${prefix} — ${p.message}…`;
       else if (job && job.status === "queued") msg = `${prefix} — waiting in the job queue…`;
       if (!msg) return;
-      const box = $("#notice");
-      box.replaceChildren(document.createTextNode(msg));
+      const parts = [el("span", { class: "notice-msg" }, msg)];
       if (job && (job.status === "queued" || job.status === "running"))
-        box.append(el("button", {
+        parts.push(el("button", {
           class: "small",
           onclick: async () => {
             try { await api(`/api/jobs/${job.id}/cancel`, { method: "POST" }); }
             catch (e) { /* already finished — nothing left to cancel */ }
           },
         }, "cancel"));
+      setNotice(parts);
     } catch (e) { /* transient */ }
   };
   progressTimer = setInterval(poll, 2000);
@@ -601,7 +619,7 @@ function askPanel(page) {
   return wrap;
 }
 
-/* shared chunk-row builder (Text page = full rows, Preview rail = compact) */
+/* chunk-row builder (the Text page: full collapsible rows) */
 
 const rangeExpand = (s) => {
   const out = [];
@@ -613,35 +631,15 @@ const rangeExpand = (s) => {
   return out;
 };
 
-function buildChunkRows(data, opts, page) {
+function buildChunkRows(data, page) {
   const d = data.document;
   const id = page.docId;
   const skipSet = new Set(rangeExpand(d.skip_pages || ""));
-  const list = el("div", { class: "chunklist" + (opts.compact ? " compact" : "") });
+  const list = el("div", { class: "chunklist" });
   const rows = [];
   const skipped = [];
   for (const c of data.chunks) {
     if (c.page > 0 && skipSet.has(c.page)) { skipped.push(c); continue; }
-
-    if (opts.compact) {
-      const row = el("div", { class: "chunk-row" + (c.page === page.pageNo ? " open" : "") },
-        el("span", { class: "loc" }, c.page > 0 ? `p. ${c.page}` : `${c.seq}`),
-        el("span", { class: "chunk-text" }, esc(c.text.slice(0, 90) + (c.text.length > 90 ? "…" : ""))));
-      if (c.page > 0) row.addEventListener("click", () => {
-        page.pageNo = c.page;
-        const holder = page.content.querySelector(".pv-left");
-        if (holder) {
-          holder.replaceChildren(el("iframe", {
-            class: "preview-frame",
-            src: `/api/documents/${id}/file#page=${c.page}` }));
-        }
-        for (const r of page.content.querySelectorAll(".chunk-row"))
-          r.classList.toggle("open", r === row);
-      });
-      rows.push(row);
-      list.append(row);
-      continue;
-    }
 
     const loc = c.page > 0 ? `p. ${c.page}` : `chunk ${c.seq}`;
     const textPre = el("div", { class: "chunk-text" }, esc(c.text));
@@ -894,24 +892,18 @@ function summaryContent(page) {
   return body;
 }
 
-// previewContent: side-by-side rendered page + extracted text rail.
+// previewContent: the rendered document, filling the page. Page
+// navigation lives in the browser's PDF viewer (and in the jump chips of
+// search results / the Text page); the extracted text has its own page.
 function previewContent(page) {
-  const data = page.data;
-  const id = page.docId;
-  const d = data.document;
+  const d = page.data.document;
   if (!isPdf(d.path)) {
-    return el("p", { class: "hint" }, "No inline preview for this file type — ",
-      el("a", { class: "link", href: `/api/documents/${id}/file?dl=1` }, "download the file"), ".");
+    return el("div", { style: "padding: 1rem 1.2rem" },
+      el("p", { class: "hint" }, "No inline preview for this file type — ",
+        el("a", { class: "link", href: `/api/documents/${page.docId}/file?dl=1` }, "download the file"), "."));
   }
-  const chunks = buildChunkRows(data, { compact: true }, page);
-  return el("div", { class: "pv-grid" },
-    el("div", { class: "pv-left" },
-      el("iframe", { class: "preview-frame",
-        src: `/api/documents/${id}/file#page=${page.pageNo || 1}` })),
-    el("div", { class: "pv-right" },
-      el("p", { class: "hint" }, "extracted text — click a row to jump; ⤫ page-skip hides it"),
-      chunks.list,
-      el("p", { class: "hint" })));
+  return el("iframe", { class: "preview-frame",
+    src: `/api/documents/${page.docId}/file#page=${page.pageNo || 1}` });
 }
 
 // textContent: collapsible chunk list with per-chunk actions.
@@ -948,7 +940,7 @@ function textContent(page) {
       }, "Force OCR")));
   }
   // collapsible chunk list with per-chunk actions
-  const chunks = buildChunkRows(data, { compact: false }, page);
+  const chunks = buildChunkRows(data, page);
   const chunksEls = chunks.rows;
   if (chunks.skipped.length) {
     const bar = el("div", { class: "row" },
