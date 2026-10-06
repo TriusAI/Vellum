@@ -346,15 +346,16 @@ Docker: `pack/Dockerfile` + `docker-entrypoint.sh`; Hub is proxy-blocked
 
 ## 10. Where things state-wise
 
-- HEAD: v0.15.0 (`876ed48`), all tests green. Since 0.14: Import/Export
-  (backup = VACUUM INTO snapshot; import validates, keeps
-  <db>.pre-import-<ts>, swaps in-process; UI dialog + CLI + API); settings
-  dialog is two-column (group tabs in a sidebar); All Documents page
-  scrolls (legacy #list overflow:hidden pinned it); e2e env vars now
-  force dedicated ephemeral servers (never the user's loaded 8081/8082).
-- Pack stage `pack/stage/vellum-876ed48-linux-amd64/` (user's live
-  library inside) updated to the 0.15.0 binary; distributable tarball
-  `pack/vellum-876ed48-linux-x86_64.tar.gz` (clean of the DB — verified
+- HEAD: v0.16.0 (`47dc2ae`), all tests green. Since 0.15: auto-filing
+  LEARNS from user corrections (user-shelved docs matched by keyword
+  overlap, top-3 fed as few-shot examples to the tagging call — see
+  ShelvingExample/bestExamples in internal/summarize); category chips
+  suppressed inside the tree; flash-free updates (refreshPage skips
+  unchanged data + preserves scroll; renderList preserves scroll and
+  collapsed groups).
+- Pack stage `pack/stage/vellum-47dc2ae-linux-amd64/` (user's live
+  library inside) updated to the 0.16.0 binary; distributable tarball
+  `pack/vellum-47dc2ae-linux-x86_64.tar.gz` (clean of the DB — verified
   with tar -tzf | grep -c library.db = 0). The user's long-running serve
   (PID from an OLDER deleted stage, port 8097) still runs its old binary
   and DB copy — the new one takes effect on the next ./vellum.sh serve.
