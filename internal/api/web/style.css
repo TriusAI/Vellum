@@ -278,6 +278,19 @@ button.mini { font-size: .72rem; padding: 0 .45rem; }
 #dlg-lib .row input[type="file"] { flex: 1; }
 #dlg-lib h3 { font-size: .95rem; color: var(--accent); margin: .8rem 0 .2rem; }
 
+/* status bar: bottom line showing the queue situation; opens the Jobs
+ * dialog on click */
+#statusbar {
+  flex: 0 0 auto; display: flex; gap: .6rem; align-items: center;
+  padding: .3rem 1.2rem; border-top: 2px solid var(--accent);
+  background: var(--card); font-size: .8rem; color: var(--muted);
+  cursor: pointer; user-select: none;
+  white-space: nowrap; overflow: hidden;
+}
+#statusbar:hover { color: var(--fg); }
+#statusbar-text { overflow: hidden; text-overflow: ellipsis; }
+#statusbar .job-dot { width: .5rem; height: .5rem; background: transparent; }
+
 /* jobs dialog */
 .job-row { display: flex; gap: .6rem; align-items: center;
   border-bottom: 1px dashed var(--line); padding: .45rem 0; }

@@ -81,6 +81,7 @@ function openPage(kind, docId, opts = {}) {
     pages.push(page);
     buildPageChrome(page);
     $("#pages").append(page.el);
+    syncPageOrder();
   }
   if (opts.page && kind === "preview") page.pageNo = opts.page;
   markActive(page);
@@ -140,10 +141,18 @@ function movePage(page, dir) {
   if (j < 0 || j >= pages.length) return;
   pages.splice(i, 1);
   pages.splice(j, 0, page);
-  const cont = $("#pages");
-  for (const p of pages) cont.append(p.el); // re-append in order (moves nodes)
+  // Reordering changes ONLY the CSS order values — DOM nodes never move:
+  // moving an <iframe> in the DOM resets it, which would reload the PDF
+  // preview every time a page is re-ordered.
+  syncPageOrder();
   page.el.scrollIntoView({ block: "nearest", inline: "nearest" });
   markActive(page);
+}
+
+// syncPageOrder maps the pages array onto CSS `order` so the layout
+// follows the array without touching the DOM.
+function syncPageOrder() {
+  pages.forEach((p, i) => { p.el.style.order = i; });
 }
 
 function toggleExpand(page) {
@@ -174,6 +183,7 @@ function closePage(page) {
   const i = pages.indexOf(page);
   if (i >= 0) pages.splice(i, 1);
   page.el.remove();
+  syncPageOrder();
   if (activePage === page)
     activePage = pages[Math.min(i, pages.length - 1)] || null;
 }
@@ -1506,8 +1516,8 @@ $("#settings-test").onclick = async () => {
 
 /* ------------------------------------------------------------------- jobs */
 
-let jobsTimer = null;
 let jobsOpen = false;
+let jobPeak = 0; // peak active count of the current batch (for "2/3")
 
 async function refreshJobs() {
   try {
@@ -1515,6 +1525,7 @@ async function refreshJobs() {
     const jobs = data.jobs || [];
     const active = jobs.filter((j) => j.status === "queued" || j.status === "running");
     $("#jobs-n").textContent = active.length ? String(active.length) : "";
+    renderStatusbar(jobs, active);
     if (!jobsOpen) return;
     const list = $("#jobs-list");
     list.replaceChildren();
@@ -1537,7 +1548,6 @@ async function refreshJobs() {
               notice(`Cancelling #${j.id}…`);
             } catch (e) { notice("cancel: " + e.message); }
             await refreshJobs();
-            await refresh();
           },
         }, "cancel"));
       } else if (j.error) {
@@ -1548,19 +1558,55 @@ async function refreshJobs() {
   } catch (e) { /* transient */ }
 }
 
-$("#btn-jobs").onclick = () => {
+// renderStatusbar keeps the bottom bar in touch with the queue: what is
+// running (with live progress and batch position), what is waiting, or
+// that everything finished.
+function renderStatusbar(jobs, active) {
+  const text = $("#statusbar-text");
+  if (!text) return;
+  const dot = $("#statusbar-dot");
+  if (!active.length) {
+    jobPeak = 0;
+    dot.className = "job-dot " + (jobs.length ? "done" : "");
+    text.textContent = jobs.length ? "All queued jobs completed ✓" : "idle";
+    return;
+  }
+  if (active.length > jobPeak) jobPeak = active.length;
+  const running = active.find((j) => j.status === "running");
+  if (running) {
+    dot.className = "job-dot running";
+    let s = `Currently ${running.label}`;
+    if (running.message) s += ` — ${running.message}`;
+    if (jobPeak > 1) s += ` (${jobPeak - active.length + 1}/${jobPeak})`;
+    text.textContent = s;
+  } else {
+    dot.className = "job-dot queued";
+    let s = `Waiting in the queue: ${active[0].label}`;
+    if (active.length > 1) s += ` (+${active.length - 1} more)`;
+    text.textContent = s;
+  }
+}
+
+function openJobsDialog() {
   $("#dlg-jobs").showModal();
   jobsOpen = true;
   refreshJobs();
-  jobsTimer = setInterval(refreshJobs, 1500);
+}
+
+$("#btn-jobs").onclick = openJobsDialog;
+// the status bar is a shortcut to the same dialog
+$("#statusbar").onclick = () => {
+  if (!document.querySelector("dialog[open]")) openJobsDialog();
 };
 $("#jobs-close").onclick = () => {
   $("#dlg-jobs").close();
   jobsOpen = false;
-  clearInterval(jobsTimer);
-  jobsTimer = null;
   refresh();
 };
+
+// one light poller keeps the status bar + Jobs badge live at all times
+// (the dialog shares it — it re-renders while open)
+setInterval(refreshJobs, 2000);
 
 /* --------------------------------------------------------------- keyboard */
 
