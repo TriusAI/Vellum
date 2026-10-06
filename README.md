@@ -154,6 +154,14 @@ docker run --rm -v "$PWD:/data" vellum search "tabula rasa" --semantic
 `config.yaml`, `vocab.yaml`, `library.db`, and the `library/` folder all
 live in the mounted `/data`.
 
+## Jobs (queue + cancellation)
+Slow work (process / regenerate / re-extract / ingest) runs through one
+queued channel: a "Jobs" button in the top bar lists every job with its
+live progress, and any single job can be cancelled — queued ones leave
+the queue instantly, running ones stop before their next step
+(document/section/page/LLM call) and leave the library consistent
+(their documents simply stay pending).
+
 ## Settings in the UI (live)
 "Settings…" in the top bar edits the active configuration — backends,
 models, OCR parameters, asking provider — applying immediately and

@@ -6,6 +6,7 @@ package llm
 // decode-time guarantee when the user switches to Ollama.
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -34,8 +35,10 @@ type ollamaChatResponse struct {
 
 // OllamaChatJSON is ChatJSON for an Ollama server: same decode of the
 // constrained JSON object.
-func OllamaChatJSON(baseURL, model string, messages []Message, schema map[string]any,
-	think bool, temperature float64, numCtx int) (map[string]any, error) {
+func OllamaChatJSON(ctx context.Context, baseURL, model string, messages []Message,
+	schema map[string]any, think bool, temperature float64, numCtx int,
+) (map[string]any, error) {
+	ctx = orCtx(ctx)
 	req := ollamaChatRequest{
 		Model:    model,
 		Messages: messages,
@@ -44,7 +47,7 @@ func OllamaChatJSON(baseURL, model string, messages []Message, schema map[string
 		Think:    think,
 		Options:  ollamaOpts{Temperature: temperature, NumCtx: numCtx},
 	}
-	body, err := post(baseURL+"/api/chat", req)
+	body, err := postCtx(ctx, baseURL+"/api/chat", req)
 	if err != nil {
 		return nil, err
 	}

@@ -75,6 +75,7 @@ $("#f-tags").addEventListener("keydown", (e) => {
 async function refresh() {
   const status = await api("/api/status");
   $("#pending-n").textContent = status.pending ? `(${status.pending})` : "";
+  refreshJobs(); // keeps the Jobs badge live even when the dialog is shut
   return status;
 }
 
@@ -1089,4 +1090,63 @@ $("#settings-test").onclick = async () => {
     const st = await api("/api/status");
     msg.textContent = `chat: ${st.llm_up ? "up ✓" : "down ✗"} — embed: ${st.embed_up ? "up ✓" : "down ✗"}`;
   } catch (e) { msg.textContent = "test failed: " + e.message; }
+};
+
+
+/* ---------------------------------------------------------------- jobs */
+
+let jobsTimer = null;
+let jobsOpen = false;
+
+async function refreshJobs() {
+  try {
+    const data = await api("/api/jobs");
+    const jobs = data.jobs || [];
+    const active = jobs.filter((j) => j.status === "queued" || j.status === "running");
+    $("#jobs-n").textContent = active.length ? String(active.length) : "";
+    if (!jobsOpen) return;
+    const list = $("#jobs-list");
+    list.replaceChildren();
+    const ordered = [...jobs].reverse(); // newest first
+    if (!ordered.length) {
+      list.append(el("p", { class: "hint" }, "no jobs yet"));
+    }
+    for (const j of ordered) {
+      const dot = el("span", { class: "job-dot " + j.status });
+      const row = el("div", { class: "job-row" }, dot,
+        el("div", { class: "job-main" },
+          el("div", {}, `#${j.id} `, el("b", {}, esc(j.label)), ` — `, el("span", { class: "hint" }, j.status)),
+          j.message ? el("div", { class: "hint" }, esc(j.message)) : null));
+      if (j.status === "queued" || j.status === "running") {
+        row.append(el("button", {
+          class: "small",
+          onclick: async () => {
+            try {
+              await api(`/api/jobs/${j.id}/cancel`, { method: "POST" });
+              notice(`Cancelling #${j.id}…`);
+            } catch (e) { notice("cancel: " + e.message); }
+            await refreshJobs();
+            await refresh();
+          },
+        }, "cancel"));
+      } else if (j.error) {
+        row.append(el("span", { class: "chip status" }, esc(j.error.slice(0, 60))));
+      }
+      list.append(row);
+    }
+  } catch (e) { /* transient */ }
+}
+
+$("#btn-jobs").onclick = () => {
+  $("#dlg-jobs").showModal();
+  jobsOpen = true;
+  refreshJobs();
+  jobsTimer = setInterval(refreshJobs, 1500);
+};
+$("#jobs-close").onclick = () => {
+  $("#dlg-jobs").close();
+  jobsOpen = false;
+  clearInterval(jobsTimer);
+  jobsTimer = null;
+  refresh();
 };

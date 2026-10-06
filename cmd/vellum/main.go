@@ -48,7 +48,7 @@ file (FTS5). Models served locally by llama.cpp llama-server.
 `
 
 // versionString is reported by --version, /api/status and `vellum agent`.
-const versionString = "0.11.1"
+const versionString = "0.12.0"
 
 // documentColumns is the explicit projection used everywhere (never SELECT *,
 // so the scan order is fixed even if the schema gains columns).
@@ -185,7 +185,7 @@ func cmdIngest(cfg *config.Config, args []string) {
 		log.Fatalf("ingest needs at least one path")
 	}
 	conn := mustOpen(cfg)
-	st, err := ingest.Ingest(cfg, conn, fs.Args(), *reprocess, nil)
+	st, err := ingest.Ingest(nil, cfg, conn, fs.Args(), *reprocess, nil)
 	if err != nil {
 		log.Fatalf("ingest: %s", err)
 	}
@@ -229,7 +229,7 @@ func cmdProcess(cfg *config.Config, args []string) {
 	}
 
 	conn := mustOpen(cfg)
-	results, err := ingest.ProcessPending(cfg, conn, v, ids, *limit,
+	results, err := ingest.ProcessPending(nil, cfg, conn, v, ids, *limit,
 		func(msg string) { log.Printf("  %s", msg) })
 	if err != nil {
 		log.Fatalf("process: %s", err)
@@ -925,7 +925,7 @@ func cmdRegenerate(cfg *config.Config, args []string) {
 		log.Fatalf("no chat backend at %s (llm.backend=%s) — start ollama/the vellum launcher or your own llama-server",
 			cfg.Tools.LLMURL, cfg.LLM.Backend)
 	}
-	applied, err := ingest.Regenerate(cfg, conn, v, id, fields,
+	applied, err := ingest.Regenerate(nil, cfg, conn, v, id, fields,
 		func(msg string) { fmt.Println("  …", msg) })
 	if err != nil {
 		log.Fatalf("regenerate: %s", err)

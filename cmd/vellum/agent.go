@@ -120,10 +120,14 @@ explicitly re-generates kind/category):
     vellum regenerate ID [meta|summary|tags|category|kind ...]
     POST /api/documents/{id}/regenerate {"fields":["summary","tags"]}
 
-## Queued execution
-process / regenerate / reextract / ingest run through ONE FIFO queue:
-a second request waits its turn ("queued — N job(s) ahead" appears in
-/api/progress); results arrive strictly in request order.
+## Jobs: queue + cancellation
+process / regenerate / reextract / ingest run through ONE FIFO queue;
+results arrive strictly in request order. Every job appears in the
+Jobs API/UI and can be cancelled individually: queued jobs leave the
+queue instantly; running ones stop cooperatively before their next
+unit of work (file / document / section / page / LLM call).
+    GET  /api/jobs              # [{id, kind, label, status, message, ...}]
+    POST /api/jobs/{id}/cancel  # queued=leave, running=stop at next unit
 
 ## Settings API (live config)
     GET /api/config                 # editable subset (api keys masked)

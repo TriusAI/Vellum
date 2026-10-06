@@ -249,7 +249,7 @@ func TestE2E(t *testing.T) {
 	}
 
 	// ---- ingest
-	st, err := ingest.Ingest(cfg, conn, []string{lib}, false, nil)
+	st, err := ingest.Ingest(nil, cfg, conn, []string{lib}, false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -327,7 +327,7 @@ The rain began before the road did, and the field kept its own counsel.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ingest.ProcessPending(cfg, conn, v, nil, 0, nil); err != nil {
+	if _, err := ingest.ProcessPending(nil, cfg, conn, v, nil, 0, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -380,7 +380,7 @@ The rain began before the road did, and the field kept its own counsel.
 	}
 
 	// ingest the book, verify kind detection
-	stBook, err := ingest.Ingest(cfg, conn, []string{bookPath}, false, nil)
+	stBook, err := ingest.Ingest(nil, cfg, conn, []string{bookPath}, false, nil)
 	if err != nil || stBook.Added != 1 {
 		t.Fatalf("book not ingested: %+v (%v)", stBook, err)
 	}
@@ -401,11 +401,11 @@ The rain began before the road did, and the field kept its own counsel.
 	if err := os.WriteFile(longPath, []byte(longText), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	st2, err := ingest.Ingest(cfg, conn, []string{longPath}, false, nil)
+	st2, err := ingest.Ingest(nil, cfg, conn, []string{longPath}, false, nil)
 	if err != nil || st2.Added != 1 {
 		t.Fatalf("long doc not ingested: %+v (%v)", st2, err)
 	}
-	longResults, err := ingest.ProcessPending(cfg, conn, v, nil, 0, nil)
+	longResults, err := ingest.ProcessPending(nil, cfg, conn, v, nil, 0, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -440,7 +440,7 @@ The rain began before the road did, and the field kept its own counsel.
 	}
 
 	// ---- per-id processing: re-run one document by id
-	one, err := ingest.ProcessPending(cfg, conn, v, []int64{1}, 0, nil)
+	one, err := ingest.ProcessPending(nil, cfg, conn, v, []int64{1}, 0, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -5,8 +5,10 @@
 package ingest
 
 import (
+	"context"
 	"crypto/sha256"
 	"database/sql"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -39,6 +41,7 @@ type FileResult struct {
 // Stats summarizes an ingest run.
 type Stats struct {
 	Added, Updated, Skipped, Failed int
+	Cancelled                       bool         `json:"cancelled,omitempty"`
 	Files                           []FileResult `json:"files"`
 }
 
@@ -71,11 +74,19 @@ type ProcessResult struct {
 // only — OCR work on raster-heavy pages is deferred to the processing
 // phase (documents land with ocr_pending=1). progress (may be nil)
 // receives per-file updates for UI feedback.
-func Ingest(cfg *config.Config, conn *sql.DB, paths []string, reprocess bool,
-	progress func(string)) (*Stats, error) {
+func Ingest(ctx context.Context, cfg *config.Config, conn *sql.DB, paths []string,
+	reprocess bool, progress func(string)) (*Stats, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	st := &Stats{Files: []FileResult{}}
 	files := collectFiles(paths)
+	cancelled := false
 	for i, path := range files {
+		if err := orCtxIn(ctx).Err(); err != nil {
+			cancelled = true
+			break
+		}
 		if progress != nil {
 			progress(fmt.Sprintf("ingesting %d/%d: %s",
 				i+1, len(files), filepath.Base(path)))
@@ -90,6 +101,7 @@ func Ingest(cfg *config.Config, conn *sql.DB, paths []string, reprocess bool,
 		}
 		st.count(action)
 	}
+	st.Cancelled = cancelled
 	return st, nil
 }
 
@@ -239,8 +251,13 @@ func chunkTexts(chunks []db.Chunk) []string {
 // receives live updates. With ids empty it takes all pending
 // ('ingested') documents, limited by limit (0 = no limit); with ids it
 // processes exactly those, whatever their status.
-func ProcessPending(cfg *config.Config, conn *sql.DB, v *vocab.Vocabulary,
-	ids []int64, limit int, progress func(string)) ([]ProcessResult, error) {
+func ProcessPending(ctx context.Context, cfg *config.Config, conn *sql.DB, v *vocab.Vocabulary,
+	ids []int64, limit int, progress func(string),
+) ([]ProcessResult, error) {
+	ctx = orCtxIn(ctx)
+	if err := ctxErrIn(ctx); err != nil {
+		return nil, err
+	}
 	type docRow struct {
 		id                               int64
 		path, title, authors, year, kind string
@@ -290,13 +307,23 @@ func ProcessPending(cfg *config.Config, conn *sql.DB, v *vocab.Vocabulary,
 
 	results := []ProcessResult{}
 	for i, d := range docs {
+		if err := ctxErrIn(ctx); err != nil {
+			progress("cancelled")
+			break
+		}
 		if progress != nil {
 			progress(fmt.Sprintf("document %d/%d: %s", i+1, len(docs), filepath.Base(d.path)))
 		}
 		log.Printf("processing %s", d.path)
-		res, err := processOne(cfg, conn, v, d.id, d.title, d.authors, d.year,
+		res, err := processOne(ctx, cfg, conn, v, d.id, d.title, d.authors, d.year,
 			d.path, d.kind, progress)
 		if err != nil {
+			if errors.Is(err, summarize.ErrCancelled) || orCtxIn(ctx).Err() != nil {
+				// stop: the current document keeps status='ingested'
+				// (pending) and is simply tried again next time
+				progress("cancelled")
+				break
+			}
 			log.Printf("processing failed for %s: %s", d.path, err)
 			conn.Exec("UPDATE documents SET status='error', error=? WHERE id=?",
 				err.Error(), d.id)
@@ -311,8 +338,13 @@ func ProcessPending(cfg *config.Config, conn *sql.DB, v *vocab.Vocabulary,
 	return results, nil
 }
 
-func processOne(cfg *config.Config, conn *sql.DB, v *vocab.Vocabulary,
-	docID int64, title, authors, year, path, kind string, progress func(string)) (*summarize.TagResult, error) {
+func processOne(ctx context.Context, cfg *config.Config, conn *sql.DB, v *vocab.Vocabulary,
+	docID int64, title, authors, year, path, kind string,
+	progress func(string),
+) (*summarize.TagResult, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if progress == nil {
 		progress = func(string) {}
 	}
@@ -418,7 +450,7 @@ func processOne(cfg *config.Config, conn *sql.DB, v *vocab.Vocabulary,
 			if len(opening) > 3000 {
 				opening = opening[:3000]
 			}
-			tags, err := summarize.TagDocumentWithCategories(cfg, v, existingCategories,
+			tags, err := summarize.TagDocumentWithCategories(ctx, cfg, v, existingCategories,
 				[]string{abstract, opening}, nil, abstract, progress)
 			if err != nil {
 				return nil, err
@@ -450,7 +482,7 @@ func processOne(cfg *config.Config, conn *sql.DB, v *vocab.Vocabulary,
 				if toc := classify.ExtractTOC(text); toc != "" {
 					tagInput = append(tagInput, "Contents:\n"+toc)
 				}
-				tags, terr := summarize.TagDocumentWithCategories(cfg, v,
+				tags, terr := summarize.TagDocumentWithCategories(ctx, cfg, v,
 					existingCategories, tagInput, nil, front, progress)
 				if terr != nil {
 					return nil, terr
@@ -471,12 +503,15 @@ func processOne(cfg *config.Config, conn *sql.DB, v *vocab.Vocabulary,
 	// one map phase feeds both the summary and the tagging call —
 	// long documents are tagged from summaries + opening text, not by
 	// re-sending a huge raw-text prefix
-	produced, err := produceSummary(cfg, kind, text, progress)
+	produced, err := produceSummary(ctx, cfg, kind, text, progress)
 	if err != nil {
+		if errors.Is(err, summarize.ErrCancelled) {
+			return nil, err
+		}
 		return nil, err
 	}
 	summary := produced.Summary
-	tags, err := summarize.TagDocumentWithCategories(cfg, v, existingCategories,
+	tags, err := summarize.TagDocumentWithCategories(ctx, cfg, v, existingCategories,
 		produced.TagChunks, produced.TagSummaries, summary, progress)
 	if err != nil {
 		return nil, err
@@ -551,6 +586,26 @@ func storeProcessed(conn *sql.DB, docID int64, title, authors, year string,
 	return db.SetTags(conn, docID, pairs)
 }
 
+// orCtxIn tolerates a nil context (internal callers).
+func orCtxIn(ctx context.Context) context.Context {
+	if ctx == nil {
+		return context.Background()
+	}
+	return ctx
+}
+
+// ctxErrIn reports ErrCancelled when the context is done.
+func ctxErrIn(ctx context.Context) error {
+	if err := orCtxIn(ctx).Err(); err != nil {
+		return ErrCancelled
+	}
+	return nil
+}
+
+// ErrCancelled is ingest's sentinel when a job context was cancelled
+// mid-run (alias of summarize.ErrCancelled).
+var ErrCancelled = summarize.ErrCancelled
+
 // produced carries the summary and the inputs the tagging call wants.
 type produced struct {
 	Summary      string
@@ -562,8 +617,11 @@ type produced struct {
 // produceSummary generates a document's summary using the kind's fast
 // path where possible (extracted abstract / front matter), else the
 // map-reduce. Shared by full processing and per-field regeneration.
-func produceSummary(cfg *config.Config, kind, text string,
+func produceSummary(ctx context.Context, cfg *config.Config, kind, text string,
 	progress func(string)) (*produced, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if progress == nil {
 		progress = func(string) {}
 	}
@@ -587,11 +645,11 @@ func produceSummary(cfg *config.Config, kind, text string,
 				TagChunks: tagInput}, nil
 		}
 	}
-	summaries, chunks, err := summarize.MapSummaries(cfg, text, progress)
+	summaries, chunks, err := summarize.MapSummaries(ctx, cfg, text, progress)
 	if err != nil {
 		return nil, err
 	}
-	summary, err := summarize.SummarizeFrom(cfg, chunks, summaries, progress)
+	summary, err := summarize.SummarizeFrom(ctx, cfg, chunks, summaries, progress)
 	if err != nil {
 		return nil, err
 	}
@@ -608,8 +666,12 @@ func produceSummary(cfg *config.Config, kind, text string,
 //	"kind"     deterministic reclassify on the current text (no LLM)
 //
 // Unknown fields are ignored; returns the applied field names.
-func Regenerate(cfg *config.Config, conn *sql.DB, v *vocab.Vocabulary,
-	docID int64, fields []string, progress func(string)) ([]string, error) {
+func Regenerate(ctx context.Context, cfg *config.Config, conn *sql.DB, v *vocab.Vocabulary,
+	docID int64, fields []string, progress func(string),
+) ([]string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if progress == nil {
 		progress = func(string) {}
 	}
@@ -644,7 +706,7 @@ func Regenerate(cfg *config.Config, conn *sql.DB, v *vocab.Vocabulary,
 	fullTagCall := want["tags"] || (want["category"] && len(text) > 0)
 	if want["meta"] && !want["tags"] {
 		progress("re-generating title/authors/year")
-		mr, err := summarize.RegenMeta(cfg, opening)
+		mr, err := summarize.RegenMeta(ctx, cfg, opening)
 		if err != nil {
 			return applied, err
 		}
@@ -675,7 +737,7 @@ func Regenerate(cfg *config.Config, conn *sql.DB, v *vocab.Vocabulary,
 
 	if want["summary"] {
 		progress("re-generating summary")
-		produced, err := produceSummary(cfg, kind, text, progress)
+		produced, err := produceSummary(ctx, cfg, kind, text, progress)
 		if err != nil {
 			return applied, err
 		}
@@ -716,7 +778,10 @@ func Regenerate(cfg *config.Config, conn *sql.DB, v *vocab.Vocabulary,
 		if summary != "" {
 			tagSummaries = []string{summary}
 		}
-		tr, err := summarize.TagDocumentWithCategories(cfg, v, existingCategories,
+		if err := ctxErrIn(ctx); err != nil {
+			return applied, err
+		}
+		tr, err := summarize.TagDocumentWithCategories(ctx, cfg, v, existingCategories,
 			tagChunks, tagSummaries, summary, progress)
 		if err != nil {
 			return applied, err

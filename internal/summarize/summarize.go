@@ -10,6 +10,7 @@
 package summarize
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
@@ -93,16 +94,37 @@ func tagSchema(enum []string) map[string]any {
 	}
 }
 
-func chat(cfg *config.Config, prompt string, schema map[string]any) (map[string]any, error) {
+func orBG(ctx context.Context) context.Context {
+	if ctx == nil {
+		return context.Background()
+	}
+	return ctx
+}
+
+func chat(ctx context.Context, cfg *config.Config, prompt string,
+	schema map[string]any) (map[string]any, error) {
+	promptMsgs := []llm.Message{{Role: "user", Content: prompt}}
+	var out map[string]any
+	var err error
 	// ollama backend: same grammar-structured call through its native API
 	if cfg.LLM.Backend == "ollama" {
-		return llm.OllamaChatJSON(cfg.Tools.LLMURL, cfg.LLM.Model,
-			[]llm.Message{{Role: "user", Content: prompt}},
+		out, err = llm.OllamaChatJSON(orBG(ctx), cfg.Tools.LLMURL, cfg.LLM.Model,
+			promptMsgs,
 			schema, cfg.LLM.Think, cfg.LLM.Temperature, cfg.LLM.NumCtx)
+	} else {
+		out, err = llm.ChatJSON(orBG(ctx), cfg.Tools.LLMURL,
+			promptMsgs,
+			schema, cfg.LLM.Think, cfg.LLM.Temperature)
 	}
-	return llm.ChatJSON(cfg.Tools.LLMURL,
-		[]llm.Message{{Role: "user", Content: prompt}},
-		schema, cfg.LLM.Think, cfg.LLM.Temperature)
+	if err != nil {
+		// an aborted job kills the HTTP call mid-flight; normalize it
+		// to the cancel sentinel so callers treat it as cancellation
+		if orBG(ctx).Err() != nil {
+			return nil, ErrCancelled
+		}
+		return nil, err
+	}
+	return out, nil
 }
 
 // chunkText splits on paragraph boundaries close to the target size.
@@ -164,15 +186,19 @@ func report(cb ProgressFunc, format string, args ...any) {
 	}
 }
 
-func MapSummaries(cfg *config.Config, text string, cb ProgressFunc) ([]string, []string, error) {
+func MapSummaries(ctx context.Context, cfg *config.Config, text string,
+	cb ProgressFunc) ([]string, []string, error) {
 	chunks := chunkText(text, cfg.Summarize.ChunkChars)
 	if len(chunks) <= 1 {
 		return nil, chunks, nil
 	}
 	summaries := make([]string, 0, len(chunks))
 	for i, c := range chunks {
+		if err := ctxErr(ctx, nil); err != nil {
+			return nil, nil, err
+		}
 		report(cb, "summarizing section %d/%d", i+1, len(chunks))
-		out, err := chat(cfg, strings.ReplaceAll(mapPrompt, "{text}", c), summarySchema)
+		out, err := chat(ctx, cfg, strings.ReplaceAll(mapPrompt, "{text}", c), summarySchema)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -183,23 +209,43 @@ func MapSummaries(cfg *config.Config, text string, cb ProgressFunc) ([]string, [
 
 // Summarize produces one paragraph via map-reduce; short documents get a
 // single direct pass.
+// ErrCancelled is the sentinel a stopped map/reduce returns; the
+// caller decides whether that's a cancel (job system) or an error.
+var ErrCancelled = fmt.Errorf("cancelled")
+
+// stoppedFn is the legacy stop check (kept for callers that hold no
+// context).
+type stoppedFn = func() bool
+
+// ctxErr reports ErrCancelled when the context is done (or the legacy
+// stop flag fired).
+func ctxErr(ctx context.Context, stopped stoppedFn) error {
+	if stopped != nil && stopped() {
+		return ErrCancelled
+	}
+	if err := orBG(ctx).Err(); err != nil {
+		return ErrCancelled
+	}
+	return nil
+}
+
 func Summarize(cfg *config.Config, text string) (string, error) {
-	summaries, chunks, err := MapSummaries(cfg, text, nil)
+	summaries, chunks, err := MapSummaries(nil, cfg, text, nil)
 	if err != nil {
 		return "", err
 	}
-	return SummarizeFrom(cfg, chunks, summaries, nil)
+	return SummarizeFrom(nil, cfg, chunks, summaries, nil)
 }
 
 // SummarizeFrom finishes the summarization: direct pass for short documents,
 // hierarchical reduce for long ones (chunk summaries are merged in batches
 // until one final call fits the context window).
-func SummarizeFrom(cfg *config.Config, chunks, summaries []string, cb ProgressFunc) (string, error) {
+func SummarizeFrom(ctx context.Context, cfg *config.Config, chunks, summaries []string, cb ProgressFunc) (string, error) {
 	if summaries == nil {
 		// short document: single direct pass over the (budgeted) text
 		report(cb, "summarizing document")
 		body := budgeted(cfg, strings.Join(chunks, "\n\n"))
-		out, err := chat(cfg, strings.ReplaceAll(directPrompt, "{text}", body), summarySchema)
+		out, err := chat(ctx, cfg, strings.ReplaceAll(directPrompt, "{text}", body), summarySchema)
 		if err != nil {
 			return "", err
 		}
@@ -219,7 +265,7 @@ func SummarizeFrom(cfg *config.Config, chunks, summaries []string, cb ProgressFu
 		}
 		report(cb, "reducing %d section summaries", len(summaries))
 		if len(summaries) <= 1 || total <= budgetChars {
-			return reduceCall(cfg, summaries)
+			return reduceCall(ctx, cfg, summaries)
 		}
 
 		// pack into batches that each fit the budget
@@ -238,13 +284,13 @@ func SummarizeFrom(cfg *config.Config, chunks, summaries []string, cb ProgressFu
 			batches = append(batches, cur)
 		}
 		if len(batches) <= 1 {
-			return reduceCall(cfg, summaries)
+			return reduceCall(ctx, cfg, summaries)
 		}
 		level++
 		report(cb, "reduce level %d: %d batches", level, len(batches))
 		next := make([]string, 0, len(batches))
 		for _, b := range batches {
-			out, err := reduceCall(cfg, b)
+			out, err := reduceCall(ctx, cfg, b)
 			if err != nil {
 				return "", err
 			}
@@ -254,10 +300,10 @@ func SummarizeFrom(cfg *config.Config, chunks, summaries []string, cb ProgressFu
 	}
 }
 
-func reduceCall(cfg *config.Config, summaries []string) (string, error) {
+func reduceCall(ctx context.Context, cfg *config.Config, summaries []string) (string, error) {
 	prompt := strings.ReplaceAll(reducePrompt, "{summaries}",
 		strings.Join(summaries, "\n---\n"))
-	out, err := chat(cfg, prompt, summarySchema)
+	out, err := chat(ctx, cfg, prompt, summarySchema)
 	if err != nil {
 		return "", err
 	}
@@ -283,16 +329,17 @@ type TagResult struct {
 // raw-text prefix — cheaper and enough signal for topic tagging.
 func TagDocument(cfg *config.Config, v *vocab.Vocabulary,
 	chunks, summaries []string, finalSummary string, cb ProgressFunc) (*TagResult, error) {
-	return TagDocumentWithCategories(cfg, v, nil, chunks, summaries, finalSummary, cb)
+	return TagDocumentWithCategories(nil, cfg, v, nil, chunks, summaries, finalSummary, cb)
 }
 
 // TagDocumentWithCategories is TagDocument plus the library's existing
 // categories, which the model is told to reuse when one fits (so
 // auto-categorization consolidates shelves instead of inventing one per
 // document).
-func TagDocumentWithCategories(cfg *config.Config, v *vocab.Vocabulary,
+func TagDocumentWithCategories(ctx context.Context, cfg *config.Config, v *vocab.Vocabulary,
 	categories []string, chunks, summaries []string, finalSummary string,
 	cb ProgressFunc) (*TagResult, error) {
+	ctx = orBG(ctx)
 
 	var input string
 	if len(summaries) > 0 {
@@ -324,7 +371,7 @@ func TagDocumentWithCategories(cfg *config.Config, v *vocab.Vocabulary,
 	}())
 	prompt = strings.ReplaceAll(prompt, "{text}", input)
 
-	out, err := chat(cfg, prompt, tagSchema(v.SortedKeys()))
+	out, err := chat(ctx, cfg, prompt, tagSchema(v.SortedKeys()))
 	if err != nil {
 		return nil, err
 	}
@@ -428,8 +475,8 @@ func metaSchema() map[string]any {
 
 // RegenMeta reconstructs title/authors/year from the opening text with
 // one constrained call — the per-field repair for bad metadata.
-func RegenMeta(cfg *config.Config, opening string) (*TagResult, error) {
-	out, err := chat(cfg, strings.ReplaceAll(metaPrompt, "{text}", opening),
+func RegenMeta(ctx context.Context, cfg *config.Config, opening string) (*TagResult, error) {
+	out, err := chat(ctx, cfg, strings.ReplaceAll(metaPrompt, "{text}", opening),
 		metaSchema())
 	if err != nil {
 		return nil, err

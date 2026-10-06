@@ -4,9 +4,11 @@
 package api
 
 import (
+	"context"
 	"database/sql"
 	"embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"net"
@@ -28,6 +30,7 @@ import (
 	"vellum/internal/ingest"
 	"vellum/internal/llm"
 	"vellum/internal/search"
+	"vellum/internal/summarize"
 	"vellum/internal/vocab"
 )
 
@@ -36,65 +39,156 @@ var webFS embed.FS
 
 // Server wires config + db to the HTTP handlers. The vocabulary is re-read
 // from disk on every mutation so manual edits to vocab.yaml are picked up.
+type Job struct {
+	ID         int64     `json:"id"`
+	Kind       string    `json:"kind"`
+	Label      string    `json:"label"`
+	Status     string    `json:"status"` // queued|running|done|error|cancelled
+	Message    string    `json:"message,omitempty"`
+	Error      string    `json:"error,omitempty"`
+	CreatedAt  time.Time `json:"created_at"`
+	StartedAt  time.Time `json:"started_at,omitempty"`
+	FinishedAt time.Time `json:"finished_at,omitempty"`
+
+	cancel context.CancelFunc
+	ctx    context.Context
+}
+
+// Stopped reports cooperative-cancellation state (checked by long
+// loops between units of work).
+func (j *Job) Stopped() bool { return j.ctx.Err() != nil }
+
+type jobWaiter struct {
+	job  *Job
+	turn chan struct{}
+}
+
 type Server struct {
 	cfg  *config.Config
 	conn *sql.DB
 
 	mu       sync.Mutex
-	progress map[string]any // live processing state (single-user tool)
+	progress map[string]any // live state for /api/progress (running job)
 
-	// llmJobs FIFO-serializes the slow mutating operations (process,
-	// regenerate, reextract, ingest): a second request queues until the
-	// first finishes, fulfilling requests strictly in arrival order.
-	queueMu     sync.Mutex
-	jobsBusy    bool
-	jobsWaiters []chan struct{}
+	// jobs: FIFO queue + history for /api/jobs (single-user tool).
+	jobsMu     sync.Mutex
+	jobs       []*Job
+	jobsSeq    int64
+	jobRunning *Job
+	waiters    []*jobWaiter
 }
 
-// takeTurn blocks until it is this caller's turn and returns the
-// release function. FIFO: first requester first served.
-func (s *Server) takeTurn() func() {
-	s.queueMu.Lock()
-	if !s.jobsBusy {
-		s.jobsBusy = true
-		s.queueMu.Unlock()
-		return func() {
-			s.queueMu.Lock()
-			s.jobsBusy = false
-			if n := len(s.jobsWaiters); n > 0 {
-				w := s.jobsWaiters[0]
-				s.jobsWaiters = s.jobsWaiters[1:]
-				s.jobsBusy = true // handed to the waiter
-				close(w)
-			}
-			s.queueMu.Unlock()
-		}
-	}
-	done := make(chan struct{})
-	s.jobsWaiters = append(s.jobsWaiters, done)
-	depth := len(s.jobsWaiters)
-	s.queueMu.Unlock()
-
+// jobProgress records the job's live message (also surfaces on
+// /api/progress for the notice bar).
+func (s *Server) jobProgress(j *Job, msg string) {
+	j.Message = msg
 	s.mu.Lock()
 	s.progress = map[string]any{
-		"running": true,
-		"message": fmt.Sprintf("queued — %d job(s) ahead of you", depth),
-		"updated": time.Now().Format(time.RFC3339),
+		"running": j.Status == "running" || j.Status == "queued",
+		"message": msg, "updated": time.Now().Format(time.RFC3339),
 	}
 	s.mu.Unlock()
-	<-done
-	return func() {
-		s.queueMu.Lock()
-		if n := len(s.jobsWaiters); n > 0 {
-			w := s.jobsWaiters[0]
-			s.jobsWaiters = s.jobsWaiters[1:]
-			s.jobsBusy = true
-			close(w)
-		} else {
-			s.jobsBusy = false
-		}
-		s.queueMu.Unlock()
+}
+
+func (s *Server) finishJob(j *Job, status, errMsg string) {
+	j.Status = status
+	if errMsg != "" {
+		j.Error = errMsg
 	}
+	j.FinishedAt = time.Now()
+	s.mu.Lock()
+	s.progress = map[string]any{"running": false, "message": "",
+		"updated": time.Now().Format(time.RFC3339)}
+	s.mu.Unlock()
+}
+
+// runJob runs one slow operation through the FIFO queue. work may call
+// j.Report via s.jobProgress for live messages and check j.Stopped()
+// for cooperative cancellation. Returns the final job state.
+func (s *Server) runJob(kind, label string, work func(j *Job) error) *Job {
+	j := &Job{Kind: kind, Label: label, Status: "queued",
+		CreatedAt: time.Now()}
+	j.ctx, j.cancel = context.WithCancel(context.Background())
+
+	s.jobsMu.Lock()
+	s.jobsSeq++
+	j.ID = s.jobsSeq
+	s.jobs = append(s.jobs, j)
+	// keep history bounded: drop oldest FINISHED entries beyond 40
+	for len(s.jobs) > 40 {
+		dropped := false
+		for i, x := range s.jobs {
+			if x.Status != "queued" && x.Status != "running" {
+				s.jobs = append(s.jobs[:i], s.jobs[i+1:]...)
+				dropped = true
+				break
+			}
+		}
+		if !dropped {
+			break
+		}
+	}
+	if s.jobRunning == nil {
+		s.jobRunning = j
+		s.jobsMu.Unlock()
+	} else {
+		w := &jobWaiter{job: j, turn: make(chan struct{})}
+		s.waiters = append(s.waiters, w)
+		s.jobsMu.Unlock()
+		select {
+		case <-w.turn:
+			if j.Stopped() {
+				// cancelled right as the turn arrived
+				s.jobsMu.Lock()
+				if s.jobRunning == j {
+					s.jobRunning = nil
+					// pass the turn on (below's unlock section)
+					s.jobRunning = nil
+				}
+				s.jobsMu.Unlock()
+				s.finishJob(j, "cancelled", "")
+				return j
+			}
+		case <-j.ctx.Done():
+			s.jobsMu.Lock()
+			for i, x := range s.waiters {
+				if x.job == j {
+					s.waiters = append(s.waiters[:i], s.waiters[i+1:]...)
+					break
+				}
+			}
+			s.jobsMu.Unlock()
+			s.finishJob(j, "cancelled", "")
+			return j
+		}
+	}
+	j.Status = "running"
+	j.StartedAt = time.Now()
+	err := work(j)
+	switch {
+	case j.Stopped():
+		s.finishJob(j, "cancelled", "")
+	case err != nil:
+		s.finishJob(j, "error", err.Error())
+	default:
+		s.finishJob(j, "done", "")
+	}
+	// hand the turn over to the next still-interested waiter
+	s.jobsMu.Lock()
+	s.jobRunning = nil
+	for len(s.waiters) > 0 {
+		w := s.waiters[0]
+		s.waiters = s.waiters[1:]
+		if w.job.Stopped() {
+			close(w.turn) // wake it so it cleans itself up
+			continue
+		}
+		s.jobRunning = w.job
+		close(w.turn)
+		break
+	}
+	s.jobsMu.Unlock()
+	return j
 }
 
 // New creates a Server.
@@ -125,6 +219,8 @@ func (s *Server) Mux() http.Handler {
 	mux.HandleFunc("GET /api/config", s.getConfig)
 	mux.HandleFunc("PUT /api/config", s.putConfig)
 	mux.HandleFunc("POST /api/documents/{id}/ask", s.postAsk)
+	mux.HandleFunc("GET /api/jobs", s.jobList)
+	mux.HandleFunc("POST /api/jobs/{id}/cancel", s.jobCancel)
 	mux.HandleFunc("GET /api/search", s.search)
 	mux.HandleFunc("GET /api/vocab", s.getVocab)
 	mux.HandleFunc("GET /api/vocab/suggestions", s.suggestions)
@@ -674,24 +770,20 @@ func (s *Server) postIngest(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "paths[] required")
 		return
 	}
-	release := s.takeTurn()
-	defer release()
-	s.mu.Lock()
-	s.progress = map[string]any{"running": true, "message": "ingesting", "updated": time.Now().Format(time.RFC3339)}
-	s.mu.Unlock()
-	st, err := ingest.Ingest(s.cfg, s.conn, body.Paths, body.Reprocess,
-		func(msg string) {
-			s.mu.Lock()
-			s.progress = map[string]any{"running": true, "message": msg,
-				"updated": time.Now().Format(time.RFC3339)}
-			s.mu.Unlock()
-		})
-	s.mu.Lock()
-	s.progress = map[string]any{"running": false, "message": "", "updated": time.Now().Format(time.RFC3339)}
-	s.mu.Unlock()
-	if err != nil {
-		writeErr(w, 500, err.Error())
-		return
+	label := fmt.Sprintf("ingest %d path(s)", len(body.Paths))
+	var ingestStats *ingest.Stats
+	job := s.runJob("ingest", label, func(j *Job) error {
+		var err error
+		ingestStats, err = ingest.Ingest(j.ctx, s.cfg, s.conn, body.Paths,
+			body.Reprocess,
+			func(msg string) { s.jobProgress(j, msg) })
+		return err
+	})
+	st := ingestStats
+	if st == nil {
+		st = &ingest.Stats{Cancelled: job.Status == "cancelled"}
+	} else if job.Status == "cancelled" {
+		st.Cancelled = true
 	}
 	writeJSON(w, 200, st)
 }
@@ -777,77 +869,73 @@ func (s *Server) reextract(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 409, "source file missing: "+path)
 		return
 	}
-	release := s.takeTurn()
-	defer release()
-	progress := func(msg string) {
-		s.mu.Lock()
-		s.progress = map[string]any{"running": true, "message": msg,
-			"updated": time.Now().Format(time.RFC3339)}
-		s.mu.Unlock()
-	}
+	label := fmt.Sprintf("re-extract #%d", id)
 	var res *extract.Result
-	switch {
-	case body.Force && len(body.Pages) > 0:
-		// per-page repair: the named pages + any previously repaired
-		// pages stay OCR-backed after the fresh text pass
-		progress(fmt.Sprintf(
-			"re-extracting text (OCR forced on %d page(s))", len(body.Pages)))
-		var want []int
-		for _, p := range body.Pages {
-			if p >= 1 {
-				want = append(want, int(p))
+	var extractErr error
+	s.runJob("reextract", label, func(j *Job) error {
+		progress := func(msg string) { s.jobProgress(j, msg) }
+		switch {
+		case body.Force && len(body.Pages) > 0:
+			// per-page repair: the named pages + any previously repaired
+			// pages stay OCR-backed after the fresh text pass
+			progress(fmt.Sprintf(
+				"re-extracting text (OCR forced on %d page(s))", len(body.Pages)))
+			var want []int
+			for _, p := range body.Pages {
+				if p >= 1 {
+					want = append(want, int(p))
+				}
 			}
+			for _, p := range vellumParseStoredPages(donePages) {
+				want = append(want, p)
+			}
+			if res, err = extract.ExtractOCRPages(path, s.cfg, true, want); err != nil {
+				return err
+			}
+			s.conn.Exec("UPDATE documents SET ocr_done_pages=? WHERE id=?",
+				vellumStoreDonePages(want), id)
+		case body.Force:
+			progress("re-extracting text (OCR forced on every page)")
+			res, err = extract.ExtractOCR(path, s.cfg)
+			if err == nil {
+				s.conn.Exec("UPDATE documents SET ocr_done_pages='all' WHERE id=?", id)
+			}
+		default:
+			progress("re-extracting text")
+			res, err = extract.Extract(path, s.cfg)
 		}
-		for _, p := range vellumParseStoredPages(donePages) {
-			want = append(want, p)
+		if err != nil {
+			return err
 		}
-		if res, err = extract.ExtractOCRPages(path, s.cfg, true, want); err != nil {
-			writeErr(w, 500, err.Error())
-			return
+		if err := db.ReplaceDocumentText(s.conn, id, res.Chunks); err != nil {
+			return err
 		}
-		s.conn.Exec("UPDATE documents SET ocr_done_pages=? WHERE id=?",
-			vellumStoreDonePages(want), id)
-	case body.Force:
-		progress("re-extracting text (OCR forced on every page)")
-		res, err = extract.ExtractOCR(path, s.cfg)
-		if err == nil {
-			s.conn.Exec("UPDATE documents SET ocr_done_pages='all' WHERE id=?", id)
+		var kindUser int64
+		s.conn.QueryRow("SELECT kind_user FROM documents WHERE id=?", id).Scan(&kindUser)
+		if kindUser == 0 && len(res.Chunks) > 0 {
+			text := ""
+			var sb strings.Builder
+			for _, c := range res.Chunks {
+				sb.WriteString(c.Text)
+				sb.WriteString("\n\n")
+				if sb.Len() > 200000 {
+					break
+				}
+			}
+			text = sb.String()
+			newKind, _ := classify.Detect(text, res.OCRPages, len(res.Chunks))
+			s.conn.Exec("UPDATE documents SET kind=?, kind_user=(SELECT kind_user FROM documents WHERE id=?), ocr_pages=?, n_pages=?, ocr_pending=0, status='ingested', error=NULL, processed_at=NULL WHERE id=?",
+				newKind, id, res.OCRPages, len(res.Chunks), id)
+		} else {
+			s.conn.Exec("UPDATE documents SET ocr_pages=?, n_pages=?, ocr_pending=0, status='ingested', error=NULL, processed_at=NULL WHERE id=?",
+				res.OCRPages, len(res.Chunks), id)
 		}
-	default:
-		progress("re-extracting text")
-		res, err = extract.Extract(path, s.cfg)
-	}
-	if err != nil {
-		writeErr(w, 500, err.Error())
+		return nil
+	})
+	if extractErr != nil {
+		writeErr(w, 500, extractErr.Error())
 		return
 	}
-	if err := db.ReplaceDocumentText(s.conn, id, res.Chunks); err != nil {
-		writeErr(w, 500, err.Error())
-		return
-	}
-	var kindUser int64
-	s.conn.QueryRow("SELECT kind_user FROM documents WHERE id=?", id).Scan(&kindUser)
-	if kindUser == 0 && len(res.Chunks) > 0 {
-		text := ""
-		var sb strings.Builder
-		for _, c := range res.Chunks {
-			sb.WriteString(c.Text)
-			sb.WriteString("\n\n")
-			if sb.Len() > 200000 {
-				break
-			}
-		}
-		text = sb.String()
-		newKind, _ := classify.Detect(text, res.OCRPages, len(res.Chunks))
-		s.conn.Exec("UPDATE documents SET kind=?, kind_user=(SELECT kind_user FROM documents WHERE id=?), ocr_pages=?, n_pages=?, ocr_pending=0, status='ingested', error=NULL, processed_at=NULL WHERE id=?",
-			newKind, id, res.OCRPages, len(res.Chunks), id)
-	} else {
-		s.conn.Exec("UPDATE documents SET ocr_pages=?, n_pages=?, ocr_pending=0, status='ingested', error=NULL, processed_at=NULL WHERE id=?",
-			res.OCRPages, len(res.Chunks), id)
-	}
-	s.mu.Lock()
-	s.progress = map[string]any{"running": false, "message": "", "updated": time.Now().Format(time.RFC3339)}
-	s.mu.Unlock()
 	s.document(w, r)
 }
 
@@ -871,27 +959,35 @@ func (s *Server) postProcess(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "vocab.yaml is empty — add tags first (see `vellum agent` docs)")
 		return
 	}
-	if !llm.Available(s.cfg.Tools.LLMURL) {
-		writeErr(w, 503, "no llama-server at "+s.cfg.Tools.LLMURL+
-			" — start it with the vellum launcher")
+	if !llm.AvailableFor(s.cfg.LLM.Backend, s.cfg.Tools.LLMURL) {
+		writeErr(w, 503, "no chat backend at "+s.cfg.Tools.LLMURL+
+			" (llm.backend="+s.cfg.LLM.Backend+") — start the vellum launcher or your own llama.cpp/ollama")
 		return
 	}
-	release := s.takeTurn()
-	defer release()
-	s.mu.Lock()
-	s.progress = map[string]any{"running": true, "message": "starting", "updated": time.Now().Format(time.RFC3339)}
-	s.mu.Unlock()
-	results, err := ingest.ProcessPending(s.cfg, s.conn, v, body.IDs, body.Limit,
-		func(msg string) {
-			s.mu.Lock()
-			s.progress = map[string]any{"running": true, "message": msg, "updated": time.Now().Format(time.RFC3339)}
-			s.mu.Unlock()
-		})
-	s.mu.Lock()
-	s.progress = map[string]any{"running": false, "message": "", "updated": time.Now().Format(time.RFC3339)}
-	s.mu.Unlock()
-	if err != nil {
-		writeErr(w, 500, err.Error())
+	label := "process pending"
+	if len(body.IDs) > 0 {
+		label = fmt.Sprintf("process %d document(s)", len(body.IDs))
+	}
+	var results []ingest.ProcessResult
+	var processErr error
+	cancelled := false
+	s.runJob("process", label, func(j *Job) error {
+		results, processErr = ingest.ProcessPending(j.ctx, s.cfg, s.conn, v,
+			body.IDs, body.Limit,
+			func(msg string) { s.jobProgress(j, msg) })
+		if processErr != nil || j.Stopped() {
+			cancelled = cancelled || j.Stopped() ||
+				errors.Is(processErr, summarize.ErrCancelled)
+		}
+		if processErr == nil && j.Stopped() {
+			return errJobCancelled
+		}
+		return processErr
+	})
+	_ = cancelled
+	if processErr != nil && !cancelled &&
+		!errors.Is(processErr, summarize.ErrCancelled) {
+		writeErr(w, 500, processErr.Error())
 		return
 	}
 	writeJSON(w, 200, results)
@@ -1211,21 +1307,24 @@ func (s *Server) regenerate(w http.ResponseWriter, r *http.Request) {
 			" (llm.backend="+s.cfg.LLM.Backend+")")
 		return
 	}
-	regenRelease := s.takeTurn()
-	defer regenRelease()
-	progress := func(msg string) {
-		s.mu.Lock()
-		s.progress = map[string]any{"running": true, "message": msg,
-			"updated": time.Now().Format(time.RFC3339)}
-		s.mu.Unlock()
-	}
-	_, err = ingest.Regenerate(s.cfg, s.conn, v, id, fields, progress)
-	s.mu.Lock()
-	s.progress = map[string]any{"running": false, "message": "",
-		"updated": time.Now().Format(time.RFC3339)}
-	s.mu.Unlock()
-	if err != nil {
-		writeErr(w, 500, err.Error())
+	label := "regenerate #" + strconv.FormatInt(id, 10) +
+		" (" + strings.Join(fields, ", ") + ")"
+	var regenErr error
+	var cancelled bool
+	s.runJob("regenerate", label, func(j *Job) error {
+		applied, err := ingest.Regenerate(j.ctx, s.cfg, s.conn, v, id, fields,
+			func(msg string) { s.jobProgress(j, msg) })
+		_ = applied
+		if errors.Is(err, summarize.ErrCancelled) || j.Stopped() {
+			cancelled = true
+			return nil
+		}
+		regenErr = err
+		return err
+	})
+	_ = cancelled
+	if regenErr != nil && !cancelled {
+		writeErr(w, 500, regenErr.Error())
 		return
 	}
 	s.document(w, r)
@@ -1532,4 +1631,60 @@ func (s *Server) putConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.getConfig(w, r)
+}
+
+// errJobCancelled marks a cooperative cancel inside runJob work.
+var errJobCancelled = errors.New("cancelled")
+
+// ------------------------------- jobs -------------------------------------
+
+// jobList: the queue + history for the Jobs dialog (newest last; the
+// UI sorts as it likes).
+func (s *Server) jobList(w http.ResponseWriter, r *http.Request) {
+	s.jobsMu.Lock()
+	defer s.jobsMu.Unlock()
+	out := make([]*Job, 0, len(s.jobs))
+	out = append(out, s.jobs...)
+	writeJSON(w, 200, map[string]any{
+		"jobs":    out,
+		"running": s.jobRunning != nil,
+	})
+}
+
+// jobCancel cancels a job: queued jobs leave the queue immediately;
+// running jobs stop at their next unit of work (file/document/section/
+// page). Idempotent: cancelling a finished job just reports its state.
+func (s *Server) jobCancel(w http.ResponseWriter, r *http.Request) {
+	id, err := pathID(r)
+	if err != nil {
+		writeErr(w, 400, "bad job id")
+		return
+	}
+	s.jobsMu.Lock()
+	var target *Job
+	for _, j := range s.jobs {
+		if j.ID == id {
+			target = j
+			break
+		}
+	}
+	if target == nil {
+		s.jobsMu.Unlock()
+		writeErr(w, 404, "no such job")
+		return
+	}
+	switch target.Status {
+	case "queued":
+		target.cancel() // the waiting submitter cleans up
+	case "running":
+		target.cancel() // cooperative: stops before the next unit
+	default:
+		s.jobsMu.Unlock()
+		writeJSON(w, 200, map[string]any{
+			"status": target.Status, "note": "already finished"})
+		return
+	}
+	status := target.Status
+	s.jobsMu.Unlock()
+	writeJSON(w, 200, map[string]any{"status": status, "id": id})
 }

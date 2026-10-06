@@ -31,6 +31,7 @@
     <button id="btn-process">Process pending <span id="pending-n"></span></button>
     <button id="btn-vocab">Vocabulary</button>
     <button id="btn-settings">Settings…</button>
+    <button id="btn-jobs">Jobs <span id="jobs-n"></span></button>
   </div>
 </header>
 
@@ -76,6 +77,12 @@
   <div class="row right"><button class="plain" id="vocab-close">Close</button></div>
 </dialog>
 
+<dialog id="dlg-jobs">
+  <h2>Jobs</h2>
+  <p class="hint">Queued and running work (process, regenerate, re-extract, ingest) — cancel any single job: queued ones leave the queue at once, running ones stop before their next step.</p>
+  <div id="jobs-list" style="max-height:52vh;overflow:auto"></div>
+  <div class="row right"><button class="plain" id="jobs-close">Close</button></div>
+</dialog>
 <dialog id="dlg-settings">
   <h2>Settings</h2>
   <p class="hint">Applied immediately to the running server and saved to config.yaml. Server LIFECYCLE (starting/stopping bundled llama-servers) needs a rerun of ./vellum.sh — it is safe to run again anytime.</p>

@@ -12,6 +12,7 @@ package llm
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -157,9 +158,11 @@ func TrimToTokenBudget(baseURL, text string, budgetTokens, overheadTokens int) (
 }
 
 // ChatJSON runs one chat call with a JSON-schema-constrained response and
-// decodes the JSON object.
-func ChatJSON(baseURL string, messages []Message, schema map[string]any,
+// decodes the JSON object; ctx (nil = background) aborts the HTTP call
+// mid-flight (job cancellation).
+func ChatJSON(ctx context.Context, baseURL string, messages []Message, schema map[string]any,
 	think bool, temperature float64) (map[string]any, error) {
+	ctx = orCtx(ctx)
 	req := chatRequest{
 		Messages: messages,
 		ResponseFormat: &responseFormat{Type: "json_schema",
@@ -171,7 +174,7 @@ func ChatJSON(baseURL string, messages []Message, schema map[string]any,
 	if !think {
 		req.ChatTemplateKwargs = map[string]any{"enable_thinking": false}
 	}
-	body, err := post(baseURL+"/v1/chat/completions", req)
+	body, err := postCtx(ctx, baseURL+"/v1/chat/completions", req)
 	if err != nil {
 		return nil, err
 	}
@@ -220,11 +223,31 @@ func Embed(baseURL string, texts []string) ([][]float32, error) {
 }
 
 func post(url string, payload any) ([]byte, error) {
+	return postCtx(nil, url, payload)
+}
+
+// orCtx tolerates nil contexts (callers that hold none).
+func orCtx(ctx context.Context) context.Context {
+	if ctx == nil {
+		return context.Background()
+	}
+	return ctx
+}
+
+// postCtx is post with cancellation: an aborted job's HTTP call dies
+// mid-flight instead of waiting for the LLM to finish.
+func postCtx(ctx context.Context, url string, payload any) ([]byte, error) {
 	data, err := json.Marshal(payload)
 	if err != nil {
 		return nil, err
 	}
-	resp, err := http.Post(url, "application/json", bytes.NewReader(data))
+	req, err := http.NewRequestWithContext(orCtx(ctx), "POST", url,
+		bytes.NewReader(data))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
