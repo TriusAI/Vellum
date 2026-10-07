@@ -93,6 +93,11 @@ vellum import vellum-library-20261007-033000.db   # replace (old kept aside)
 # remove documents from the index (files stay on disk — indexed in place)
 vellum remove 42 43
 
+# collections: user-managed groups of documents (research projects)
+vellum collection create applied-ml "ML x medicine"
+vellum collection add applied-ml 3 7 12
+vellum collection show applied-ml          # browse just this project's papers
+
 # 4. curate the vocabulary
 vellum vocab list
 vellum vocab review                          # what the LLM suggested beyond the vocabulary
@@ -102,6 +107,8 @@ vellum vocab add my-new-tag "what it covers"
 # 5. browse: local web UI. The main frame is a horizontal strip of
 #    pages: "All Documents" (the shelf tree, with per-shelf rename) plus
 #    one page per document view — [Summary], [Preview], [Text], [Ask].
+#    "Collections…" opens a Collections page for user-made research
+#    groups, each opening as its own [Collection] page.
 #    Pages can be re-ordered, drag-resized and expanded; search results
 #    show the matching snippet with a jump to the page; pending/error
 #    documents are marked in the list; long jobs get a cancel button in

@@ -349,6 +349,74 @@ func TestAPI(t *testing.T) {
 		t.Fatalf("merge-rename should move 1 document: %v", ren)
 	}
 
+	// ---- collections: user-managed groups of documents
+	var col map[string]any
+	request("POST", "/api/collections",
+		`{"name":"applied-ml","description":"ML x medicine"}`, &col, 200)
+	if col["name"] != "applied-ml" {
+		t.Fatalf("create collection: %v", col)
+	}
+	colID := strconv.Itoa(int(col["id"].(float64)))
+	request("POST", "/api/collections", `{"name":"applied-ml"}`, nil, 409) // dup
+	request("POST", "/api/collections", `{"name":"   "}`, nil, 400)        // empty
+
+	var addRes map[string]any
+	request("POST", "/api/collections/"+colID+"/documents",
+		`{"doc_ids":[`+pdfID+`,`+fmt.Sprint(mdID)+`]}`, &addRes, 200)
+	if addRes["added"].(float64) != 2 {
+		t.Fatalf("add to collection: %v", addRes)
+	}
+	// idempotent
+	request("POST", "/api/collections/"+colID+"/documents",
+		`{"doc_ids":[`+pdfID+`]}`, &addRes, 200)
+	if addRes["added"].(float64) != 0 {
+		t.Fatalf("re-adding a member must be a no-op: %v", addRes)
+	}
+
+	var colDetail struct {
+		Collection map[string]any   `json:"collection"`
+		Documents  []map[string]any `json:"documents"`
+	}
+	request("GET", "/api/collections/"+colID, "", &colDetail, 200)
+	if len(colDetail.Documents) != 2 {
+		t.Fatalf("collection should hold 2 documents, got %d", len(colDetail.Documents))
+	}
+	// the document detail carries its collections (for the Summary page)
+	var detColl struct {
+		Document    map[string]any   `json:"document"`
+		Collections []map[string]any `json:"collections"`
+	}
+	request("GET", "/api/documents/"+pdfID, "", &detColl, 200)
+	if len(detColl.Collections) != 1 || detColl.Collections[0]["name"] != "applied-ml" {
+		t.Fatalf("document.collections: %v", detColl.Collections)
+	}
+	// rename
+	var renCol map[string]any
+	request("PATCH", "/api/collections/"+colID,
+		`{"name":"applied-ml-2026"}`, &renCol, 200)
+	// remove one member
+	request("DELETE", "/api/collections/"+colID+"/documents/"+pdfID, "", nil, 200)
+	request("GET", "/api/collections/"+colID, "", &colDetail, 200)
+	if len(colDetail.Documents) != 1 {
+		t.Fatalf("after removal collection should hold 1, got %d", len(colDetail.Documents))
+	}
+	// list shows the collection with its count
+	var cols []map[string]any
+	request("GET", "/api/collections", "", &cols, 200)
+	foundCol := false
+	for _, c := range cols {
+		if c["name"] == "applied-ml-2026" {
+			foundCol = true
+		}
+	}
+	if !foundCol {
+		t.Fatal("renamed collection missing from list")
+	}
+	// 404s
+	request("GET", "/api/collections/99999", "", nil, 404)
+	request("DELETE", "/api/collections/99999", "", nil, 404)
+	request("POST", "/api/collections/99999/documents", `{"doc_ids":[1]}`, nil, 404)
+
 	// ---- document delete: index-only removal (the file stays on disk)
 	var delRes map[string]any
 	request("DELETE", fmt.Sprintf("/api/documents/%d", mdID), "", &delRes, 200)
@@ -377,6 +445,11 @@ func TestAPI(t *testing.T) {
 		if int64(h["doc_id"].(float64)) == mdID {
 			t.Fatal("deleted document still in FTS results")
 		}
+	}
+	// deleting a document also cascades out of every collection
+	request("GET", "/api/collections/"+colID, "", &colDetail, 200)
+	if len(colDetail.Documents) != 0 {
+		t.Fatalf("deleted document still in a collection: %d", len(colDetail.Documents))
 	}
 
 	// ---- library export/import (backup + reload)
@@ -420,7 +493,7 @@ func TestAPI(t *testing.T) {
 	}
 	// a pre-import copy must exist next to the replaced library
 	if _, err := os.Stat(cfg.DBPath + ".pre-import-"); err != nil {
-		if matches, _ := filepath.Glob(cfg.DBPath+".pre-import-*"); len(matches) == 0 {
+		if matches, _ := filepath.Glob(cfg.DBPath + ".pre-import-*"); len(matches) == 0 {
 			t.Fatalf("no pre-import backup found: %v", err)
 		}
 	}

@@ -205,6 +205,13 @@ func (s *Server) Mux() http.Handler {
 	mux.HandleFunc("GET /api/documents", s.documents)
 	mux.HandleFunc("GET /api/categories", s.categories)
 	mux.HandleFunc("POST /api/categories/rename", s.renameCategory)
+	mux.HandleFunc("GET /api/collections", s.listCollections)
+	mux.HandleFunc("POST /api/collections", s.createCollection)
+	mux.HandleFunc("GET /api/collections/{id}", s.getCollection)
+	mux.HandleFunc("PATCH /api/collections/{id}", s.patchCollection)
+	mux.HandleFunc("DELETE /api/collections/{id}", s.deleteCollection)
+	mux.HandleFunc("POST /api/collections/{id}/documents", s.addCollectionDocs)
+	mux.HandleFunc("DELETE /api/collections/{id}/documents/{docID}", s.removeCollectionDoc)
 	mux.HandleFunc("GET /api/documents/{id}", s.document)
 	mux.HandleFunc("DELETE /api/documents/{id}", s.deleteDocument)
 	mux.HandleFunc("GET /api/documents/{id}/file", s.file)
@@ -555,6 +562,194 @@ func (s *Server) renameCategory(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"from": from, "to": to, "updated": n + n2})
 }
 
+// ------------------------------- collections -------------------------------
+//
+// Collections are user-managed groups of documents (research projects): a
+// paper can be in several at once. Membership is entirely manual — nothing
+// in the processing pipeline adds or removes documents.
+
+func (s *Server) listCollections(w http.ResponseWriter, r *http.Request) {
+	cols, err := db.ListCollections(s.conn)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, 200, cols)
+}
+
+func (s *Server) createCollection(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Name, Description string
+	}
+	if err := decodeBody(r, &body); err != nil {
+		writeErr(w, 400, "bad JSON body: "+err.Error())
+		return
+	}
+	name := strings.TrimSpace(body.Name)
+	if name == "" {
+		writeErr(w, 400, "collection name is required")
+		return
+	}
+	c, err := db.CreateCollection(s.conn, name, strings.TrimSpace(body.Description))
+	if err != nil {
+		if strings.Contains(err.Error(), "UNIQUE") {
+			writeErr(w, 409, "a collection named "+name+" already exists")
+			return
+		}
+		writeErr(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, 200, c)
+}
+
+// getCollection returns one collection plus its documents (as full
+// documentJSON rows, so the UI can render them with the shared tree rows).
+func (s *Server) getCollection(w http.ResponseWriter, r *http.Request) {
+	id, err := pathID(r)
+	if err != nil {
+		writeErr(w, 400, "bad collection id")
+		return
+	}
+	var c db.Collection
+	err = s.conn.QueryRow(
+		"SELECT id, name, description FROM collections WHERE id=?", id).
+		Scan(&c.ID, &c.Name, &c.Description)
+	if err == sql.ErrNoRows {
+		writeErr(w, 404, "no such collection")
+		return
+	}
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	docIDs, err := db.CollectionDocIDs(s.conn, id)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	c.Documents = len(docIDs)
+	byID := map[int64]documentJSON{}
+	docs, err := s.allDocuments()
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	for _, d := range docs {
+		byID[d.ID] = d
+	}
+	out := []documentJSON{}
+	for _, docID := range docIDs {
+		if d, ok := byID[docID]; ok {
+			out = append(out, d)
+		}
+	}
+	writeJSON(w, 200, map[string]any{"collection": c, "documents": out})
+}
+
+func (s *Server) patchCollection(w http.ResponseWriter, r *http.Request) {
+	id, err := pathID(r)
+	if err != nil {
+		writeErr(w, 400, "bad collection id")
+		return
+	}
+	var body struct {
+		Name, Description *string
+	}
+	if err := decodeBody(r, &body); err != nil {
+		writeErr(w, 400, "bad JSON body: "+err.Error())
+		return
+	}
+	var name, desc string
+	if err := s.conn.QueryRow(
+		"SELECT name, description FROM collections WHERE id=?", id).
+		Scan(&name, &desc); err == sql.ErrNoRows {
+		writeErr(w, 404, "no such collection")
+		return
+	}
+	if body.Name != nil {
+		name = strings.TrimSpace(*body.Name)
+	}
+	if body.Description != nil {
+		desc = strings.TrimSpace(*body.Description)
+	}
+	if name == "" {
+		writeErr(w, 400, "collection name is required")
+		return
+	}
+	if err := db.UpdateCollection(s.conn, id, name, desc); err != nil {
+		if strings.Contains(err.Error(), "UNIQUE") {
+			writeErr(w, 409, "a collection named "+name+" already exists")
+			return
+		}
+		writeErr(w, 500, err.Error())
+		return
+	}
+	s.getCollection(w, r)
+}
+
+func (s *Server) deleteCollection(w http.ResponseWriter, r *http.Request) {
+	id, err := pathID(r)
+	if err != nil {
+		writeErr(w, 400, "bad collection id")
+		return
+	}
+	res, err := s.conn.Exec("DELETE FROM collections WHERE id=?", id)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		writeErr(w, 404, "no such collection")
+		return
+	}
+	writeJSON(w, 200, map[string]any{"deleted": id})
+}
+
+func (s *Server) addCollectionDocs(w http.ResponseWriter, r *http.Request) {
+	id, err := pathID(r)
+	if err != nil {
+		writeErr(w, 400, "bad collection id")
+		return
+	}
+	var body struct {
+		DocIDs []int64 `json:"doc_ids"`
+	}
+	if err := decodeBody(r, &body); err != nil {
+		writeErr(w, 400, "bad JSON body: "+err.Error())
+		return
+	}
+	var exists int
+	if err := s.conn.QueryRow(
+		"SELECT COUNT(*) FROM collections WHERE id=?", id).Scan(&exists); err != nil || exists == 0 {
+		writeErr(w, 404, "no such collection")
+		return
+	}
+	added, err := db.AddDocsToCollection(s.conn, id, body.DocIDs)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]any{"added": added})
+}
+
+func (s *Server) removeCollectionDoc(w http.ResponseWriter, r *http.Request) {
+	id, err := pathID(r)
+	if err != nil {
+		writeErr(w, 400, "bad collection id")
+		return
+	}
+	docID, err := strconv.ParseInt(r.PathValue("docID"), 10, 64)
+	if err != nil {
+		writeErr(w, 400, "bad document id")
+		return
+	}
+	if err := db.RemoveDocFromCollection(s.conn, id, docID); err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]any{"removed": docID})
+}
+
 func (s *Server) document(w http.ResponseWriter, r *http.Request) {
 	id, err := pathID(r)
 	if err != nil {
@@ -604,8 +799,14 @@ func (s *Server) document(w http.ResponseWriter, r *http.Request) {
 		srows.Close()
 	}
 
+	collections, err := db.CollectionsOfDoc(s.conn, id)
+	if err != nil {
+		collections = []db.Collection{}
+	}
+
 	writeJSON(w, 200, map[string]any{
-		"document": doc, "chunks": chunks, "tag_sources": sources})
+		"document": doc, "chunks": chunks, "tag_sources": sources,
+		"collections": collections})
 }
 
 func (s *Server) patchDocument(w http.ResponseWriter, r *http.Request) {

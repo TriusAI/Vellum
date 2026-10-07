@@ -38,6 +38,9 @@ Everything is local; no network calls except the local model servers.
                                   # rename a shelf; its whole subtree moves
                                   # (machine-learning -> computer-science/
                                   #  machine-learning also moves .../transformers)
+    vellum collection list|create|delete|add|remove|show
+                                  # user-managed groups of documents
+                                  # (research projects; a doc can be in many)
     vellum vocab list|review|promote|add|remove
     vellum serve [--listen ADDR] # local web UI + JSON API (see below)
 
@@ -222,6 +225,29 @@ the field ("category") and the UI shows the shelf as a chip.
 The API accepts kind/category in GET/PATCH /api/documents, filter params
 on GET /api/documents and GET /api/search (kind, category, repeated tag),
 and GET /api/categories lists distinct categories with counts.
+
+## Collections (research projects)
+A collection is a user-managed group of documents — e.g. an applied-ML
+project holding ML papers plus the medicine papers you plan to apply
+them to. A document can be in several collections; membership is
+ENTIRELY manual (nothing in processing adds or removes). Deleting a
+document or a collection cleans up membership rows (cascade).
+    vellum collection create applied-ml "ML x medicine"
+    vellum collection add applied-ml 3 7 12
+    vellum collection show applied-ml
+    vellum collection list
+    vellum collection remove applied-ml 3
+    vellum collection delete applied-ml     # documents are untouched
+    GET    /api/collections                 # [{id,name,description,documents}]
+    POST   /api/collections                 # {name, description}; 409 on dup name
+    GET    /api/collections/{id}            # {collection, documents:[...]}
+    PATCH  /api/collections/{id}            # {name?, description?}
+    DELETE /api/collections/{id}
+    POST   /api/collections/{id}/documents  # {doc_ids:[...]} (idempotent add)
+    DELETE /api/collections/{id}/documents/{docID}
+GET /api/documents/{id} also returns "collections" (the doc's memberships).
+The UI has a "Collections…" page (create/browse/manage) and per-document
+[Collection] pages; the Summary page has an add/remove control.
 
 ## Vocabulary curation (IMPORTANT)
 Tags are constrained to vocab.yaml. The tagging prompt also invites the

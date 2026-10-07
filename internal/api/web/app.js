@@ -54,17 +54,23 @@ const hasCover = (path) => /\.(pdf|epub|mobi|azw3?)$/i.test(path);
 /* ------------------------------------------------------------------ pages */
 
 const PAGE_KINDS = {
-  library: { label: null },
-  summary: { label: "Summary" },
-  preview: { label: "Preview" },
-  text:    { label: "Text" },
-  ask:     { label: "Ask" },
+  library:     { label: null },
+  collections: { label: null },
+  collection:  { label: "Collection" },
+  summary:     { label: "Summary" },
+  preview:     { label: "Preview" },
+  text:        { label: "Text" },
+  ask:         { label: "Ask" },
 };
 
 let pages = [];        // ordered: the strip order IS the array order
 let activePage = null; // last-interacted page (Esc closes it)
 
-const pageKey = (kind, docId) => (kind === "library" ? "library" : kind + ":" + docId);
+// library and collections are singletons (no per-document id).
+const SINGLETON_PAGES = { library: "library", collections: "collections" };
+const isSingleton = (kind) => kind in SINGLETON_PAGES;
+const pageKey = (kind, docId) =>
+  isSingleton(kind) ? kind : kind + ":" + docId;
 const libraryPage = () => pages.find((p) => p.kind === "library");
 
 // openPage opens (or focuses) one page. opts.page seeds the preview page
@@ -105,11 +111,12 @@ function buildPageChrome(page) {
   controls.append(mkBtn("▶", "move page right", () => movePage(page, 1)));
   controls.append(mkBtn("⤢", "expand to fill the frame / restore width",
     () => toggleExpand(page)));
-  if (page.kind !== "library")
+  if (!isSingleton(page.kind))
     controls.append(mkBtn("✕", "close page", () => closePage(page)));
   const head = el("div", { class: "page-head" }, title, controls);
   const content = el("div", { class: "page-body" });
   if (page.kind === "library") content.id = "list";
+  if (page.kind === "collections") content.id = "collections-list";
   if (page.kind === "preview") content.style.padding = "0"; // full-bleed viewer
   const resize = el("div", { class: "page-resize", title: "drag to resize" });
   resize.addEventListener("mousedown", (ev) => startResize(ev, page));
@@ -125,6 +132,12 @@ function buildPageChrome(page) {
 
 function updatePageTitle(page) {
   if (page.kind === "library") { page.titleEl.textContent = "All Documents"; return; }
+  if (page.kind === "collections") { page.titleEl.textContent = "Collections"; return; }
+  if (page.kind === "collection") {
+    const c = page.data?.collection;
+    page.titleEl.textContent = "[Collection] " + (c ? c.name : "#" + page.docId);
+    return;
+  }
   const d = page.data?.document;
   const name = d ? (d.title || d.path.split("/").pop()) : "#" + page.docId;
   page.titleEl.textContent = `[${PAGE_KINDS[page.kind].label}] ${name}`;
@@ -188,9 +201,15 @@ function closePage(page) {
     activePage = pages[Math.min(i, pages.length - 1)] || null;
 }
 
+// DOC_PAGE_KINDS are the per-document views (their page.docId is a
+// document id). Collection pages reuse docId for the collection id, so
+// anything keyed by document id must filter on kind.
+const DOC_PAGE_KINDS = { summary: 1, preview: 1, text: 1, ask: 1 };
+const isDocPage = (p) => p.kind in DOC_PAGE_KINDS;
+
 function closeDocPages(docId) {
   for (const p of [...pages])
-    if (p.docId === docId && p.kind !== "library") closePage(p);
+    if (isDocPage(p) && p.docId === docId) closePage(p);
 }
 
 // refreshPage (re)loads a page's data and renders its content. The token
@@ -209,7 +228,11 @@ async function refreshPage(page) {
   if (!page.data)
     page.content.replaceChildren(el("div", { class: "hint" }, "loading…"));
   try {
-    const data = await api(`/api/documents/${page.docId}`);
+    const data = page.kind === "collections"
+      ? await api("/api/collections")
+      : page.kind === "collection"
+        ? await api(`/api/collections/${page.docId}`)
+        : await api(`/api/documents/${page.docId}`);
     if (token !== page.token) return; // a newer refresh won
     const unchanged = page.data && JSON.stringify(data) === JSON.stringify(page.data);
     page.data = data;
@@ -227,16 +250,25 @@ async function refreshPage(page) {
 
 function refreshDocPages(docId) {
   for (const p of pages)
-    if (p.docId === docId && p.kind !== "library") refreshPage(p);
+    if (isDocPage(p) && p.docId === docId) refreshPage(p);
 }
 
 function refreshAllDocPages() {
   for (const p of pages)
-    if (p.kind !== "library") refreshPage(p);
+    if (isDocPage(p)) refreshPage(p);
+}
+
+// refreshCollections re-renders the Collections root page and every open
+// collection page (membership/renames changed).
+function refreshCollectionPages() {
+  for (const p of pages)
+    if (p.kind === "collections" || p.kind === "collection") refreshPage(p);
 }
 
 function renderPageContent(page) {
   switch (page.kind) {
+    case "collections": page.content.replaceChildren(collectionsContent(page)); break;
+    case "collection":  page.content.replaceChildren(collectionContent(page)); break;
     case "summary": page.content.replaceChildren(summaryContent(page)); break;
     case "preview": page.content.replaceChildren(previewContent(page)); break;
     case "text":    page.content.replaceChildren(textContent(page)); break;
@@ -309,9 +341,7 @@ function renderList(docs) {
   // preserve what the user is looking at across re-renders: the scroll
   // position and which groups they collapsed (no visual flash on save)
   const scrollTop = list.scrollTop;
-  const collapsed = new Set();
-  for (const g of list.querySelectorAll("details.group"))
-    if (!g.open && g.dataset.path) collapsed.add(g.dataset.path);
+  const collapsed = collectCollapsed(list);
   list.replaceChildren();
   if (!docs.length) {
     const p = el("p", { class: "hint" });
@@ -324,9 +354,24 @@ function renderList(docs) {
     list.append(p);
     return;
   }
-  // item tree: grouped by category first. Categories are SLASHED PATHS
-  // ("ai/transformers") so subcategories nest as subgroups; uncategorized
-  // items form the trailing "uncategorized" group.
+  renderTree(list, docs, { collapsed, onCategoryRename: openRenameDialog });
+  list.scrollTop = scrollTop;
+}
+
+// collectCollapsed remembers which category groups the user folded shut.
+function collectCollapsed(root) {
+  const collapsed = new Set();
+  for (const g of root.querySelectorAll("details.group"))
+    if (!g.open && g.dataset.path) collapsed.add(g.dataset.path);
+  return collapsed;
+}
+
+// renderTree fills container with documents grouped by category (slashed
+// paths nest as subgroups; uncategorized items form a trailing group).
+// opts: collapsed (Set of folded paths), onCategoryRename (✎ button), and
+// onRemove (a per-row ✕ for collection membership).
+function renderTree(container, docs, opts = {}) {
+  const collapsed = opts.collapsed || new Set();
   const newNode = () => ({ docs: [], children: new Map(), total: 0 });
   const root = newNode();
   for (const d of docs) {
@@ -342,7 +387,8 @@ function renderList(docs) {
   }
   const renderGroup = (node, path, plain) => {
     const ul = el("ul", { class: "cat-items" });
-    for (const d of node.docs) ul.append(docRow(d, { inTree: true }));
+    for (const d of node.docs)
+      ul.append(docRow(d, { inTree: true, onRemove: opts.onRemove }));
     const kids = [...node.children.entries()].sort((a, b) =>
       a[0].localeCompare(b[0]));
     for (const [child, childNode] of kids) {
@@ -354,10 +400,10 @@ function renderList(docs) {
         node.children.size
           ? `${node.docs.length} + ${node.total - node.docs.length} nested`
           : String(node.total)));
-    if (!plain) sum.append(el("button", {
+    if (!plain && opts.onCategoryRename) sum.append(el("button", {
       class: "mini plain",
       title: "rename this shelf (the whole subtree moves with it)",
-      onclick: (ev) => { ev.stopPropagation(); ev.preventDefault(); openRenameDialog(path); },
+      onclick: (ev) => { ev.stopPropagation(); ev.preventDefault(); opts.onCategoryRename(path); },
     }, "✎"));
     const det = el("details", { class: "group" + (plain ? " group-plain" : ""), open: true },
       sum, ul);
@@ -366,16 +412,15 @@ function renderList(docs) {
     return det;
   };
   for (const [cat, node] of [...root.children.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
-    list.append(renderGroup(node, cat, false));
+    container.append(renderGroup(node, cat, false));
   }
   // documents without a category live directly on the root node
   // (empty category = no child group was ever created)
   if (root.docs.length) {
-    list.append(renderGroup(
+    container.append(renderGroup(
       { docs: root.docs, children: new Map(), total: root.docs.length },
       "uncategorized", true));
   }
-  list.scrollTop = scrollTop;
 }
 
 // Items are compact list rows: title, status, tags — the details
@@ -396,9 +441,176 @@ function docRow(d, opts = {}) {
     chips.append(el("span", { class: "chip pend", title: "thin text layer — processing will OCR it" }, "ocr"));
   if (d.category && !opts.inTree) chips.append(el("span", { class: "chip sug" }, esc(d.category)));
   for (const t of d.tags) chips.append(el("span", { class: "chip" }, esc(t)));
-  return el("li", { class: "item", onclick: () => openPage("summary", d.id) },
+  const row = el("li", { class: "item", onclick: () => openPage("summary", d.id) },
     el("span", { class: "item-title" }, esc(title)),
     chips);
+  if (opts.onRemove) row.append(el("button", {
+    class: "mini plain row-remove", title: "remove from this collection",
+    onclick: (ev) => { ev.stopPropagation(); opts.onRemove(d); },
+  }, "✕"));
+  return row;
+}
+
+/* ------------------------------------------------------------ collections */
+
+// Collections are user-managed groups of documents (research projects): a
+// paper can be in several. Nothing in the processing pipeline touches
+// them.
+
+function collectionsContent(page) {
+  const cols = page.data || [];
+  const wrap = el("div");
+  wrap.append(el("p", { class: "hint" },
+    "Collections group documents for a research project — e.g. an applied-ML " +
+    "project might hold ML papers plus the medicine papers you plan to apply " +
+    "them to. A document can be in several. Membership is entirely manual."));
+
+  const nameIn = el("input", { placeholder: "new collection name" });
+  const descIn = el("input", { placeholder: "description (optional)" });
+  const create = async () => {
+    const name = nameIn.value.trim();
+    if (!name) { nameIn.focus(); return; }
+    try {
+      const c = await api("/api/collections", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name, description: descIn.value.trim() }),
+      });
+      nameIn.value = ""; descIn.value = "";
+      notice(`Created collection "${c.name}".`);
+      refreshCollectionPages();
+      openPage("collection", c.id);
+    } catch (e) { notice("collection: " + e.message); }
+  };
+  nameIn.addEventListener("keydown", (e) => { if (e.key === "Enter") create(); });
+  descIn.addEventListener("keydown", (e) => { if (e.key === "Enter") create(); });
+  wrap.append(el("div", { class: "row collection-new" },
+    nameIn, descIn, el("button", { onclick: create }, "New collection")));
+
+  if (!cols.length) {
+    wrap.append(el("p", { class: "hint" },
+      "No collections yet — name one above to get started; then open it and use \u201cAdd documents\u2026\u201d."));
+    return wrap;
+  }
+  const ul = el("ul", { class: "cat-items" });
+  for (const c of cols) {
+    const row = el("li", { class: "item collection-row", onclick: () => openPage("collection", c.id) },
+      el("span", { class: "item-title", title: c.description || "" }, esc(c.name)),
+      el("div", { class: "chips" },
+        el("span", { class: "chip" }, `${c.documents} doc`),
+        el("button", {
+          class: "mini plain", title: "rename",
+          onclick: (ev) => { ev.stopPropagation(); renameCollection(c); },
+        }, "✎"),
+        el("button", {
+          class: "mini plain", title: "delete collection (documents are untouched)",
+          onclick: (ev) => { ev.stopPropagation(); deleteCollection(c); },
+        }, "✕")));
+    ul.append(row);
+  }
+  wrap.append(el("details", { class: "group", open: true },
+    el("summary", {}, "all collections", el("span", { class: "count" }, String(cols.length))),
+    ul));
+  return wrap;
+}
+
+function collectionContent(page) {
+  const data = page.data || {};
+  const c = data.collection || { id: page.docId, name: "?" };
+  const docs = data.documents || [];
+  const wrap = el("div");
+  if (c.description) wrap.append(el("p", { class: "hint" }, esc(c.description)));
+  wrap.append(el("div", { class: "row" },
+    el("button", { class: "small", onclick: () => openAddDocsPicker(page) }, "Add documents…"),
+    el("button", { class: "small plain", onclick: () => renameCollection(c) }, "Rename…"),
+    el("button", { class: "small plain", onclick: () => deleteCollection(c) }, "Delete collection…"),
+    el("span", { class: "hint" }, `${docs.length} document(s)`)));
+  if (!docs.length) {
+    wrap.append(el("p", { class: "hint" },
+      "Empty — use \u201cAdd documents\u2026\u201d to pick from the library."));
+    return wrap;
+  }
+  const tree = el("div");
+  renderTree(tree, docs, { onRemove: (d) => removeFromCollection(page, d) });
+  wrap.append(tree);
+  return wrap;
+}
+
+async function removeFromCollection(page, d) {
+  try {
+    await api(`/api/collections/${page.docId}/documents/${d.id}`, { method: "DELETE" });
+    notice(`Removed "${d.title || d.path.split("/").pop()}" from this collection.`);
+    refreshCollectionPages();
+  } catch (e) { notice("collection: " + e.message); }
+}
+
+function renameCollection(c) {
+  const name = prompt(`Rename collection "${c.name}":`, c.name);
+  if (name === null) return;
+  const trimmed = name.trim();
+  if (!trimmed || trimmed === c.name) return;
+  const desc = c.description !== undefined ? c.description : "";
+  api(`/api/collections/${c.id}`, {
+    method: "PATCH", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name: trimmed, description: desc }),
+  }).then(() => {
+    notice(`Renamed collection to "${trimmed}".`);
+    refreshCollectionPages();
+  }).catch((e) => notice("collection: " + e.message));
+}
+
+function deleteCollection(c) {
+  if (!confirm(`Delete the collection "${c.name}"?\n` +
+      "The documents themselves are untouched — only the grouping is removed.")) return;
+  api(`/api/collections/${c.id}`, { method: "DELETE" }).then(() => {
+    notice(`Deleted collection "${c.name}".`);
+    for (const p of [...pages])
+      if (p.kind === "collection" && p.docId === c.id) closePage(p);
+    refreshCollectionPages();
+  }).catch((e) => notice("collection: " + e.message));
+}
+
+// openAddDocsPicker shows a modal of every library document with a
+// checkbox; already-member documents are hidden. Purely manual. It lists
+// the FULL library (not the current filtered view) so a filter never
+// hides documents from the picker.
+async function openAddDocsPicker(page) {
+  let docs;
+  try { docs = await api("/api/documents"); }
+  catch (e) { notice("collection: " + e.message); return; }
+  const inColl = new Set((page.data?.documents || []).map((d) => d.id));
+  const dlg = el("dialog", { class: "collection-add" });
+  dlg.append(el("h2", {}, "Add documents to " + esc(page.data?.collection?.name || "collection")));
+  const box = el("div", { class: "collection-add-list" });
+  const boxes = [];
+  for (const d of docs) {
+    if (inColl.has(d.id)) continue;
+    const cb = el("input", { type: "checkbox" });
+    boxes.push([cb, d.id]);
+    box.append(el("label", { class: "collection-add-row" }, cb,
+      el("span", {}, esc(d.title || d.path.split("/").pop())),
+      d.category ? el("span", { class: "chip sug" }, esc(d.category)) : null));
+  }
+  if (!boxes.length) box.append(el("p", { class: "hint" }, "Every library document is already in this collection."));
+  dlg.append(box);
+  const add = async () => {
+    const ids = boxes.filter(([cb]) => cb.checked).map(([, id]) => id);
+    if (!ids.length) { dlg.close(); return; }
+    try {
+      const res = await api(`/api/collections/${page.docId}/documents`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ doc_ids: ids }),
+      });
+      notice(`Added ${res.added} document(s) to the collection.`);
+      dlg.close();
+      refreshCollectionPages();
+    } catch (e) { notice("collection: " + e.message); }
+  };
+  dlg.append(el("div", { class: "row right" },
+    el("button", { class: "plain", onclick: () => dlg.close() }, "Cancel"),
+    el("button", { onclick: add }, "Add selected")));
+  document.body.append(dlg);
+  dlg.addEventListener("close", () => dlg.remove());
+  dlg.showModal();
 }
 
 /* ---------------------------------------------------- category rename UI */
@@ -921,7 +1133,96 @@ function summaryContent(page) {
   });
   renderChips();
   body.append(chips, tagInput);
+
+  // collections membership (manual): which research groups this doc is in
+  body.append(el("label", {}, "collections (manual grouping — a document can be in several)"));
+  body.append(collectionsOfDocSection(page));
   return body;
+}
+
+// collectionsOfDocSection renders the document's collection membership
+// with quick add/remove and inline creation of a new collection.
+function collectionsOfDocSection(page) {
+  const id = page.docId;
+  const cols = page.data?.collections || [];
+  const wrap = el("div");
+  const chips = el("div", { class: "chips" });
+  for (const c of cols) {
+    const chip = el("span", { class: "chip" },
+      el("a", { class: "link", onclick: () => openPage("collection", c.id) }, esc(c.name)));
+    chip.append(el("button", {
+      title: "remove from this collection",
+      onclick: async () => {
+        try {
+          await api(`/api/collections/${c.id}/documents/${id}`, { method: "DELETE" });
+          notice(`Removed from "${c.name}".`);
+          refreshDetailCollections(page);
+          refreshCollectionPages();
+        } catch (e) { notice("collection: " + e.message); }
+      },
+    }, "✕"));
+    chips.append(chip);
+  }
+  if (!cols.length) chips.append(el("span", { class: "hint" }, "not in any collection"));
+  wrap.append(chips);
+
+  const sel = el("select", {},
+    el("option", { value: "" }, "add to collection…"),
+    ...cols.length ? [] : [],
+  );
+  // choices: all collections the doc is NOT in, plus "New collection…"
+  api("/api/collections").then((all) => {
+    const inSet = new Set(cols.map((c) => c.id));
+    for (const c of all)
+      if (!inSet.has(c.id)) sel.append(el("option", { value: String(c.id) }, c.name));
+    sel.append(el("option", { value: "__new__" }, "＋ new collection…"));
+    sel.disabled = false;
+  }).catch(() => {});
+  sel.disabled = true;
+  sel.addEventListener("change", async () => {
+    const v = sel.value;
+    if (!v) return;
+    sel.value = "";
+    if (v === "__new__") {
+      const name = prompt("New collection name:");
+      if (!name || !name.trim()) return;
+      try {
+        const c = await api("/api/collections", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name: name.trim(), description: "" }),
+        });
+        await api(`/api/collections/${c.id}/documents`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ doc_ids: [id] }),
+        });
+        notice(`Added to new collection "${c.name}".`);
+        refreshDetailCollections(page);
+        refreshCollectionPages();
+      } catch (e) { notice("collection: " + e.message); }
+      return;
+    }
+    try {
+      await api(`/api/collections/${v}/documents`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ doc_ids: [id] }),
+      });
+      notice("Added to collection.");
+      refreshDetailCollections(page);
+      refreshCollectionPages();
+    } catch (e) { notice("collection: " + e.message); }
+  });
+  wrap.append(el("div", { class: "row" }, sel));
+  return wrap;
+}
+
+// refreshDetailCollections re-fetches just the collections of a document
+// page (membership changed) without a full page rebuild.
+async function refreshDetailCollections(page) {
+  try {
+    const data = await api(`/api/documents/${page.docId}`);
+    page.data = data;
+    refreshPage(page);
+  } catch (e) { /* transient */ }
 }
 
 // previewContent: the rendered document, filling the page. Page
@@ -1257,6 +1558,8 @@ $("#lib-import").onclick = async () => {
 /* --------------------------------------------------------------- process */
 
 $("#btn-process").onclick = () => processIds([]);
+
+$("#btn-collections").onclick = () => openPage("collections");
 
 /* ------------------------------------------------------------------ vocab */
 

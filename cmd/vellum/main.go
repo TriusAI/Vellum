@@ -41,6 +41,8 @@ Commands:
   remove ID...         remove documents from the library (files stay on disk)
   rename-category OLD NEW
                         rename a shelf; its whole subtree moves with it
+  collection list|create|delete|add|remove|show
+                        user-managed groups of documents (research projects)
   export [PATH]        write a consistent snapshot of the library (backup)
   import PATH          replace the library with a backup (old kept aside)
   vocab list|add|remove|review|promote
@@ -56,7 +58,7 @@ file (FTS5). Models served locally by llama.cpp llama-server.
 `
 
 // versionString is reported by --version, /api/status and `vellum agent`.
-const versionString = "0.16.1"
+const versionString = "0.17.0"
 
 // documentColumns is the explicit projection used everywhere (never SELECT *,
 // so the scan order is fixed even if the schema gains columns).
@@ -152,6 +154,8 @@ func main() {
 		cmdCategory(cfg, args[1:])
 	case "rename-category":
 		cmdRenameCategory(cfg, args[1:])
+	case "collection":
+		cmdCollection(cfg, args[1:])
 	case "export":
 		cmdExport(cfg, args[1:])
 	case "import":
@@ -522,6 +526,23 @@ func cmdShow(cfg *config.Config, args []string) {
 	}
 }
 
+// loadDocument reads one document row by id.
+func loadDocument(conn *sql.DB, id int64) (document, error) {
+	var d document
+	err := d.scan(conn.QueryRow("SELECT "+documentColumns+" FROM documents WHERE id=?", id))
+	return d, err
+}
+
+// firstNonEmpty returns the first non-empty string (display helper).
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
 func cmdVocab(cfg *config.Config, args []string) {
 	if len(args) < 1 {
 		log.Fatalf("vocab needs an action: list|add|remove|review|promote")
@@ -709,6 +730,183 @@ func cmdRenameCategory(cfg *config.Config, args []string) {
 		return
 	}
 	fmt.Printf("renamed %q -> %q (%d document(s) moved)\n", from, to, n+n2)
+}
+
+// cmdCollection manages collections: user-defined groups of documents
+// (research projects). A paper can be in several collections; membership
+// is entirely manual.
+//
+//	vellum collection list
+//	vellum collection create NAME ["description"]
+//	vellum collection delete NAME|ID
+//	vellum collection add NAME|ID DOCID...
+//	vellum collection remove NAME|ID DOCID...
+//	vellum collection show NAME|ID
+func cmdCollection(cfg *config.Config, args []string) {
+	if len(args) < 1 {
+		log.Fatalf("usage: vellum collection list|create|delete|add|remove|show ...")
+	}
+	conn := mustOpen(cfg)
+	sub := args[0]
+	rest := args[1:]
+
+	// collectionRef resolves a NAME or numeric id to a collection.
+	collectionRef := func(ref string) db.Collection {
+		if id, err := strconv.ParseInt(ref, 10, 64); err == nil {
+			var c db.Collection
+			err := conn.QueryRow(
+				"SELECT id, name, description FROM collections WHERE id=?", id).
+				Scan(&c.ID, &c.Name, &c.Description)
+			if err == sql.ErrNoRows {
+				log.Fatalf("collection: no collection with id %d", id)
+			}
+			if err != nil {
+				log.Fatalf("collection: %s", err)
+			}
+			return c
+		}
+		var c db.Collection
+		err := conn.QueryRow(
+			"SELECT id, name, description FROM collections WHERE name=?", ref).
+			Scan(&c.ID, &c.Name, &c.Description)
+		if err == sql.ErrNoRows {
+			log.Fatalf("collection: no collection named %q", ref)
+		}
+		if err != nil {
+			log.Fatalf("collection: %s", err)
+		}
+		return c
+	}
+	// docIDs parses remaining args as document ids, validating they exist.
+	docIDs := func(vals []string) []int64 {
+		out := []int64{}
+		for _, v := range vals {
+			id, err := strconv.ParseInt(v, 10, 64)
+			if err != nil {
+				log.Fatalf("collection: %q is not a document id", v)
+			}
+			var one int
+			if err := conn.QueryRow("SELECT COUNT(*) FROM documents WHERE id=?", id).
+				Scan(&one); err != nil || one == 0 {
+				log.Fatalf("collection: no document with id %d", id)
+			}
+			out = append(out, id)
+		}
+		return out
+	}
+
+	switch sub {
+	case "list":
+		cols, err := db.ListCollections(conn)
+		if err != nil {
+			log.Fatalf("collection: %s", err)
+		}
+		if jsonOut {
+			printJSON(cols)
+			return
+		}
+		if len(cols) == 0 {
+			fmt.Println("no collections yet (vellum collection create NAME \"description\")")
+			return
+		}
+		for _, c := range cols {
+			desc := ""
+			if c.Description != "" {
+				desc = " — " + c.Description
+			}
+			fmt.Printf("#%d  %s  (%d document(s))%s\n", c.ID, c.Name, c.Documents, desc)
+		}
+
+	case "create":
+		if len(rest) < 1 {
+			log.Fatalf("usage: vellum collection create NAME [\"description\"]")
+		}
+		name := rest[0]
+		desc := ""
+		if len(rest) > 1 {
+			desc = strings.Join(rest[1:], " ")
+		}
+		c, err := db.CreateCollection(conn, name, desc)
+		if err != nil {
+			if strings.Contains(err.Error(), "UNIQUE") {
+				log.Fatalf("collection: a collection named %q already exists", name)
+			}
+			log.Fatalf("collection: %s", err)
+		}
+		if jsonOut {
+			printJSON(c)
+			return
+		}
+		fmt.Printf("created collection #%d %q\n", c.ID, c.Name)
+
+	case "delete":
+		if len(rest) < 1 {
+			log.Fatalf("usage: vellum collection delete NAME|ID")
+		}
+		c := collectionRef(rest[0])
+		if err := db.DeleteCollection(conn, c.ID); err != nil {
+			log.Fatalf("collection: %s", err)
+		}
+		fmt.Printf("deleted collection #%d %q (documents are untouched)\n", c.ID, c.Name)
+
+	case "add":
+		if len(rest) < 2 {
+			log.Fatalf("usage: vellum collection add NAME|ID DOCID...")
+		}
+		c := collectionRef(rest[0])
+		ids := docIDs(rest[1:])
+		added, err := db.AddDocsToCollection(conn, c.ID, ids)
+		if err != nil {
+			log.Fatalf("collection: %s", err)
+		}
+		fmt.Printf("added %d document(s) to %q\n", added, c.Name)
+
+	case "remove":
+		if len(rest) < 2 {
+			log.Fatalf("usage: vellum collection remove NAME|ID DOCID...")
+		}
+		c := collectionRef(rest[0])
+		ids := docIDs(rest[1:])
+		for _, id := range ids {
+			if err := db.RemoveDocFromCollection(conn, c.ID, id); err != nil {
+				log.Fatalf("collection: %s", err)
+			}
+		}
+		fmt.Printf("removed %d document(s) from %q\n", len(ids), c.Name)
+
+	case "show":
+		if len(rest) < 1 {
+			log.Fatalf("usage: vellum collection show NAME|ID")
+		}
+		c := collectionRef(rest[0])
+		ids, err := db.CollectionDocIDs(conn, c.ID)
+		if err != nil {
+			log.Fatalf("collection: %s", err)
+		}
+		// reuse the show query surface: load the docs the CLI way
+		docs := []document{}
+		for _, id := range ids {
+			d, err := loadDocument(conn, id)
+			if err == nil {
+				docs = append(docs, d)
+			}
+		}
+		if jsonOut {
+			printJSON(map[string]any{"collection": c, "documents": docs})
+			return
+		}
+		fmt.Printf("%s (%d document(s))", c.Name, len(docs))
+		if c.Description != "" {
+			fmt.Printf(" — %s", c.Description)
+		}
+		fmt.Println()
+		for _, d := range docs {
+			fmt.Printf("  #%d  %s  (%s)\n", d.ID, firstNonEmpty(d.Title, filepath.Base(d.Path)), d.Status)
+		}
+
+	default:
+		log.Fatalf("collection: unknown subcommand %q (list|create|delete|add|remove|show)", sub)
+	}
 }
 
 // cmdExport writes a consistent snapshot of the library to PATH (a

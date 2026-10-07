@@ -291,6 +291,21 @@ button.mini { font-size: .72rem; padding: 0 .45rem; }
 #statusbar-text { overflow: hidden; text-overflow: ellipsis; }
 #statusbar .job-dot { width: .5rem; height: .5rem; background: transparent; }
 
+/* collections */
+.collection-new input { flex: 1 1 10rem; padding: .35rem .5rem;
+  border: 1px solid var(--line); background: var(--bg); font: inherit; }
+.collection-add { width: min(40rem, 92vw); }
+.collection-add-list { max-height: 55vh; overflow: auto; border: 1px solid var(--line);
+  margin: .5rem 0; }
+.collection-add-row { display: flex; align-items: center; gap: .5rem;
+  padding: .25rem .6rem; border-bottom: 1px dashed var(--line); font-size: .85rem;
+  cursor: pointer; }
+.collection-add-row:last-child { border-bottom: none; }
+.collection-add-row:hover { background: rgba(127,127,127,.08); }
+#list .item .row-remove { all: unset; cursor: pointer; color: #999;
+  padding: 0 .3rem; flex: 0 0 auto; }
+#list .item .row-remove:hover { color: #c0604f; }
+
 /* jobs dialog */
 .job-row { display: flex; gap: .6rem; align-items: center;
   border-bottom: 1px dashed var(--line); padding: .45rem 0; }

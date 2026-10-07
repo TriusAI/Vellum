@@ -62,6 +62,12 @@ vellum serve  ────  HTTP :8090 (127.0.0.1)
 - `chunks` — text per chunk (chunk ≈ page for PDFs, ~chunk_chars for text),
   with `embedding` (semantic) and a maintained FTS5 index (triggers).
 - `doc_tags` (tag, source: vocab|manual|suggested), `fts`, `meta`.
+- `collections` — user-managed named groups (research projects);
+  `collection_docs` joins them to documents (many-to-many, both FKs
+  ON DELETE CASCADE). Entirely manual; nothing in the pipeline touches
+  them. New TABLES (not columns) land via the idempotent
+  `CREATE TABLE IF NOT EXISTS` in the schema const — no migrate() row
+  needed, old libraries pick them up at Open.
 
 ## 3. Schema rules (non-negotiable)
 
@@ -160,6 +166,13 @@ Fast paths by kind (`internal/classify` + `produceSummary` in ingest):
   replaced library is kept as `<db>.pre-import-<timestamp>`, server
   closes+reopens its connection) swaps a backup in. "Import/Export…"
   dialog in the UI.
+- collections: `vellum collection list|create|delete|add|remove|show` /
+  CRUD under `/api/collections[/{id}[/documents[/{docID}]]]` — user-made
+  research groups; `GET /api/documents/{id}` also returns the doc's
+  `collections`. UI: a Collections root page (create/browse) + a
+  `[Collection] <name>` page per collection (add/remove docs), and an
+  add/remove control on the Summary page. See internal/db (ListCollections
+  et al.) and the collections block in internal/api.
 - re-extract/repair: `vellum reextract ID [--force-ocr] [--pages 3,7-12]`
 - skip: `vellum skip ID [PAGES|-]`
 - jobs: every slow op is a Job; FIFO queue; per-job cancel (queued =
@@ -346,11 +359,11 @@ Docker: `pack/Dockerfile` + `docker-entrypoint.sh`; Hub is proxy-blocked
 
 ## 10. Where things state-wise
 
-- HEAD: v0.16.1 (`d11da57`), all tests green. Since 0.16: page reordering
-  uses CSS `order` only (DOM nodes never move — PDF preview iframes reset
-  when moved, they no longer reload on re-arrange); bottom status bar
-  with the live queue situation (one 2s jobs poller drives bar + badge +
-  dialog; click the bar → Jobs dialog).
+- HEAD: v0.17.0 (see git log), all tests green. Since 0.16: COLLECTIONS
+  (user-managed research groups: collections + collection_docs tables,
+  CRUD API/CLI, a Collections root page + [Collection] pages, add/remove
+  on the Summary page); page moves use CSS order (previews don't reload);
+  status bar for the job queue.
 - Earlier in 0.16: auto-filing LEARNS from user corrections
   (user-shelved docs matched by keyword overlap, top-3 fed as few-shot
   examples to the tagging call — see ShelvingExample/bestExamples in

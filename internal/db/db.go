@@ -63,6 +63,24 @@ CREATE TABLE IF NOT EXISTS doc_tags(
   PRIMARY KEY(doc_id, tag)
 );
 
+-- Collections: user-managed groups of documents (research projects).
+-- A document can sit in any number of collections, so membership is a
+-- join table; both sides cascade (deleting a document or a collection
+-- cleans up membership rows).
+CREATE TABLE IF NOT EXISTS collections(
+  id INTEGER PRIMARY KEY,
+  name TEXT UNIQUE NOT NULL,
+  description TEXT DEFAULT '',
+  created_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS collection_docs(
+  collection_id INTEGER NOT NULL REFERENCES collections(id) ON DELETE CASCADE,
+  doc_id INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+  added_at TEXT DEFAULT (datetime('now')),
+  PRIMARY KEY(collection_id, doc_id)
+);
+
 CREATE VIRTUAL TABLE IF NOT EXISTS fts USING fts5(
   text, content='chunks', content_rowid='id'
 );
@@ -290,6 +308,127 @@ func ExistingCategories(conn *sql.DB) ([]string, error) {
 	for rows.Next() {
 		var c string
 		if err := rows.Scan(&c); err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+// ------------------------------------------------------------------------
+// Collections: user-managed groups of documents (research projects).
+
+// Collection is a named group of documents.
+type Collection struct {
+	ID          int64  `json:"id"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Documents   int    `json:"documents"`
+}
+
+// ListCollections lists all collections with their document counts.
+func ListCollections(conn *sql.DB) ([]Collection, error) {
+	rows, err := conn.Query(`
+SELECT c.id, c.name, c.description, COUNT(cd.doc_id)
+FROM collections c LEFT JOIN collection_docs cd ON cd.collection_id = c.id
+GROUP BY c.id ORDER BY c.name`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []Collection{}
+	for rows.Next() {
+		var c Collection
+		if err := rows.Scan(&c.ID, &c.Name, &c.Description, &c.Documents); err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+// CreateCollection creates a collection and returns its id.
+func CreateCollection(conn *sql.DB, name, description string) (Collection, error) {
+	res, err := conn.Exec(
+		"INSERT INTO collections(name, description) VALUES(?,?)", name, description)
+	if err != nil {
+		return Collection{}, err
+	}
+	id, _ := res.LastInsertId()
+	return Collection{ID: id, Name: name, Description: description}, nil
+}
+
+// UpdateCollection renames/re-describes a collection.
+func UpdateCollection(conn *sql.DB, id int64, name, description string) error {
+	_, err := conn.Exec(
+		"UPDATE collections SET name=?, description=? WHERE id=?", name, description, id)
+	return err
+}
+
+// DeleteCollection drops a collection (membership rows cascade).
+func DeleteCollection(conn *sql.DB, id int64) error {
+	_, err := conn.Exec("DELETE FROM collections WHERE id=?", id)
+	return err
+}
+
+// CollectionDocIDs returns the document ids in a collection.
+func CollectionDocIDs(conn *sql.DB, id int64) ([]int64, error) {
+	rows, err := conn.Query(
+		"SELECT doc_id FROM collection_docs WHERE collection_id=? ORDER BY doc_id", id)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []int64{}
+	for rows.Next() {
+		var docID int64
+		if err := rows.Scan(&docID); err != nil {
+			return nil, err
+		}
+		out = append(out, docID)
+	}
+	return out, rows.Err()
+}
+
+// AddDocsToCollection adds documents to a collection (idempotent); returns
+// how many were newly added.
+func AddDocsToCollection(conn *sql.DB, id int64, docIDs []int64) (int, error) {
+	added := 0
+	for _, docID := range docIDs {
+		res, err := conn.Exec(
+			"INSERT OR IGNORE INTO collection_docs(collection_id, doc_id) VALUES(?,?)",
+			id, docID)
+		if err != nil {
+			return added, err
+		}
+		if n, _ := res.RowsAffected(); n > 0 {
+			added++
+		}
+	}
+	return added, nil
+}
+
+// RemoveDocFromCollection removes one document from a collection.
+func RemoveDocFromCollection(conn *sql.DB, id, docID int64) error {
+	_, err := conn.Exec(
+		"DELETE FROM collection_docs WHERE collection_id=? AND doc_id=?", id, docID)
+	return err
+}
+
+// CollectionsOfDoc lists the collections a document belongs to.
+func CollectionsOfDoc(conn *sql.DB, docID int64) ([]Collection, error) {
+	rows, err := conn.Query(`
+SELECT c.id, c.name FROM collections c
+JOIN collection_docs cd ON cd.collection_id = c.id
+WHERE cd.doc_id = ? ORDER BY c.name`, docID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []Collection{}
+	for rows.Next() {
+		var c Collection
+		if err := rows.Scan(&c.ID, &c.Name); err != nil {
 			return nil, err
 		}
 		out = append(out, c)
