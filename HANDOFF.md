@@ -72,6 +72,8 @@ vellum serve  ────  HTTP :8090 (127.0.0.1)
   the UI's Notes pages. Also a new table (idempotent CREATE).
 - `theme` (config.yaml) — {preset, colors} for the web UI only; carried
   by GET/PUT /api/config and applied as CSS variables.
+- `watch` (config.yaml) — the filesystem watcher's {enabled, dirs,
+  interval}; no DB state (seen/done stamps are in-memory, see §5).
 
 ## 3. Schema rules (non-negotiable)
 
@@ -208,6 +210,19 @@ Fast paths by kind (`internal/classify` + `produceSummary` in ingest):
 - jobs: every slow op is a Job; FIFO queue; per-job cancel (queued =
   instant, running = cooperative + HTTP abort); `GET /api/jobs`,
   `POST /api/jobs/{id}/cancel`, a Jobs dialog in the UI top bar.
+- filesystem watcher: while `serve` runs, a background loop scans
+  `watch.dirs` every `watch.interval` seconds and runs `ingest.Enrich`
+  on new/changed files in the fixed order ingest → kind → category →
+  metadata → tags → summary (summary LAST; see `EnrichStages`). A file
+  must hold the same size+mtime across two scans before pickup (manual
+  "Scan now" skips the wait). Each scan is a normal job (cancellable),
+  caps enrichment at 8 docs/scan, and leaves enrichment pending when
+  the vocab/backend is unavailable. `ingest.PendingUnderDirs` finds the
+  pending docs under the watched folders. Managed by `vellum watch
+  add|remove|clear|on|off|interval|run` and `GET/PUT /api/watch` +
+  `POST /api/watch/scan`; UI "Watch…" dialog. In-memory seen/done
+  stamps only — a restart re-hashes once and sha256 dedup makes it a
+  no-op.
 - ask: per-document streaming chat via an EXTERNAL provider (config
   `ask: provider|model|api_key|base_url|tools`; openai-compatible/
   anthropic/ollama adapters in `internal/ask`); UI tab with Test/Save;
@@ -397,12 +412,23 @@ Docker: `pack/Dockerfile` + `docker-entrypoint.sh`; Hub is proxy-blocked
   user's real library (v0.4 discussion; deferred until needed).
 - `ask` provider config is persisted as PLAINTEXT in config.yaml
   (`0600`) — fine for a personal machine; do not "fix" silently.
+- The filesystem watcher's seen/done fingerprints live IN MEMORY: a
+  restart re-hashes the watched folders once (sha256 dedup makes it a
+  no-op for known files). It only ingests NEW/CHANGED files; deleting a
+  file from a watched folder does not remove it from the library (use
+  `vellum remove`). Enrichment is capped at 8 documents per scan so jobs
+  stay responsive and cancellable; a backlog drains over several scans.
 
 ## 10. Where things state-wise
 
-- HEAD: v0.23.0 (`78a1e17`), all tests green. Since 0.23.0: the ask
-  WebFetch tool now also works on ANTHROPIC (tool_use/tool_result loop;
-  mock-tested), not just OpenAI-compatible providers.
+- HEAD: v0.24.0 (`b20fe7d`), all tests green. Since 0.24.0: a
+  filesystem watcher — while `serve` runs it auto-runs ingest → kind →
+  category → metadata → tags → summary (summary LAST) on new/changed
+  files under `watch.dirs`, through `ingest.Enrich`. Manage with
+  `vellum watch ...` or the UI "Watch…" dialog; API `GET/PUT /api/watch`
+  + `POST /api/watch/scan`.
+- v0.23.0: ask WebFetch tool on ANTHROPIC too (tool_use/tool_result
+  loop; mock-tested), not just OpenAI-compatible providers.
 - v0.22.0: fixed the el() boolean-attr bug (disabled:false disabled the
   button); ask answers render light markdown; ask WebFetch tool added
   (ask.tools default on).
@@ -421,9 +447,9 @@ Docker: `pack/Dockerfile` + `docker-entrypoint.sh`; Hub is proxy-blocked
   pages; .item-list styling with hover affordance.
 - v0.17: COLLECTIONS; CSS-order page moves; bottom status bar.
 - v0.16: auto-filing learns from user corrections; flash-free updates.
-- Pack stage `pack/stage/vellum-78a1e17-linux-amd64/` (user's live
-  library inside) updated to the 0.23.0 binary; distributable tarball
-  `pack/vellum-78a1e17-linux-x86_64.tar.gz` (clean of the DB — verified
+- Pack stage `pack/stage/vellum-b20fe7d-linux-amd64/` (user's live
+  library inside) updated to the 0.24.0 binary; distributable tarball
+  `pack/vellum-b20fe7d-linux-x86_64.tar.gz` (clean of the DB — verified
   with tar -tzf | grep -c library.db = 0). NOTE: the user runs their OWN
   serve(s) and restarts them freely — an old one (PID 701, port 8097) is
   long-running; a newer one from the stage may appear (its exe shows

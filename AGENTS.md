@@ -11,7 +11,9 @@ text extraction, Tesseract for OCR, one SQLite file (FTS5) for storage.
 - `internal/` — config, db (schema + FTS5 triggers), extract (mutool +
   tesseract subprocesses), llm (llama-server client), summarize
   (map-reduce + constrained tagging), search (FTS5 + cosine), ingest
-  (pipeline), api (JSON API + embedded web UI in internal/api/web/)
+  (pipeline + the ordered `Enrich` used by the watcher), api (JSON API +
+  embedded web UI in internal/api/web/; `internal/api/watch.go` is the
+  filesystem watcher run by `serve`)
 - `templates/qwen3-nothink.jinja` — chat template that disables Qwen3's
   thinking pass (empty think-block prefill); shipped in the pack and image
 - `pack/` — portable bundle + Docker image build scripts
