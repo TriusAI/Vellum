@@ -132,6 +132,7 @@ func Default() *Config {
 	c.Tools.Mutool = "mutool"
 	c.Tools.Tesseract = "tesseract"
 	c.Ask.Provider = "none"
+	c.Ask.Tools = true // let the ask model fetch external links by default
 	c.Theme.Preset = "light"
 	c.Tools.LLMURL = "http://127.0.0.1:8081"
 	c.Tools.EmbedURL = "http://127.0.0.1:8082"

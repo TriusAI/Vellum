@@ -1765,6 +1765,7 @@ func (s *Server) getAskConfig(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{
 		"provider": c.Provider, "model": c.Model,
 		"base_url": c.BaseURL, "key_set": c.APIKey != "",
+		"tools":   c.Tools,
 		"enabled": c.Enabled(),
 	})
 }
@@ -1777,6 +1778,7 @@ func (s *Server) putAskConfig(w http.ResponseWriter, r *http.Request) {
 		Model    *string `json:"model"`
 		APIKey   *string `json:"api_key"`
 		BaseURL  *string `json:"base_url"`
+		Tools    *bool   `json:"tools"`
 	}
 	if err := decodeBody(r, &body); err != nil {
 		writeErr(w, 400, "bad JSON body: "+err.Error())
@@ -1796,6 +1798,9 @@ func (s *Server) putAskConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	if body.APIKey != nil && *body.APIKey != "" {
 		c.APIKey = *body.APIKey
+	}
+	if body.Tools != nil {
+		c.Tools = *body.Tools
 	}
 	if err := s.cfg.Save(); err != nil {
 		writeErr(w, 500, "config save failed: "+err.Error())
@@ -1975,7 +1980,12 @@ func (s *Server) postAsk(w http.ResponseWriter, r *http.Request) {
 	out := s.cfg.Ask
 	if body.Provider != "" {
 		out = ask.Config{Provider: body.Provider, Model: body.Model,
-			APIKey: body.APIKey, BaseURL: body.BaseURL}
+			APIKey: body.APIKey, BaseURL: body.BaseURL, Tools: s.cfg.Ask.Tools}
+	}
+	// only OpenAI-compatible providers implement the fetch tool loop
+	if out.Tools && out.Provider == "openai" {
+		sys += "\nYou may call the fetch_url tool to read http(s) links the " +
+			"user or the document references before answering."
 	}
 	deltas, err := out.Stream(sys, body.Messages)
 	if err != nil {
@@ -1997,6 +2007,10 @@ func (s *Server) postAsk(w http.ResponseWriter, r *http.Request) {
 		if d.Error != "" {
 			sseSend(w, map[string]string{"e": d.Error})
 			break
+		}
+		if d.Tool != "" {
+			sseSend(w, map[string]string{"tool": d.Tool})
+			continue
 		}
 		sseSend(w, map[string]string{"d": d.Text})
 	}
@@ -2023,6 +2037,7 @@ func (s *Server) getConfig(w http.ResponseWriter, r *http.Request) {
 		Provider string `json:"provider"`
 		Model    string `json:"model"`
 		BaseURL  string `json:"base_url"`
+		Tools    bool   `json:"tools"`
 		KeySet   bool   `json:"key_set"`
 	}
 	writeJSON(w, 200, map[string]any{
@@ -2054,7 +2069,7 @@ func (s *Server) getConfig(w http.ResponseWriter, r *http.Request) {
 		},
 		"ask": askOut{
 			Provider: c.Ask.Provider, Model: c.Ask.Model,
-			BaseURL: c.Ask.BaseURL, KeySet: c.Ask.APIKey != "",
+			BaseURL: c.Ask.BaseURL, Tools: c.Ask.Tools, KeySet: c.Ask.APIKey != "",
 		},
 		"theme": map[string]any{
 			"preset": c.Theme.Preset,
@@ -2102,6 +2117,7 @@ func (s *Server) putConfig(w http.ResponseWriter, r *http.Request) {
 			Model    *string `json:"model"`
 			APIKey   *string `json:"api_key"`
 			BaseURL  *string `json:"base_url"`
+			Tools    *bool   `json:"tools"`
 		} `json:"ask"`
 		Theme struct {
 			Preset *string           `json:"preset"`
@@ -2183,6 +2199,9 @@ func (s *Server) putConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	if a.BaseURL != nil {
 		c.Ask.BaseURL = *a.BaseURL
+	}
+	if a.Tools != nil {
+		c.Ask.Tools = *a.Tools
 	}
 	if body.Theme.Preset != nil && *body.Theme.Preset != "" {
 		c.Theme.Preset = *body.Theme.Preset

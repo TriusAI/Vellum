@@ -202,16 +202,27 @@ they re-embed lazily. vellum embed re-embeds the whole library up front.
 ## Ask an LLM (about one document)
 A freeform streaming chat per document, powered by an EXTERNAL model
 (config: ask: {provider: none|openai|anthropic|ollama, model, api_key,
-base_url}; openai = any OpenAI-COMPATIBLE endpoint via base_url). The
-chat context = metadata + summary + opening text of that document.
-    GET  /api/ask/config            # (key masked: key_set)
-    PUT  /api/ask/config {provider, model, api_key?, base_url}
+base_url, tools}; openai = any OpenAI-COMPATIBLE endpoint via base_url).
+The chat context = metadata + summary + opening text of that document.
+    GET  /api/ask/config            # (key masked: key_set; includes tools)
+    PUT  /api/ask/config {provider, model, api_key?, base_url, tools?}
     POST /api/ask/test              # tiny exchange; {} = test current
     POST /api/documents/{id}/ask    # stream: "data: {...}\n\n" events
                                     #   {"d": "..."} deltas, {"e": "..."}
-                                    #   error, {"done":"1"} end
+                                    #   error, {"tool":"url"} a fetch,
+                                    #   {"done":"1"} end
 Provider can be overridden per request ({"provider":"ollama",...}).
 This chat does NOT affect tagging (which stays grammar-constrained).
+
+WEB FETCH: with ask.tools true (default), the model may call a fetch_url
+tool to read external http(s) links the user or the document references
+(a small local WebFetch: HTML reduced to text, size-capped; non-http(s)
+and link-local metadata hosts refused; honors HTTPS_PROXY). The server
+runs the tool loop (up to 4 rounds) and reports each fetch as a
+{"tool":"url"} event. IMPLEMENTED for OpenAI-compatible providers
+(including Ollama's /v1 endpoint and local llama.cpp); Anthropic/Ollama
+native ignore tools. Answers are rendered with light markdown (code,
+bold/italic, lists, links) in the UI.
 
 ## Fixing garbled text
 When the text (Text tab in the UI) is garbled — a bad OCR pass baked

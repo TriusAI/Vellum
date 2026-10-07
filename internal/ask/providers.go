@@ -27,6 +27,55 @@ type wireMessage struct {
 	Content string `json:"content"`
 }
 
+// ---- tool plumbing (fetch_url / WebFetch) --------------------------------
+
+// fetchTool advertises the fetch_url function to tool-capable providers.
+type oaiTool struct {
+	Type     string `json:"type"`
+	Function struct {
+		Name        string         `json:"name"`
+		Description string         `json:"description"`
+		Parameters  map[string]any `json:"parameters"`
+	} `json:"function"`
+}
+
+func fetchToolDef() oaiTool {
+	var t oaiTool
+	t.Type = "function"
+	t.Function.Name = "fetch_url"
+	t.Function.Description = "Fetch an http(s) URL and return its readable " +
+		"text. Use it to consult pages the user links to or that documents " +
+		"reference before answering."
+	t.Function.Parameters = map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"url": map[string]any{"type": "string", "description": "absolute http(s) URL"},
+		},
+		"required": []string{"url"},
+	}
+	return t
+}
+
+// runTool executes a requested tool call, returns the text to feed back to
+// the model, and reports activity (via out) for the UI.
+func (c Config) runTool(name, args string, out chan<- Delta) string {
+	if name != "fetch_url" {
+		return "error: unknown tool " + name
+	}
+	var a struct {
+		URL string `json:"url"`
+	}
+	if err := json.Unmarshal([]byte(args), &a); err != nil || a.URL == "" {
+		return "error: fetch_url requires a url argument"
+	}
+	out <- Delta{Tool: a.URL}
+	text, err := webFetch(a.URL)
+	if err != nil {
+		return "error fetching " + a.URL + ": " + err.Error()
+	}
+	return text
+}
+
 func (c Config) client() *http.Client {
 	return &http.Client{Timeout: 0} // stream duration is controlled by the request body
 }
@@ -49,37 +98,104 @@ func endpoint(base, version, path string) string {
 // ---- openai-compatible -------------------------------------------------
 
 type openaiStreamReq struct {
-	Model       string        `json:"model"`
-	Messages    []wireMessage `json:"messages"`
-	Stream      bool          `json:"stream"`
-	Temperature float64       `json:"temperature,omitempty"`
-	MaxTokens   int           `json:"max_tokens,omitempty"`
+	Model       string       `json:"model"`
+	Messages    []oaiMessage `json:"messages"`
+	Stream      bool         `json:"stream"`
+	Temperature float64      `json:"temperature,omitempty"`
+	MaxTokens   int          `json:"max_tokens,omitempty"`
+	Tools       []oaiTool    `json:"tools,omitempty"`
+	ToolChoice  string       `json:"tool_choice,omitempty"`
+}
+
+// oaiMessage is a request turn: it can carry tool calls (assistant) or a
+// tool result (role "tool").
+type oaiMessage struct {
+	Role       string        `json:"role"`
+	Content    string        `json:"content,omitempty"`
+	ToolCalls  []oaiToolCall `json:"tool_calls,omitempty"`
+	ToolCallID string        `json:"tool_call_id,omitempty"`
+	Name       string        `json:"name,omitempty"`
+}
+
+type oaiToolCall struct {
+	ID       string `json:"id"`
+	Type     string `json:"type"`
+	Function struct {
+		Name      string `json:"name"`
+		Arguments string `json:"arguments"`
+	} `json:"function"`
 }
 
 type openaiStreamChunk struct {
 	Choices []struct {
 		Delta struct {
-			Content string `json:"content"`
+			Content   string `json:"content"`
+			ToolCalls []struct {
+				Index    int    `json:"index"`
+				ID       string `json:"id"`
+				Type     string `json:"type"`
+				Function struct {
+					Name      string `json:"name"`
+					Arguments string `json:"arguments"`
+				} `json:"function"`
+			} `json:"tool_calls"`
 		} `json:"delta"`
+		FinishReason string `json:"finish_reason"`
 	} `json:"choices"`
 	Error *struct {
 		Message string `json:"message"`
 	} `json:"error"`
 }
 
+// maxToolRounds bounds the tool-calling loop (each round is one provider
+// request); it stops a model that keeps fetching forever.
+const maxToolRounds = 4
+
 func (c Config) streamOpenAI(sys string, msgs []Message) (<-chan Delta, error) {
-	all := []wireMessage{{Role: "system", Content: sys}}
+	conv := []oaiMessage{{Role: "system", Content: sys}}
 	for _, m := range msgs {
-		all = append(all, wireMessage{Role: m.Role, Content: m.Content})
+		conv = append(conv, oaiMessage{Role: m.Role, Content: m.Content})
 	}
-	maxTokens := 4096
-	payload, _ := json.Marshal(openaiStreamReq{
-		Model: c.Model, Messages: all, Stream: true, MaxTokens: maxTokens,
-	})
+	out := make(chan Delta)
+	go func() {
+		defer close(out)
+		for round := 0; round < maxToolRounds; round++ {
+			text, calls, err := c.openaiRound(out, conv)
+			if err != nil {
+				out <- Delta{Error: err.Error()}
+				return
+			}
+			if len(calls) == 0 {
+				return // a normal answer
+			}
+			// feed the assistant's tool calls + our results back in
+			conv = append(conv, oaiMessage{Role: "assistant", Content: text, ToolCalls: calls})
+			for _, tc := range calls {
+				result := c.runTool(tc.Function.Name, tc.Function.Arguments, out)
+				conv = append(conv, oaiMessage{
+					Role: "tool", ToolCallID: tc.ID, Name: tc.Function.Name, Content: result})
+			}
+		}
+		out <- Delta{Error: "stopped: too many tool rounds"}
+	}()
+	return out, nil
+}
+
+// openaiRound runs one streaming completion, forwarding text deltas to out
+// and returning the assistant text plus any tool calls it requested.
+func (c Config) openaiRound(out chan<- Delta, conv []oaiMessage) (string, []oaiToolCall, error) {
+	reqBody := openaiStreamReq{
+		Model: c.Model, Messages: conv, Stream: true, MaxTokens: 4096,
+	}
+	if c.Tools {
+		reqBody.Tools = []oaiTool{fetchToolDef()}
+		reqBody.ToolChoice = "auto"
+	}
+	payload, _ := json.Marshal(reqBody)
 	req, err := http.NewRequest("POST", endpoint(c.baseURL(), "v1", "/chat/completions"),
 		bytes.NewReader(payload))
 	if err != nil {
-		return nil, err
+		return "", nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	if c.APIKey != "" {
@@ -87,42 +203,69 @@ func (c Config) streamOpenAI(sys string, msgs []Message) (<-chan Delta, error) {
 	}
 	resp, err := c.client().Do(req)
 	if err != nil {
-		return nil, err
+		return "", nil, err
 	}
+	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		resp.Body.Close()
-		return nil, fmt.Errorf("%s: %s", resp.Status, strings.TrimSpace(string(body)))
+		return "", nil, fmt.Errorf("%s: %s", resp.Status, strings.TrimSpace(string(body)))
 	}
-	out := make(chan Delta)
-	go func() {
-		defer resp.Body.Close()
-		defer close(out)
-		sc := bufio.NewScanner(resp.Body)
-		sc.Buffer(make([]byte, 1024), 1024*1024)
-		for sc.Scan() {
-			line := strings.TrimSpace(sc.Text())
-			if !strings.HasPrefix(line, "data:") {
-				continue
-			}
-			data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
-			if data == "[DONE]" {
-				return
-			}
-			var chunk openaiStreamChunk
-			if err := json.Unmarshal([]byte(data), &chunk); err != nil {
-				continue // keep-alive comments and the like
-			}
-			if chunk.Error != nil {
-				out <- Delta{Error: chunk.Error.Message}
-				return
-			}
-			if len(chunk.Choices) > 0 && chunk.Choices[0].Delta.Content != "" {
-				out <- Delta{Text: chunk.Choices[0].Delta.Content}
-			}
+	var text strings.Builder
+	calls := map[int]*oaiToolCall{}
+	var order []int
+	sc := bufio.NewScanner(resp.Body)
+	sc.Buffer(make([]byte, 1024), 1024*1024)
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if !strings.HasPrefix(line, "data:") {
+			continue
 		}
-	}()
-	return out, nil
+		data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if data == "[DONE]" {
+			break
+		}
+		var chunk openaiStreamChunk
+		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
+			continue // keep-alive comments and the like
+		}
+		if chunk.Error != nil {
+			return text.String(), nil, fmt.Errorf("%s", chunk.Error.Message)
+		}
+		if len(chunk.Choices) == 0 {
+			continue
+		}
+		d := chunk.Choices[0].Delta
+		if d.Content != "" {
+			text.WriteString(d.Content)
+			out <- Delta{Text: d.Content}
+		}
+		for _, tc := range d.ToolCalls {
+			cur := calls[tc.Index]
+			if cur == nil {
+				cur = &oaiToolCall{}
+				calls[tc.Index] = cur
+				order = append(order, tc.Index)
+			}
+			if tc.ID != "" {
+				cur.ID = tc.ID
+			}
+			if tc.Type != "" {
+				cur.Type = tc.Type
+			}
+			if tc.Function.Name != "" {
+				cur.Function.Name = tc.Function.Name
+			}
+			cur.Function.Arguments += tc.Function.Arguments
+		}
+	}
+	if err := sc.Err(); err != nil {
+		return text.String(), nil, err
+	}
+	ordered := make([]oaiToolCall, 0, len(order))
+	for _, i := range order {
+		ordered = append(ordered, *calls[i])
+	}
+	return text.String(), ordered, nil
 }
 
 // ---- anthropic ----------------------------------------------------------

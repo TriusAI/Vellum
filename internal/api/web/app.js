@@ -11,8 +11,12 @@ const $ = (sel) => document.querySelector(sel);
 const el = (tag, attrs = {}, ...children) => {
   const node = document.createElement(tag);
   for (const [k, v] of Object.entries(attrs)) {
-    if (k.startsWith("on")) node.addEventListener(k.slice(2), v);
-    else if (v !== null && v !== undefined) node.setAttribute(k, v);
+    if (k.startsWith("on")) { node.addEventListener(k.slice(2), v); continue; }
+    // HTML boolean attributes: presence means true, so a FALSE value must
+    // be omitted entirely (disabled="false" still disables the element!).
+    if (v === false || v === null || v === undefined) continue;
+    if (v === true) { node.setAttribute(k, ""); continue; }
+    node.setAttribute(k, v);
   }
   for (const c of children) node.append(c);
   return node;
@@ -1044,6 +1048,80 @@ async function processIds(ids) {
 let askConfig = null;
 const askHistory = {};
 
+// renderInline renders a line's inline markdown (code, bold, italic,
+// links, bare URLs) into DOM nodes — no innerHTML, so model output can
+// never inject markup.
+function renderInline(text) {
+  const nodes = [];
+  const re = /(\[[^\]]+\]\(https?:\/\/[^)\s]+\))|(`[^`]+`)|(\*\*[^*]+\*\*)|(__[^_]+__)|(\*[^*\n]+\*)|(https?:\/\/[^\s<>()"]+)/g;
+  let last = 0, m;
+  while ((m = re.exec(text))) {
+    if (m.index > last) nodes.push(document.createTextNode(text.slice(last, m.index)));
+    const tok = m[0];
+    if (tok.startsWith("[")) {
+      const mm = tok.match(/^\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)$/);
+      nodes.push(el("a", { href: mm[2], target: "_blank", rel: "noopener" }, mm[1]));
+    } else if (tok.startsWith("`")) {
+      nodes.push(el("code", {}, tok.slice(1, -1)));
+    } else if (tok.startsWith("**") || tok.startsWith("__")) {
+      nodes.push(el("strong", {}, tok.slice(2, -2)));
+    } else if (tok.startsWith("*")) {
+      nodes.push(el("em", {}, tok.slice(1, -1)));
+    } else {
+      nodes.push(el("a", { href: tok, target: "_blank", rel: "noopener" }, tok));
+    }
+    last = m.index + tok.length;
+  }
+  if (last < text.length) nodes.push(document.createTextNode(text.slice(last)));
+  return nodes;
+}
+
+// renderMarkdown turns an LLM answer into formatted DOM: fenced code,
+// headings, lists, paragraphs, and the inline styles above. Untrusted
+// (never innerHTML).
+function renderMarkdown(text) {
+  const frag = document.createDocumentFragment();
+  const lines = String(text ?? "").split("\n");
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i];
+    if (/^\s*```/.test(line)) { // fenced code block
+      const code = [];
+      i++;
+      while (i < lines.length && !/^\s*```/.test(lines[i])) { code.push(lines[i]); i++; }
+      i++;
+      frag.append(el("pre", {}, el("code", {}, code.join("\n"))));
+      continue;
+    }
+    const h = line.match(/^(#{1,6})\s+(.*)$/);
+    if (h) {
+      frag.append(el(h[1].length <= 3 ? "h4" : "h5", {}, ...renderInline(h[2])));
+      i++;
+      continue;
+    }
+    if (/^\s*([-*+]|\d+\.)\s+/.test(line)) { // list
+      const ordered = /^\s*\d+\./.test(line);
+      const list = el(ordered ? "ol" : "ul");
+      while (i < lines.length && /^\s*([-*+]|\d+\.)\s+/.test(lines[i])) {
+        list.append(el("li", {}, ...renderInline(lines[i].replace(/^\s*([-*+]|\d+\.)\s+/, ""))));
+        i++;
+      }
+      frag.append(list);
+      continue;
+    }
+    if (line.trim() === "") { i++; continue; }
+    const para = [];
+    while (i < lines.length && lines[i].trim() !== "" &&
+           !/^\s*```/.test(lines[i]) && !/^#{1,6}\s/.test(lines[i]) &&
+           !/^\s*([-*+]|\d+\.)\s+/.test(lines[i])) {
+      para.push(lines[i]);
+      i++;
+    }
+    frag.append(el("p", {}, ...renderInline(para.join(" "))));
+  }
+  return frag;
+}
+
 // loadAskConfig (re)reads the ask provider config. The server is the
 // source of truth (Settings and the Ask page both write it), so the Ask
 // page reloads it on every render instead of trusting a stale cache.
@@ -1070,6 +1148,8 @@ function askPanel(page) {
     placeholder: askConfig.key_set ? "api key (stored — leave blank to keep)" : "api key" });
   const inBase = el("input", { value: askConfig.base_url || "",
     placeholder: "base url (optional; a host or a /v1 base, e.g. https://host/v1)" });
+  const inTools = el("input", { type: "checkbox" });
+  if (askConfig.tools !== false) inTools.checked = true; // default on
   const cfgMsg = el("span", { class: "hint" }, "");
   const cfgRow = el("div", { class: "row" },
     el("button", {
@@ -1096,7 +1176,7 @@ function askPanel(page) {
             body: JSON.stringify({
               provider: sel.value, model: inModel.value,
               ...(inKey.value ? { api_key: inKey.value } : {}),
-              base_url: inBase.value, }),
+              base_url: inBase.value, tools: inTools.checked }),
           });
           // re-render: reloads the config and re-evaluates Send's disabled
           // state (saving previously left Send disabled)
@@ -1111,6 +1191,8 @@ function askPanel(page) {
     el("label", {}, "model"), inModel,
     el("label", {}, "api key"), inKey,
     el("label", {}, "base url (openai-compatible override)"), inBase,
+    el("label", { class: "ask-check" }, inTools,
+      " tools: let the model fetch external links (WebFetch)"),
     cfgRow));
   wrap.append(cfgBox);
 
@@ -1122,7 +1204,7 @@ function askPanel(page) {
   for (let i = 0; i < hist.length; i += 2) {
     const turn = el("div", { class: "ask-turn" },
       el("div", { class: "q" }, esc(hist[i].content)));
-    if (hist[i + 1]) turn.append(el("div", { class: "a" }, esc(hist[i + 1].content)));
+    if (hist[i + 1]) turn.append(el("div", { class: "a" }, renderMarkdown(hist[i + 1].content)));
     log.append(turn);
   }
   const input = el("textarea", { rows: 2, placeholder: "ask about this document…" });
@@ -1174,11 +1256,12 @@ function askPanel(page) {
           if (!frame.startsWith("data:")) continue;
           const payload = JSON.parse(frame.slice(5).trim());
           if (payload.e) { acc += (acc ? "\n" : "") + "⚠ " + payload.e; }
+          else if (payload.tool) notice("Fetching " + payload.tool + "…", NOTICE_MID);
           else if (payload.d) acc += payload.d;
         }
-        answer.textContent = acc || "…";
+        answer.replaceChildren(renderMarkdown(acc || "…"));
       }
-      answer.textContent = acc || "(empty answer)";
+      answer.replaceChildren(renderMarkdown(acc || "(empty answer)"));
       askHistory[id].push({ role: "assistant", content: acc });
     } catch (e) {
       answer.textContent = "error: " + e.message;
@@ -2110,6 +2193,7 @@ const SETTINGS_GROUPS = [
      ["ask", "provider", "select2", ["none", "openai", "anthropic", "ollama"], "provider"],
      ["ask", "model", "input", null, "ask model"],
      ["ask", "base_url", "input", null, "ask base url"],
+     ["ask", "tools", "check", null, "let the model fetch external links (WebFetch)"],
      ["ask", "api_key", "key", null, "ask api key"],
    ]],
 ];

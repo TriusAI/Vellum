@@ -230,11 +230,15 @@ talks to any of:
 ## Ask an LLM (chat about an document)
 The detail pane has an "Ask an LLM" tab: a streaming chat served by an
 EXTERNAL provider of your choice — `ask: {provider: none|openai|
-anthropic|ollama, model, api_key, base_url}` in config.yaml (openai =
+anthropic|ollama, model, api_key, base_url, tools}` in config.yaml (openai =
 any OpenAI-compatible endpoint via `base_url`; editable + testable in
 the UI too). The chat sees that document's metadata, summary, and
 opening text. Tagging remains constrained by the pipeline backend
-regardless.
+regardless. Answers are formatted (light markdown: code, bold/italic,
+lists, links). With `ask.tools: true` (default), the model may fetch
+external links the question or document references (a small local
+WebFetch tool, OpenAI-compatible providers); each fetch is shown while
+it runs.
 
 ## Configuration
 

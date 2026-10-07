@@ -213,11 +213,26 @@ button.mini { font-size: .72rem; padding: 0 .45rem; }
 .ask-fields label { width: 100%; font-size: .78rem; color: var(--muted);
   margin: 0; }
 .ask-fields select, .ask-fields input { flex: 1 1 45%; min-width: 200px; }
+.ask-fields .ask-check { display: flex; align-items: center; gap: .35rem;
+  width: 100%; font-size: .85rem; color: var(--fg); }
+.ask-fields .ask-check input { min-width: 0; flex: 0 0 auto; }
 .ask-log { display: flex; flex-direction: column; gap: .6rem; }
 .ask-turn .q { background: var(--chip); padding: .4rem .6rem;
   font-size: .9rem; white-space: pre-wrap; }
 .ask-turn .a { padding: .4rem 0 .4rem .2rem; font-size: .92rem;
-  white-space: pre-wrap; color: var(--fg); min-height: 1.2rem; }
+  color: var(--fg); min-height: 1.2rem; }
+/* rendered markdown in answers */
+.ask-turn .a p { margin: .4rem 0; }
+.ask-turn .a p:first-child { margin-top: 0; }
+.ask-turn .a ul, .ask-turn .a ol { margin: .3rem 0 .3rem 1.3rem; padding: 0; }
+.ask-turn .a li { margin: .1rem 0; }
+.ask-turn .a h4, .ask-turn .a h5 { margin: .6rem 0 .25rem; font-size: .98rem; }
+.ask-turn .a pre { background: var(--bg); border: 1px solid var(--line);
+  padding: .5rem .6rem; overflow: auto; font-size: .82rem; margin: .4rem 0; }
+.ask-turn .a code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: .88em; background: var(--chip); padding: 0 .25rem; }
+.ask-turn .a pre code { background: none; padding: 0; }
+.ask-turn .a a { color: var(--accent); }
 .ask-panel textarea { width: 100%; resize: vertical; }
 
 /* chunk list (Text page): collapsible rows */

@@ -223,6 +223,14 @@ func TestAPI(t *testing.T) {
 		askCfg["enabled"] != true {
 		t.Fatalf("PUT /api/ask/config must echo the full config: %v", askCfg)
 	}
+	if askCfg["tools"] != true {
+		t.Fatalf("ask tools should default on: %v", askCfg)
+	}
+	// tools can be turned off
+	request("PUT", "/api/ask/config", `{"tools":false}`, &askCfg, 200)
+	if askCfg["tools"] != false {
+		t.Fatalf("ask tools toggle not applied: %v", askCfg)
+	}
 	request("GET", "/api/ask/config", "", &askCfg, 200)
 	if askCfg["provider"] != "openai" || askCfg["key_set"] != true {
 		t.Fatalf("ask config round-trip wrong: %v", askCfg)
@@ -283,7 +291,7 @@ func TestAPI(t *testing.T) {
 	if askSec, ok := cfgJSON["ask"].(map[string]any); !ok {
 		t.Fatalf("config missing ask section: %v", cfgJSON)
 	} else {
-		for _, k := range []string{"provider", "model", "base_url", "key_set"} {
+		for _, k := range []string{"provider", "model", "base_url", "tools", "key_set"} {
 			if _, ok := askSec[k]; !ok {
 				t.Fatalf("config ask.%s missing (must be lowercase json): %v", k, askSec)
 			}

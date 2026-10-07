@@ -15,6 +15,10 @@ type Config struct {
 	Model    string `yaml:"model"`
 	APIKey   string `yaml:"api_key"`
 	BaseURL  string `yaml:"base_url"` // override; per-provider default
+	// Tools lets the chat model call tools — currently a fetch_url
+	// (WebFetch) tool so it can consult external links. Supported on
+	// OpenAI-compatible providers and Anthropic.
+	Tools bool `yaml:"tools"`
 }
 
 // Message is one chat turn (both directions).
@@ -23,10 +27,11 @@ type Message struct {
 	Content string `json:"content"`
 }
 
-// Delta is one streamed chunk of assistant text; Error (nonzero)
-// terminates the stream.
+// Delta is one streamed chunk; Error (nonzero) terminates the stream and
+// Tool (nonzero) reports a tool the model invoked (for a UI hint).
 type Delta struct {
 	Text  string
+	Tool  string
 	Error string
 }
 
@@ -84,6 +89,7 @@ func (c Config) Test() error {
 	if !c.Enabled() {
 		return ErrDisabled
 	}
+	c.Tools = false // a plain exchange — tools would count as "no output"
 	deltas, err := c.Stream("You are a connection test.",
 		[]Message{{Role: "user", Content: "Reply with exactly: OK"}})
 	if err != nil {
