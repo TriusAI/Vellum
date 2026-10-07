@@ -237,8 +237,8 @@ opening text. Tagging remains constrained by the pipeline backend
 regardless. Answers are formatted (light markdown: code, bold/italic,
 lists, links). With `ask.tools: true` (default), the model may fetch
 external links the question or document references (a small local
-WebFetch tool, OpenAI-compatible providers); each fetch is shown while
-it runs.
+WebFetch tool; OpenAI-compatible providers and Anthropic); each fetch is
+shown while it runs.
 
 ## Configuration
 

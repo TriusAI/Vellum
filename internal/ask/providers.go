@@ -270,31 +270,120 @@ func (c Config) openaiRound(out chan<- Delta, conv []oaiMessage) (string, []oaiT
 
 // ---- anthropic ----------------------------------------------------------
 
-type anthropicStreamReq struct {
-	Model     string        `json:"model"`
-	System    string        `json:"system,omitempty"`
-	Messages  []wireMessage `json:"messages"` // system roles not allowed here
-	MaxTokens int           `json:"max_tokens"`
-	Stream    bool          `json:"stream"`
+type anthropicReq struct {
+	Model     string          `json:"model"`
+	System    string          `json:"system,omitempty"`
+	Messages  []anthropicMsg  `json:"messages"` // system roles go in System
+	MaxTokens int             `json:"max_tokens"`
+	Stream    bool            `json:"stream"`
+	Tools     []anthropicTool `json:"tools,omitempty"`
+}
+
+// anthropicMsg.Content is a string (plain turns) or []anthropicBlock (turns
+// that carry tool_use / tool_result blocks).
+type anthropicMsg struct {
+	Role    string `json:"role"`
+	Content any    `json:"content"`
+}
+
+type anthropicBlock struct {
+	Type      string          `json:"type"` // text | tool_use | tool_result
+	Text      string          `json:"text,omitempty"`
+	ID        string          `json:"id,omitempty"`
+	Name      string          `json:"name,omitempty"`
+	Input     json.RawMessage `json:"input,omitempty"`
+	ToolUseID string          `json:"tool_use_id,omitempty"`
+	Content   string          `json:"content,omitempty"`
+}
+
+type anthropicTool struct {
+	Name        string         `json:"name"`
+	Description string         `json:"description"`
+	InputSchema map[string]any `json:"input_schema"`
+}
+
+func anthropicFetchTool() anthropicTool {
+	f := fetchToolDef()
+	return anthropicTool{
+		Name:        f.Function.Name,
+		Description: f.Function.Description,
+		InputSchema: f.Function.Parameters,
+	}
+}
+
+// anthropicCall is a tool_use accumulated from the stream.
+type anthropicCall struct {
+	id, name, args string
 }
 
 func (c Config) streamAnthropic(sys string, msgs []Message) (<-chan Delta, error) {
-	rest := []wireMessage{}
+	conv := []anthropicMsg{}
 	for _, m := range msgs {
 		role := m.Role
 		if role != "user" && role != "assistant" {
 			role = "user"
 		}
-		rest = append(rest, wireMessage{Role: role, Content: m.Content})
+		conv = append(conv, anthropicMsg{Role: role, Content: m.Content})
 	}
-	payload, _ := json.Marshal(anthropicStreamReq{
-		Model: c.Model, System: sys, Messages: rest,
+	out := make(chan Delta)
+	go func() {
+		defer close(out)
+		for round := 0; round < maxToolRounds; round++ {
+			text, calls, err := c.anthropicRound(out, sys, conv)
+			if err != nil {
+				out <- Delta{Error: err.Error()}
+				return
+			}
+			if len(calls) == 0 {
+				return // a normal answer
+			}
+			// assistant turn: any text, then the tool_use blocks
+			blocks := []anthropicBlock{}
+			if strings.TrimSpace(text) != "" {
+				blocks = append(blocks, anthropicBlock{Type: "text", Text: text})
+			}
+			for _, tc := range calls {
+				blocks = append(blocks, anthropicBlock{
+					Type: "tool_use", ID: tc.id, Name: tc.name,
+					Input: json.RawMessage(orEmptyObject(tc.args))})
+			}
+			conv = append(conv, anthropicMsg{Role: "assistant", Content: blocks})
+			// user turn: the tool results
+			results := []anthropicBlock{}
+			for _, tc := range calls {
+				result := c.runTool(tc.name, tc.args, out)
+				results = append(results, anthropicBlock{
+					Type: "tool_result", ToolUseID: tc.id, Content: result})
+			}
+			conv = append(conv, anthropicMsg{Role: "user", Content: results})
+		}
+		out <- Delta{Error: "stopped: too many tool rounds"}
+	}()
+	return out, nil
+}
+
+func orEmptyObject(s string) string {
+	if strings.TrimSpace(s) == "" {
+		return "{}"
+	}
+	return s
+}
+
+// anthropicRound runs one streaming /v1/messages call, forwarding text
+// deltas to out and returning the assistant text + any tool_use blocks.
+func (c Config) anthropicRound(out chan<- Delta, sys string, conv []anthropicMsg) (string, []anthropicCall, error) {
+	reqBody := anthropicReq{
+		Model: c.Model, System: sys, Messages: conv,
 		MaxTokens: 4096, Stream: true,
-	})
+	}
+	if c.Tools {
+		reqBody.Tools = []anthropicTool{anthropicFetchTool()}
+	}
+	payload, _ := json.Marshal(reqBody)
 	req, err := http.NewRequest("POST", endpoint(c.baseURL(), "v1", "/messages"),
 		bytes.NewReader(payload))
 	if err != nil {
-		return nil, err
+		return "", nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	if c.APIKey != "" {
@@ -303,53 +392,78 @@ func (c Config) streamAnthropic(sys string, msgs []Message) (<-chan Delta, error
 	req.Header.Set("anthropic-version", "2023-06-01")
 	resp, err := c.client().Do(req)
 	if err != nil {
-		return nil, err
+		return "", nil, err
 	}
+	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		resp.Body.Close()
-		return nil, fmt.Errorf("%s: %s", resp.Status, strings.TrimSpace(string(body)))
+		return "", nil, fmt.Errorf("%s: %s", resp.Status, strings.TrimSpace(string(body)))
 	}
-	out := make(chan Delta)
-	go func() {
-		defer resp.Body.Close()
-		defer close(out)
-		sc := bufio.NewScanner(resp.Body)
-		sc.Buffer(make([]byte, 1024), 1024*1024)
-		for sc.Scan() {
-			line := strings.TrimSpace(sc.Text())
-			if !strings.HasPrefix(line, "data:") {
-				continue // "event: ..." lines precede each data line
+	var text strings.Builder
+	calls := map[int]*anthropicCall{}
+	var order []int
+	sc := bufio.NewScanner(resp.Body)
+	sc.Buffer(make([]byte, 1024), 1024*1024)
+scan:
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if !strings.HasPrefix(line, "data:") {
+			continue // "event: ..." lines precede each data line
+		}
+		var ev struct {
+			Type         string `json:"type"`
+			Index        int    `json:"index"`
+			ContentBlock struct {
+				Type string `json:"type"`
+				ID   string `json:"id"`
+				Name string `json:"name"`
+			} `json:"content_block"`
+			Delta struct {
+				Type        string `json:"type"`
+				Text        string `json:"text"`
+				PartialJSON string `json:"partial_json"`
+			} `json:"delta"`
+			Error *struct {
+				Message string `json:"message"`
+			} `json:"error"`
+		}
+		if err := json.Unmarshal([]byte(strings.TrimSpace(line[5:])), &ev); err != nil {
+			continue
+		}
+		switch ev.Type {
+		case "content_block_start":
+			if ev.ContentBlock.Type == "tool_use" {
+				calls[ev.Index] = &anthropicCall{id: ev.ContentBlock.ID, name: ev.ContentBlock.Name}
+				order = append(order, ev.Index)
 			}
-			var ev struct {
-				Type  string `json:"type"`
-				Delta struct {
-					Type string `json:"type"`
-					Text string `json:"text"`
-				} `json:"delta"`
-				Error *struct {
-					Message string `json:"message"`
-				} `json:"error"`
-			}
-			if err := json.Unmarshal([]byte(strings.TrimSpace(line[5:])), &ev); err != nil {
-				continue
-			}
-			switch ev.Type {
-			case "content_block_delta":
+		case "content_block_delta":
+			switch ev.Delta.Type {
+			case "text_delta":
 				if ev.Delta.Text != "" {
+					text.WriteString(ev.Delta.Text)
 					out <- Delta{Text: ev.Delta.Text}
 				}
-			case "message_stop":
-				return
-			case "error":
-				if ev.Error != nil {
-					out <- Delta{Error: ev.Error.Message}
-					return
+			case "input_json_delta":
+				if tc := calls[ev.Index]; tc != nil {
+					tc.args += ev.Delta.PartialJSON
 				}
 			}
+		case "message_stop":
+			break scan
+		case "error":
+			if ev.Error != nil {
+				return text.String(), nil, fmt.Errorf("%s", ev.Error.Message)
+			}
 		}
-	}()
-	return out, nil
+	}
+	if err := sc.Err(); err != nil {
+		return text.String(), nil, err
+	}
+	ordered := make([]anthropicCall, 0, len(order))
+	for _, i := range order {
+		ordered = append(ordered, *calls[i])
+	}
+	return text.String(), ordered, nil
 }
 
 // ---- ollama --------------------------------------------------------------

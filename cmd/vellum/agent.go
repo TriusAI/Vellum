@@ -220,9 +220,9 @@ tool to read external http(s) links the user or the document references
 and link-local metadata hosts refused; honors HTTPS_PROXY). The server
 runs the tool loop (up to 4 rounds) and reports each fetch as a
 {"tool":"url"} event. IMPLEMENTED for OpenAI-compatible providers
-(including Ollama's /v1 endpoint and local llama.cpp); Anthropic/Ollama
-native ignore tools. Answers are rendered with light markdown (code,
-bold/italic, lists, links) in the UI.
+(including Ollama's /v1 endpoint and local llama.cpp) AND Anthropic
+(tool_use/tool_result); Ollama's NATIVE /api/chat ignores tools. Answers
+are rendered with light markdown (code, bold/italic, lists, links) in the UI.
 
 ## Fixing garbled text
 When the text (Text tab in the UI) is garbled — a bad OCR pass baked

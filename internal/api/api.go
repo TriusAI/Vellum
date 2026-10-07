@@ -1982,8 +1982,8 @@ func (s *Server) postAsk(w http.ResponseWriter, r *http.Request) {
 		out = ask.Config{Provider: body.Provider, Model: body.Model,
 			APIKey: body.APIKey, BaseURL: body.BaseURL, Tools: s.cfg.Ask.Tools}
 	}
-	// only OpenAI-compatible providers implement the fetch tool loop
-	if out.Tools && out.Provider == "openai" {
+	// only tool-capable providers implement the fetch loop
+	if out.Tools && (out.Provider == "openai" || out.Provider == "anthropic") {
 		sys += "\nYou may call the fetch_url tool to read http(s) links the " +
 			"user or the document references before answering."
 	}

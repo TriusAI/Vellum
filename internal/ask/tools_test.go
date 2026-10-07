@@ -40,7 +40,76 @@ func TestWebFetch(t *testing.T) {
 	}
 }
 
-// TestOpenAIToolLoop drives a mock OpenAI-compatible server that first
+// TestAnthropicToolLoop drives a mock Anthropic /v1/messages server through
+// a tool_use round (the URL arrives split across input_json_delta events)
+// then a text answer — exercising the Anthropic tool loop.
+func TestAnthropicToolLoop(t *testing.T) {
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/page":
+			io.WriteString(w, "<html><body><p>Fetched page content here.</p></body></html>")
+		case "/v1/messages":
+			body, _ := io.ReadAll(r.Body)
+			w.Header().Set("Content-Type", "text/event-stream")
+			sse := func(v any) {
+				b, _ := json.Marshal(v)
+				fmt.Fprintf(w, "data: %s\n\n", b)
+			}
+			if !strings.Contains(string(body), `"tool_result"`) {
+				// round 1: a tool_use block whose input streams in pieces
+				sse(map[string]any{"type": "content_block_start", "index": 0,
+					"content_block": map[string]any{"type": "tool_use", "id": "toolu_1", "name": "fetch_url"}})
+				sse(map[string]any{"type": "content_block_delta", "index": 0,
+					"delta": map[string]any{"type": "input_json_delta", "partial_json": `{"url":"`}})
+				sse(map[string]any{"type": "content_block_delta", "index": 0,
+					"delta": map[string]any{"type": "input_json_delta", "partial_json": srv.URL + `/page"}`}})
+				sse(map[string]any{"type": "content_block_stop", "index": 0})
+				sse(map[string]any{"type": "message_delta", "delta": map[string]any{"stop_reason": "tool_use"}})
+				sse(map[string]any{"type": "message_stop"})
+				return
+			}
+			// round 2: the tool result must be present; give a text answer
+			if !strings.Contains(string(body), "Fetched page content here.") {
+				sse(map[string]any{"type": "error", "error": map[string]any{"message": "tool result missing"}})
+				return
+			}
+			sse(map[string]any{"type": "content_block_start", "index": 0,
+				"content_block": map[string]any{"type": "text", "text": ""}})
+			sse(map[string]any{"type": "content_block_delta", "index": 0,
+				"delta": map[string]any{"type": "text_delta", "text": "The page says hi."}})
+			sse(map[string]any{"type": "content_block_stop", "index": 0})
+			sse(map[string]any{"type": "message_stop"})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	cfg := Config{Provider: "anthropic", Model: "test", BaseURL: srv.URL, Tools: true}
+	deltas, err := cfg.Stream("sys", []Message{{Role: "user", Content: "what does the link say?"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var text strings.Builder
+	toolReported := false
+	for d := range deltas {
+		if d.Error != "" {
+			t.Fatalf("stream error: %s", d.Error)
+		}
+		if d.Tool != "" {
+			toolReported = true
+		}
+		text.WriteString(d.Text)
+	}
+	if !toolReported {
+		t.Fatal("the fetch tool call was not reported")
+	}
+	if got := text.String(); got != "The page says hi." {
+		t.Fatalf("final answer wrong: %q", got)
+	}
+}
+
 // asks for a fetch_url tool call, then answers using the fetched text —
 // exercising the whole loop (request → tool call → fetch → tool result →
 // second request → streamed answer).

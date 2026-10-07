@@ -213,10 +213,10 @@ Fast paths by kind (`internal/classify` + `produceSummary` in ingest):
   anthropic/ollama adapters in `internal/ask`); UI tab with Test/Save;
   tags stay grammar-bound regardless of what the chat uses. With
   `ask.tools` (default on) the model may call a `fetch_url` (WebFetch)
-  tool — `internal/ask/webfetch.go` + the tool loop in providers.go
-  (OpenAI-compatible only; ≤4 rounds; honors HTTPS_PROXY; http(s) only,
-  metadata hosts blocked). `{"tool":url}` SSE events; answers render
-  light markdown in the UI.
+  tool — `internal/ask/webfetch.go` + the tool loops in providers.go
+  (OpenAI-compatible AND Anthropic; Ollama-native ignores tools; ≤4
+  rounds; honors HTTPS_PROXY; http(s) only, metadata hosts blocked).
+  `{"tool":url}` SSE events; answers render light markdown in the UI.
 - settings: `GET/PUT /api/config` — live-applied + persisted to
   config.yaml; "Settings…" dialog in the top bar. (Starting/stopping the
   bundled llama-servers is launcher territory: rerun `./vellum.sh serve`.)
@@ -400,13 +400,12 @@ Docker: `pack/Dockerfile` + `docker-entrypoint.sh`; Hub is proxy-blocked
 
 ## 10. Where things state-wise
 
-- HEAD: v0.22.0 (`9118fd1`), all tests green. Since 0.22.0: fixed the
-  el() boolean-attribute bug (disabled:false became disabled="false",
-  which disables the button); ask answers render light markdown (code,
-  bold/italic, lists, links; DOM-built, never innerHTML); ask gains a
-  WebFetch tool (ask.tools default on) — the model may fetch external
-  http(s) links, OpenAI-compatible providers, ≤4 rounds, `{"tool":url}`
-  events, `internal/ask/webfetch.go` + the loop in providers.go.
+- HEAD: v0.23.0 (see git log), all tests green. Since 0.23.0: the ask
+  WebFetch tool now also works on ANTHROPIC (tool_use/tool_result loop;
+  mock-tested), not just OpenAI-compatible providers.
+- v0.22.0: fixed the el() boolean-attr bug (disabled:false disabled the
+  button); ask answers render light markdown; ask WebFetch tool added
+  (ask.tools default on).
 - v0.21.2: ask errors surfaced (the real provider message instead of
   "Bad Request"), tolerant base-URL joins (…/v1), disabled-button styling.
 - v0.21.1: fixed the broken Ask page (config json tags, PUT echo, config
