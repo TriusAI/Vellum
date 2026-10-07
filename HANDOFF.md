@@ -359,7 +359,7 @@ Docker: `pack/Dockerfile` + `docker-entrypoint.sh`; Hub is proxy-blocked
 
 ## 10. Where things state-wise
 
-- HEAD: v0.17.0 (see git log), all tests green. Since 0.16: COLLECTIONS
+- HEAD: v0.17.0 (`c5edb8e`), all tests green. Since 0.16: COLLECTIONS
   (user-managed research groups: collections + collection_docs tables,
   CRUD API/CLI, a Collections root page + [Collection] pages, add/remove
   on the Summary page); page moves use CSS order (previews don't reload);
@@ -370,15 +370,17 @@ Docker: `pack/Dockerfile` + `docker-entrypoint.sh`; Hub is proxy-blocked
   internal/summarize); category chips suppressed inside the tree;
   flash-free updates (refreshPage skips unchanged data + preserves
   scroll; renderList preserves scroll and collapsed groups).
-- Pack stage `pack/stage/vellum-d11da57-linux-amd64/` (user's live
-  library inside) updated to the 0.16.1 binary; distributable tarball
-  `pack/vellum-d11da57-linux-x86_64.tar.gz` (clean of the DB — verified
-  with tar -tzf | grep -c library.db = 0). The user's long-running serve
-  (PID from an OLDER deleted stage, port 8097) still runs its old binary
-  and DB copy — the new one takes effect on the next ./vellum.sh serve.
-  NOTE: that serve's library.db exists only via its open fds (its stage
-  dir was deleted); if it was used for real work, recover it from
-  /proc/701/fd BEFORE stopping it.
+- Pack stage `pack/stage/vellum-c5edb8e-linux-amd64/` (user's live
+  library inside) updated to the 0.17.0 binary; distributable tarball
+  `pack/vellum-c5edb8e-linux-x86_64.tar.gz` (clean of the DB — verified
+  with tar -tzf | grep -c library.db = 0). The collections tables are
+  created on first Open of an existing library (verified against a
+  hand-built old-schema DB: data intact, tables appear). The user's
+  long-running serve (PID from an OLDER deleted stage, port 8097) still
+  runs its old binary/DB — the new one takes effect on the next
+  ./vellum.sh serve. NOTE: that serve's library.db exists only via its
+  open fds (its stage dir was deleted); if it was used for real work,
+  recover it from /proc/701/fd BEFORE stopping it.
 - The user runs `./vellum.sh serve` (their own llama-servers on 8081/8082
   are LONG-RUNNING — do not kill them; kill only ephemeral test ones).
 - `AGENTS.md` (repo root) carries the agent-focused subset of this
