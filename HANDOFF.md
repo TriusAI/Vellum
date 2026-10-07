@@ -400,7 +400,7 @@ Docker: `pack/Dockerfile` + `docker-entrypoint.sh`; Hub is proxy-blocked
 
 ## 10. Where things state-wise
 
-- HEAD: v0.23.0 (see git log), all tests green. Since 0.23.0: the ask
+- HEAD: v0.23.0 (`78a1e17`), all tests green. Since 0.23.0: the ask
   WebFetch tool now also works on ANTHROPIC (tool_use/tool_result loop;
   mock-tested), not just OpenAI-compatible providers.
 - v0.22.0: fixed the el() boolean-attr bug (disabled:false disabled the
@@ -421,9 +421,9 @@ Docker: `pack/Dockerfile` + `docker-entrypoint.sh`; Hub is proxy-blocked
   pages; .item-list styling with hover affordance.
 - v0.17: COLLECTIONS; CSS-order page moves; bottom status bar.
 - v0.16: auto-filing learns from user corrections; flash-free updates.
-- Pack stage `pack/stage/vellum-9118fd1-linux-amd64/` (user's live
-  library inside) updated to the 0.22.0 binary; distributable tarball
-  `pack/vellum-9118fd1-linux-x86_64.tar.gz` (clean of the DB — verified
+- Pack stage `pack/stage/vellum-78a1e17-linux-amd64/` (user's live
+  library inside) updated to the 0.23.0 binary; distributable tarball
+  `pack/vellum-78a1e17-linux-x86_64.tar.gz` (clean of the DB — verified
   with tar -tzf | grep -c library.db = 0). NOTE: the user runs their OWN
   serve(s) and restarts them freely — an old one (PID 701, port 8097) is
   long-running; a newer one from the stage may appear (its exe shows
