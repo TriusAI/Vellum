@@ -1773,33 +1773,37 @@ func (s *Server) getAskConfig(w http.ResponseWriter, r *http.Request) {
 // in the request keeps the stored one (users do not retype it).
 func (s *Server) putAskConfig(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Provider string `json:"provider"`
-		Model    string `json:"model"`
-		APIKey   string `json:"api_key"`
-		BaseURL  string `json:"base_url"`
+		Provider *string `json:"provider"`
+		Model    *string `json:"model"`
+		APIKey   *string `json:"api_key"`
+		BaseURL  *string `json:"base_url"`
 	}
 	if err := decodeBody(r, &body); err != nil {
 		writeErr(w, 400, "bad JSON body: "+err.Error())
 		return
 	}
 	c := &s.cfg.Ask
-	if body.Provider != "" {
-		c.Provider = body.Provider
+	// present fields are applied (so an empty model/base_url CLEARS them);
+	// an omitted api_key keeps the stored one (users don't retype it).
+	if body.Provider != nil && *body.Provider != "" {
+		c.Provider = *body.Provider
 	}
-	if body.Model != "" {
-		c.Model = body.Model
+	if body.Model != nil {
+		c.Model = *body.Model
 	}
-	if body.BaseURL != "" || body.Provider != "" {
-		c.BaseURL = body.BaseURL
+	if body.BaseURL != nil {
+		c.BaseURL = *body.BaseURL
 	}
-	if body.APIKey != "" {
-		c.APIKey = body.APIKey
+	if body.APIKey != nil && *body.APIKey != "" {
+		c.APIKey = *body.APIKey
 	}
 	if err := s.cfg.Save(); err != nil {
 		writeErr(w, 500, "config save failed: "+err.Error())
 		return
 	}
-	writeJSON(w, 200, map[string]any{"ok": true, "enabled": c.Enabled()})
+	// return the SAME shape as GET (provider/model/base_url/key_set/enabled):
+	// the UI caches this response, so a partial object corrupted its state.
+	s.getAskConfig(w, r)
 }
 
 // regenerate rebuilds individual metadata fields in place (no full
@@ -2014,8 +2018,10 @@ func sseSend(w http.ResponseWriter, payload any) {
 func (s *Server) getConfig(w http.ResponseWriter, r *http.Request) {
 	c := s.cfg
 	type askOut struct {
-		Provider, Model, BaseURL string
-		KeySet                   bool
+		Provider string `json:"provider"`
+		Model    string `json:"model"`
+		BaseURL  string `json:"base_url"`
+		KeySet   bool   `json:"key_set"`
 	}
 	writeJSON(w, 200, map[string]any{
 		"llm": map[string]any{

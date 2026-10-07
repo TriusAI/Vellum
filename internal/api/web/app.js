@@ -326,6 +326,9 @@ async function refreshPage(page) {
   if (!page.data)
     page.content.replaceChildren(el("div", { class: "hint" }, "loading…"));
   try {
+    // the Ask page's provider config lives server-side (Settings writes it
+    // too) — reload it here so the panel is never stale
+    if (page.kind === "ask") await loadAskConfig();
     const data = page.kind === "collections" ? await api("/api/collections")
       : page.kind === "collection" ? await api(`/api/collections/${page.docId}`)
       : page.kind === "tags" ? await api("/api/tags")
@@ -334,7 +337,10 @@ async function refreshPage(page) {
       : page.kind === "note" ? await api(`/api/notes/${page.docId}`)
       : await api(`/api/documents/${page.docId}`);
     if (token !== page.token) return; // a newer refresh won
-    const unchanged = page.data && JSON.stringify(data) === JSON.stringify(page.data);
+    // the Ask page's content depends on askConfig, not just the document,
+    // so it is never short-circuited by an unchanged document
+    const unchanged = page.kind !== "ask" &&
+      page.data && JSON.stringify(data) === JSON.stringify(page.data);
     page.data = data;
     updatePageTitle(page);
     if (!unchanged) {
@@ -351,6 +357,12 @@ async function refreshPage(page) {
 function refreshDocPages(docId) {
   for (const p of pages)
     if (isDocPage(p) && p.docId === docId) refreshPage(p);
+}
+
+// refreshAskPages re-renders open Ask pages (after the provider config
+// changed in Settings) — each reloads the config and re-evaluates Send.
+function refreshAskPages() {
+  for (const p of pages) if (p.kind === "ask") refreshPage(p);
 }
 
 function refreshAllDocPages() {
@@ -1032,6 +1044,15 @@ async function processIds(ids) {
 let askConfig = null;
 const askHistory = {};
 
+// loadAskConfig (re)reads the ask provider config. The server is the
+// source of truth (Settings and the Ask page both write it), so the Ask
+// page reloads it on every render instead of trusting a stale cache.
+async function loadAskConfig() {
+  try { askConfig = await api("/api/ask/config"); }
+  catch (e) { askConfig = { enabled: false, provider: "none" }; }
+  return askConfig;
+}
+
 function askPanel(page) {
   const id = page.docId;
   const wrap = el("div", { class: "ask-panel" });
@@ -1070,17 +1091,16 @@ function askPanel(page) {
     el("button", {
       onclick: async () => {
         try {
-          askConfig = await api("/api/ask/config", {
+          await api("/api/ask/config", {
             method: "PUT", headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
               provider: sel.value, model: inModel.value,
               ...(inKey.value ? { api_key: inKey.value } : {}),
               base_url: inBase.value, }),
           });
-          cfgMsg.textContent = "saved ✓";
-          const sum = cfgBox.querySelector("summary");
-          sum.textContent = "LLM: " + (askConfig.enabled
-            ? `${askConfig.provider} / ${askConfig.model || "(model)"}` : "not configured");
+          // re-render: reloads the config and re-evaluates Send's disabled
+          // state (saving previously left Send disabled)
+          refreshPage(page);
         } catch (e) { cfgMsg.textContent = "save failed: " + e.message; }
       },
       style: "margin-left: .4rem",
@@ -1993,10 +2013,8 @@ function openFromURL() {
   try {
     const target = openFromURL();
     if (!target) openPage("library");
-    // the ask page renders synchronously — the provider config is loaded
-    // once here (never awaited inside a page render: [object Promise])
-    try { askConfig = await api("/api/ask/config"); }
-    catch (e) { askConfig = { enabled: false, provider: "none" }; }
+    // the ask provider config is loaded lazily when an Ask page renders
+    // (refreshPage → loadAskConfig); no boot-time cache to go stale.
     // apply the saved theme (presentation comes from config.yaml)
     try { const cc = await api("/api/config"); applyTheme(cc.theme); } catch (e) { /* default */ }
     const st = await refresh();
@@ -2123,7 +2141,8 @@ async function settingsOpen() {
       } else if (kind === "number") {
         input = el("input", { type: "number", value: value ?? "" });
       } else if (kind === "key") {
-        input = el("input", { type: "password", placeholder: value ? "(stored)" : "(unset)" });
+        const stored = value || cfg[sec]?.key_set;
+        input = el("input", { type: "password", placeholder: stored ? "(stored)" : "(unset)" });
       } else {
         input = el("input", { type: "text", value: value ?? "" });
       }
@@ -2234,7 +2253,8 @@ $("#settings-save").onclick = async () => {
       body: JSON.stringify(payload),
     });
     applyTheme(payload.theme);
-    askConfig = null; // re-read on next use
+    askConfig = null; // re-read on the next Ask render
+    refreshAskPages(); // Settings and the Ask page share this config
     $("#settings-msg").textContent = "saved + applied ✓";
     await refresh();
   } catch (e) { $("#settings-msg").textContent = "save failed: " + e.message; }

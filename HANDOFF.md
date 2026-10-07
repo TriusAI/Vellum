@@ -395,11 +395,15 @@ Docker: `pack/Dockerfile` + `docker-entrypoint.sh`; Hub is proxy-blocked
 
 ## 10. Where things state-wise
 
-- HEAD: v0.21.0 (`2fdcbfa`), all tests green. Since 0.21: the UI is
-  URL-ADDRESSABLE (?doc=42&view=preview&page=7, ?tag=, ?collection=,
-  ?note=, ?view=tags|notes|collections, ?q=&semantic=1; mirrored on
-  navigation; 🔗 copies a link) and directory ingest is recursive +
-  skips hidden entries (vault-friendly).
+- HEAD: v0.21.1 (see git log), all tests green. Since 0.21.1: fixed the
+  broken Ask page — /api/config's ask section lacked JSON tags
+  (capitalized keys), so Settings showed blank and a Settings save wiped
+  the ask config; PUT /api/ask/config returned a partial {ok,enabled}
+  object the UI cached; Settings-save nulled askConfig with nothing to
+  reload it; the Ask page now reloads its config on every render and
+  re-renders after either save (Send re-enables).
+- v0.21: the UI is URL-ADDRESSABLE and directory ingest is recursive +
+  skips hidden entries.
 - v0.20: TAGS page (cloud → [Tag] pages), NOTES (scratchpad table, CRUD,
   CLI, management + [Note] pages), THEMES (config theme → CSS variables).
 - v0.19: embed models' asymmetric retrieval prefixes (embedPrefixes;

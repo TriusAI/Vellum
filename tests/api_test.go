@@ -217,6 +217,12 @@ func TestAPI(t *testing.T) {
 	var askCfg map[string]any
 	request("PUT", "/api/ask/config",
 		`{"provider":"openai","model":"gpt-4o-mini","api_key":"sk-test"}`, &askCfg, 200)
+	// the PUT response MUST be the full config (the UI caches it); a
+	// partial {ok,enabled} object used to leave the Send button disabled
+	if askCfg["provider"] != "openai" || askCfg["model"] != "gpt-4o-mini" ||
+		askCfg["enabled"] != true {
+		t.Fatalf("PUT /api/ask/config must echo the full config: %v", askCfg)
+	}
 	request("GET", "/api/ask/config", "", &askCfg, 200)
 	if askCfg["provider"] != "openai" || askCfg["key_set"] != true {
 		t.Fatalf("ask config round-trip wrong: %v", askCfg)
@@ -270,6 +276,18 @@ func TestAPI(t *testing.T) {
 	request("GET", "/api/config", "", &cfgJSON, 200)
 	if _, ok := cfgJSON["llm"].(map[string]any)["backend"]; !ok {
 		t.Fatal("config missing llm.backend")
+	}
+	// the ask section must use lowercase JSON keys the UI reads
+	// (cfg.ask.provider…); capitalized keys silently broke the Settings UI
+	// and made a Settings save wipe the working ask config.
+	if askSec, ok := cfgJSON["ask"].(map[string]any); !ok {
+		t.Fatalf("config missing ask section: %v", cfgJSON)
+	} else {
+		for _, k := range []string{"provider", "model", "base_url", "key_set"} {
+			if _, ok := askSec[k]; !ok {
+				t.Fatalf("config ask.%s missing (must be lowercase json): %v", k, askSec)
+			}
+		}
 	}
 	request("PUT", "/api/config", `{"summarize":{"max_tags":6}}`, &cfgJSON, 200)
 	if cfgJSON["summarize"].(map[string]any)["max_tags"].(float64) != 6 {
