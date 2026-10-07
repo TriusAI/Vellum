@@ -32,6 +32,7 @@
     <button id="btn-tags">Tags…</button>
     <button id="btn-notes">Notes…</button>
     <button id="btn-ingest">Ingest…</button>
+    <button id="btn-watch">Watch…</button>
     <button id="btn-process">Process pending <span id="pending-n"></span></button>
     <button id="btn-lib">Import/Export…</button>
     <button id="btn-vocab">Vocabulary</button>
@@ -68,6 +69,33 @@
     <button id="ingest-go">Ingest</button>
   </div>
   <pre id="ingest-result" class="result hidden"></pre>
+</dialog>
+
+<dialog id="dlg-watch">
+  <h2>Filesystem watcher</h2>
+  <p class="hint">While <code>vellum serve</code> runs, the watched folders are
+    scanned on a timer. New or changed files are auto-ingested and then
+    enriched in order: <b>ingest → kind → category → metadata → tags →
+    summary</b>. Enrichment needs the tag vocabulary and the chat backend;
+    files are indexed regardless and enriched once the backend is up. A file
+    must stop changing between two scans before it is picked up, so a
+    half-written download is never indexed.</p>
+  <div class="row">
+    <label><input type="checkbox" id="watch-enabled"> enabled</label>
+    <label class="w6">scan every</label>
+    <input id="watch-interval" type="number" min="2" max="86400" style="width:5rem">
+    <span class="hint">seconds</span>
+  </div>
+  <div id="watch-dirs"></div>
+  <div class="row">
+    <input id="watch-add" placeholder="/home/me/inbox">
+    <button id="watch-add-btn">Add folder</button>
+  </div>
+  <pre id="watch-msg" class="hint" style="margin:.2rem 0 0"></pre>
+  <div class="row right">
+    <button class="plain" id="watch-scan">Scan now</button>
+    <button class="plain" id="watch-close">Close</button>
+  </div>
 </dialog>
 
 <dialog id="dlg-vocab">

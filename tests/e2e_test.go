@@ -503,6 +503,52 @@ The rain began before the road did, and the field kept its own counsel.
 	catRows.Close()
 	t.Logf("auto-categorized shelves: %d", seenCat)
 
+	// ---- filesystem watcher: the ordered Enrich pipeline end to end
+	// (ingest → kind → category → metadata → tags → summary). The watcher
+	// server calls exactly this per new file.
+	watchDir := filepath.Join(dir, "watch-inbox")
+	if err := os.MkdirAll(watchDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	arrival := filepath.Join(watchDir, "arrival.md")
+	if err := os.WriteFile(arrival, []byte(
+		"# Arrival\n\nA newly arrived essay on cryptography and applied epistemology.\n"),
+		0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg.Watch.Dirs = []string{watchDir}
+	stW, err := ingest.Ingest(nil, cfg, conn, cfg.Watch.Dirs, false, nil)
+	if err != nil || stW.Added != 1 {
+		t.Fatalf("watched file not ingested: %+v (%v)", stW, err)
+	}
+	watchIDs, err := ingest.PendingUnderDirs(conn, cfg.Watch.Dirs)
+	if err != nil || len(watchIDs) != 1 {
+		t.Fatalf("PendingUnderDirs = %v (%v), want one id", watchIDs, err)
+	}
+	if err := ingest.Enrich(nil, cfg, conn, v, watchIDs[0], nil); err != nil {
+		t.Fatalf("Enrich failed: %s", err)
+	}
+	var wstatus, wsummary string
+	if err := conn.QueryRow(
+		"SELECT status, COALESCE(summary,'') FROM documents WHERE id=?", watchIDs[0]).
+		Scan(&wstatus, &wsummary); err != nil {
+		t.Fatal(err)
+	}
+	if wstatus != "done" {
+		t.Fatalf("watched file not marked done after Enrich (status=%q)", wstatus)
+	}
+	if len(wsummary) < 20 {
+		t.Fatalf("watched file has no summary after Enrich: %q", wsummary)
+	}
+	if ids2, _ := ingest.PendingUnderDirs(conn, cfg.Watch.Dirs); len(ids2) != 0 {
+		t.Fatalf("watched file still pending after Enrich: %v", ids2)
+	}
+	preview := wsummary
+	if len(preview) > 60 {
+		preview = preview[:60]
+	}
+	t.Logf("watcher enrich: summary=%q", preview)
+
 	// ---- embeddings + semantic search
 	if _, err := search.EmbedPending(cfg, conn); err != nil {
 		t.Fatal(err)

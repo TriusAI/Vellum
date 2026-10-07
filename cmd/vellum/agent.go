@@ -160,6 +160,26 @@ explicitly re-generates kind/category):
     vellum regenerate ID [meta|summary|tags|category|kind ...]
     POST /api/documents/{id}/regenerate {"fields":["summary","tags"]}
 
+## Filesystem watcher (auto-ingest on arrival)
+While vellum serve runs, a background watcher scans the configured
+folders on a timer and auto-runs the pipeline on new/changed files, in
+this order: ingest -> kind -> category -> metadata (title/author/year)
+-> tags -> summary. The summary is generated LAST, so tags come from
+the document's text rather than from a summary that does not exist yet.
+Enrichment needs the vocabulary and the chat backend; without them the
+files are still indexed and get enriched on a later scan. A file must
+hold the same size+mtime across two scans before it is picked up, so a
+half-written download is never indexed ("Scan now" acts at once).
+Managed from the UI's Watch dialog or:
+    vellum watch                 # show settings + pending count
+    vellum watch add PATH...     # watch these folders (and enable)
+    vellum watch remove PATH...  # stop watching these folders
+    vellum watch on|off          # toggle the background watcher
+    vellum watch interval N      # seconds between scans (>= 2)
+    vellum watch run             # one-shot scan + enrich (cron-friendly)
+Scans run through the same FIFO job queue, so they appear in the Jobs
+API/UI and can be cancelled like any other job.
+
 ## Jobs: queue + cancellation
 process / regenerate / reextract / ingest run through ONE FIFO queue;
 results arrive strictly in request order. Every job appears in the
@@ -367,6 +387,10 @@ Editing vocab.yaml by hand is also fine (name: description, YAML map).
     GET  /api/fs?path=/abs/dir      # dir listing for the ingest picker
                                     # (loopback-only; no file contents served)
     POST /api/process               # {"ids":[...]} or {} for all pending -> results
+    GET  /api/watch                 # {enabled, dirs, interval, running,
+                                    #  last_scan, added, pending, last_error}
+    PUT  /api/watch                 # {"enabled":..,"dirs":[..],"interval":..}
+    POST /api/watch/scan            # scan + enrich now -> {ok, job, added}
     GET  /api/search?q=&mode=keyword|semantic&limit=N
     GET  /api/vocab                 # [{"name":..,"description":..}]
     GET  /api/vocab/suggestions     # LLM-proposed tags for review

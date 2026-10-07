@@ -364,3 +364,10 @@ button.mini { font-size: .72rem; padding: 0 .45rem; }
 .job-dot.done { background: var(--chip-ok); }
 .job-dot.error { background: #c0604f; }
 .job-dot.cancelled { background: var(--muted); opacity: .5; }
+/* watch dialog */
+.watch-dir { display: flex; gap: .5rem; align-items: center;
+  border-bottom: 1px dashed var(--line); padding: .3rem 0; }
+.watch-dir:last-child { border-bottom: none; }
+.watch-path { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; font-family: ui-monospace, monospace; font-size: .82rem; }
+.watch-dir .small { flex: 0 0 auto; }

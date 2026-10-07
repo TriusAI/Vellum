@@ -68,6 +68,7 @@ To add a language, drop its `.traineddata` there and extend `ocr.langs`.
 vellum ingest ~/papers/that-scan.pdf ~/books/
 vellum ingest ~/MyObsidianVault   # recursive; skips .obsidian/, .trash/
 vellum process [ID...]     # summarize + tag pending (all, or specific docs by id)
+vellum watch add ~/inbox   # auto-ingest + enrich arrivals while `vellum serve` runs
 
 # 2. find things
 vellum search "quantum error correction"     # FTS5 keyword
@@ -201,6 +202,33 @@ the queue instantly, running ones stop before their next step
 (document/section/page/LLM call) and leave the library consistent
 (their documents simply stay pending).
 
+## Filesystem watcher (auto-ingest on arrival)
+
+Point Vellum at a folder and, while `vellum serve` runs, a background
+watcher indexes new or changed files and runs the metadata pipeline in
+order: **ingest → kind → category → metadata (title/author/year) → tags
+→ summary**. The summary comes last, so tags are derived from the
+document text rather than from a summary that does not exist yet. A file
+must hold the same size and mtime across two scans before it is picked
+up, so a half-written download is never indexed; "Scan now" (or `vellum
+watch run`) acts immediately. Enrichment needs the tag vocabulary and the
+chat backend — without them the files are still indexed and get enriched
+on a later scan.
+
+```bash
+vellum watch add ~/inbox ~/papers/new   # watch folders (enables the watcher)
+vellum watch                             # show settings + pending count
+vellum watch on | off                   # toggle the background watcher
+vellum watch interval 30                # seconds between scans (>= 2)
+vellum watch run                        # one-shot scan + enrich (cron-friendly)
+vellum watch remove ~/inbox
+vellum watch clear
+```
+
+The web UI has the same controls in the top bar's **Watch…** dialog.
+Each scan runs through the normal job queue, so it shows up in Jobs and
+can be cancelled.
+
 ## Settings in the UI (live)
 "Settings…" in the top bar edits the active configuration — backends,
 models, OCR parameters, asking provider — applying immediately and
@@ -246,7 +274,9 @@ shown while it runs.
 thinking mode, temperature, OCR languages/DPI/page-detection threshold,
 chunk size, max tags, and tool paths (`tools.mutool`, `tools.tesseract`,
 `tools.tessdata`, `tools.llm_url`, `tools.embed_url`) — the pack sets these
-to its bundled binaries and servers. `vocab.yaml`: the controlled
+to its bundled binaries and servers. `watch:` holds the filesystem
+watcher's `enabled`, `dirs`, and `interval` (managed from the UI/CLI, not
+usually by hand). `vocab.yaml`: the controlled
 vocabulary — tag name → description; descriptions are shown to the LLM when
 it chooses, so write them clearly.
 

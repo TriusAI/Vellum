@@ -84,6 +84,17 @@ type Config struct {
 		Colors map[string]string `yaml:"colors,omitempty"`
 	} `yaml:"theme"`
 
+	// Watch is the filesystem watcher: while `vellum serve` runs it scans
+	// Dirs on a timer and runs the enrichment pipeline (ingest → kind →
+	// category → metadata → tags → summary) on new/changed files. Managed
+	// from the UI's Watch dialog or `vellum watch`. Presentation state
+	// only; an empty Dirs list disables it regardless of Enabled.
+	Watch struct {
+		Enabled  bool     `yaml:"enabled"`
+		Dirs     []string `yaml:"dirs,omitempty"`
+		Interval int      `yaml:"interval"` // seconds between scans (default 15)
+	} `yaml:"watch"`
+
 	Tools struct {
 		Mutool    string `yaml:"mutool"`
 		Tesseract string `yaml:"tesseract"`
@@ -134,6 +145,7 @@ func Default() *Config {
 	c.Ask.Provider = "none"
 	c.Ask.Tools = true // let the ask model fetch external links by default
 	c.Theme.Preset = "light"
+	c.Watch.Interval = 15 // seconds between filesystem-watcher scans
 	c.Tools.LLMURL = "http://127.0.0.1:8081"
 	c.Tools.EmbedURL = "http://127.0.0.1:8082"
 	return c

@@ -1946,6 +1946,106 @@ $("#ingest-go").onclick = async () => {
   btn.textContent = "Ingest";
 };
 
+/* -------------------------------------------------------- filesystem watch */
+
+// The watcher lives in the server (started by `vellum serve`): it scans the
+// watched folders and runs ingest → kind → category → metadata → tags →
+// summary on new/changed files. This dialog is the manual control panel.
+
+let watchPolling = null;
+
+async function refreshWatch() {
+  if (!$("#dlg-watch").open) return;
+  const data = await api("/api/watch");
+  $("#watch-enabled").checked = !!data.enabled;
+  $("#watch-interval").value = data.interval || 15;
+  const dirs = data.dirs || [];
+  const box = $("#watch-dirs");
+  box.replaceChildren();
+  if (!dirs.length) {
+    box.append(el("p", { class: "hint" }, "no folders watched yet — add one below"));
+  } else {
+    const list = el("div", { class: "item-list" });
+    for (const d of dirs) {
+      list.append(el("div", { class: "watch-dir" },
+        el("span", { class: "watch-path", title: d }, d),
+        el("button", { class: "small", onclick: () => watchSetDirs(
+          currentWatchDirs().filter((x) => x !== d)) }, "remove")));
+    }
+    box.append(list);
+  }
+  const bits = [];
+  if (data.running) bits.push("scanning now…");
+  else if (data.last_scan) bits.push("last scan " + new Date(data.last_scan).toLocaleTimeString());
+  else bits.push("not scanned yet");
+  bits.push(`${data.pending} pending under watched folders`);
+  if (data.added) bits.push(`${data.added} new/changed file(s) seen`);
+  $("#watch-msg").textContent = bits.join(" — ") +
+    (data.last_error ? "\nlast error: " + data.last_error : "");
+}
+
+async function watchSave(patch) {
+  try {
+    await api("/api/watch", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patch),
+    });
+  } catch (e) { notice("watch: " + e.message); }
+  await refreshWatch();
+}
+
+function currentWatchDirs() {
+  return [...document.querySelectorAll("#watch-dirs .watch-path")].map((n) => n.title);
+}
+
+function watchSetDirs(dirs) {
+  watchSave({ dirs }).catch(() => {});
+}
+
+$("#btn-watch").onclick = () => {
+  $("#watch-msg").textContent = "loading…";
+  $("#dlg-watch").showModal();
+  refreshWatch().catch((e) => { $("#watch-msg").textContent = "load failed: " + e.message; });
+  clearInterval(watchPolling);
+  watchPolling = setInterval(() => refreshWatch().catch(() => {}), 2000);
+};
+$("#watch-close").onclick = () => {
+  $("#dlg-watch").close();
+  clearInterval(watchPolling);
+  refresh();
+};
+$("#watch-add-btn").onclick = () => {
+  const p = $("#watch-add").value.trim();
+  if (!p) return;
+  const dirs = currentWatchDirs();
+  if (!dirs.includes(p)) dirs.push(p);
+  watchSave({ dirs, enabled: true });
+  $("#watch-add").value = "";
+};
+$("#watch-add").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") { e.preventDefault(); $("#watch-add-btn").click(); }
+});
+$("#watch-enabled").addEventListener("change", (e) => watchSave({ enabled: e.target.checked }));
+$("#watch-interval").addEventListener("change", (e) => {
+  const n = parseInt(e.target.value, 10);
+  if (n >= 2) watchSave({ interval: n });
+});
+$("#watch-scan").onclick = async () => {
+  const btn = $("#watch-scan");
+  btn.disabled = true;
+  btn.textContent = "Scanning…";
+  try {
+    const res = await api("/api/watch/scan", { method: "POST" });
+    notice(`watch: scanned, ${res.added} new/changed file(s)`);
+    await loadDocs();
+    await refresh();
+  } catch (e) { notice("watch scan: " + e.message); }
+  btn.disabled = false;
+  btn.textContent = "Scan now";
+  refreshWatch().catch(() => {});
+};
+
 /* ---------------------------------------------------------- import/export */
 
 // The library is one SQLite file: export streams a consistent snapshot

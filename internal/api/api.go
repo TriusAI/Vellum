@@ -79,6 +79,25 @@ type Server struct {
 	jobsSeq    int64
 	jobRunning *Job
 	waiters    []*jobWaiter
+
+	// watch: the filesystem watcher's bookkeeping. The settings live in
+	// cfg.Watch but are read/written through watchMu, since the background
+	// loop reads them while PUT /api/watch rewrites them.
+	watchMu      sync.Mutex
+	watchSeen    map[string]fileStamp // last scan's stamps (settle check)
+	watchDone    map[string]fileStamp // stamps already handed to ingest
+	watchRunning bool
+	watchLast    time.Time
+	watchAdded   int
+	watchErr     string
+}
+
+// fileStamp identifies a file's version cheaply (no hashing): a download
+// in progress changes it between scans, so the watcher waits for it to
+// settle before ingesting.
+type fileStamp struct {
+	size  int64
+	mtime int64
 }
 
 // jobProgress records the job's live message (also surfaces on
@@ -194,9 +213,16 @@ func (s *Server) runJob(kind, label string, work func(j *Job) error) *Job {
 	return j
 }
 
-// New creates a Server.
+// New creates a Server. It also starts the background filesystem watcher
+// loop (a no-op until watch.enabled is set with dirs).
 func New(cfg *config.Config, conn *sql.DB) *Server {
-	return &Server{cfg: cfg, conn: conn}
+	s := &Server{
+		cfg: cfg, conn: conn,
+		watchSeen: map[string]fileStamp{},
+		watchDone: map[string]fileStamp{},
+	}
+	go s.watchLoop()
+	return s
 }
 
 // Mux returns the root http.Handler: /api/* plus the embedded web UI.
@@ -237,6 +263,9 @@ func (s *Server) Mux() http.Handler {
 	mux.HandleFunc("POST /api/documents/{id}/ask", s.postAsk)
 	mux.HandleFunc("GET /api/jobs", s.jobList)
 	mux.HandleFunc("POST /api/jobs/{id}/cancel", s.jobCancel)
+	mux.HandleFunc("GET /api/watch", s.getWatch)
+	mux.HandleFunc("PUT /api/watch", s.putWatch)
+	mux.HandleFunc("POST /api/watch/scan", s.watchScanNow)
 	mux.HandleFunc("GET /api/search", s.search)
 	mux.HandleFunc("GET /api/vocab", s.getVocab)
 	mux.HandleFunc("GET /api/vocab/suggestions", s.suggestions)

@@ -923,6 +923,210 @@ func Regenerate(ctx context.Context, cfg *config.Config, conn *sql.DB, v *vocab.
 	return applied, nil
 }
 
+// EnrichStages is the order the filesystem watcher applies to a freshly
+// indexed document: the cheap/deterministic work first, the costly
+// summary LAST:
+//
+//	ingest   finish the deferred OCR (only when ingest flagged ocr_pending)
+//	kind     deterministic re-detect on the current text
+//	category the tagging call's category, applied first
+//	meta     …then title/authors/year (same call)
+//	tags     …then tags (same call)
+//	summary  the kind's fast path or the map-reduce pass
+var EnrichStages = []string{"ingest", "kind", "category", "meta", "tags", "summary"}
+
+// Enrich auto-enriches one already-indexed document in the watcher's stage
+// order (see EnrichStages) and marks it done. It is the one-shot companion
+// to Ingest: Ingest indexes text-layer-only and cheaply, Enrich finishes
+// the deferred OCR and then runs the metadata passes. Unlike
+// ProcessPending, the summary is generated LAST, so the single
+// grammar-constrained tagging call (which yields category, metadata and
+// tags together) is applied as three ordered stages and derives tags from
+// the surviving text rather than from a summary that does not exist yet.
+//
+// A document whose enrichment fails stays status='ingested', so the next
+// watcher scan retries it.
+func Enrich(ctx context.Context, cfg *config.Config, conn *sql.DB, v *vocab.Vocabulary,
+	docID int64, progress func(string)) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if progress == nil {
+		progress = func(string) {}
+	}
+	var path, kind string
+	var title, authors, year, nKind sql.NullString
+	var ocrPending, kindUser, ocrPages, nPages int64
+	if err := conn.QueryRow(
+		"SELECT path, title, authors, year, kind, kind_user, ocr_pending, ocr_pages, n_pages FROM documents WHERE id=?",
+		docID).Scan(&path, &title, &authors, &year, &nKind,
+		&kindUser, &ocrPending, &ocrPages, &nPages); err != nil {
+		return err
+	}
+	kind = nKind.String
+	t, a, y := title.String, authors.String, year.String
+
+	// ---- ingest: finish what ingest deferred. ingest is quick by design
+	// and never OCRs; raster-heavy pages land flagged ocr_pending.
+	if ocrPending == 1 {
+		progress("extracting text (OCR on raster pages — can take minutes)")
+		res, err := extract.Extract(path, cfg)
+		if err != nil {
+			return fmt.Errorf("OCR extraction failed: %w", err)
+		}
+		if err := db.ReplaceDocumentText(conn, docID, res.Chunks); err != nil {
+			return err
+		}
+		if res.Title != "" && t == "" {
+			t = res.Title
+		}
+		if res.Authors != "" && a == "" {
+			a = res.Authors
+		}
+		if _, err := conn.Exec(
+			"UPDATE documents SET title=?, authors=?, ocr_pending=0, ocr_pages=?, n_pages=? WHERE id=?",
+			t, a, res.OCRPages, len(res.Chunks), docID); err != nil {
+			return err
+		}
+		ocrPages, nPages = int64(res.OCRPages), int64(len(res.Chunks))
+	}
+
+	text, err := db.DocumentText(conn, docID)
+	if err != nil {
+		return err
+	}
+	if err := ctxErrIn(ctx); err != nil {
+		return err
+	}
+
+	// ---- kind: deterministic re-detect on the (possibly OCR-fresh) text.
+	// A user's explicit pick (kind_user) is never overridden.
+	if kindUser == 0 {
+		kindEx, _ := userKindExamples(conn, docID)
+		newKind, _ := classify.DetectWithExamples(text, int(ocrPages), int(nPages), kindEx)
+		if newKind != kind {
+			kind = newKind
+			if _, err := conn.Exec(
+				"UPDATE documents SET kind=? WHERE id=?", kind, docID); err != nil {
+				return err
+			}
+		}
+		progress("kind: " + or_(kind))
+	}
+
+	// near-empty text (galleries, image-only scans): nothing to enrich
+	if len(strings.TrimSpace(text)) < 400 {
+		_, err := conn.Exec(
+			"UPDATE documents SET summary='', summary_source='', status='done', error=NULL, processed_at=datetime('now') WHERE id=?",
+			docID)
+		return err
+	}
+
+	// ---- one grammar-constrained tagging call feeds three ordered stages:
+	// category, then title/author/year, then tags. No summary yet by design.
+	opening := text
+	if len(opening) > 8000 {
+		opening = opening[:8000]
+	}
+	existingCategories, err := db.ExistingCategories(conn)
+	if err != nil {
+		return err
+	}
+	shelvingExamples, err := userShelvingExamples(conn, docID)
+	if err != nil {
+		return err
+	}
+	if err := ctxErrIn(ctx); err != nil {
+		return err
+	}
+	progress("filing category")
+	tr, err := summarize.TagDocumentWithCategories(ctx, cfg, v, existingCategories,
+		shelvingExamples, []string{opening}, nil, "", progress)
+	if err != nil {
+		return err
+	}
+	if tr.Category != "" {
+		if _, err := conn.Exec(
+			"UPDATE documents SET category=?, category_user=0 WHERE id=?",
+			tr.Category, docID); err != nil {
+			return err
+		}
+		progress("category: " + tr.Category)
+	}
+	if newTitle := cleanMetaValue(tr.Title); newTitle != "" {
+		t = newTitle
+	}
+	if newAuthors := cleanMetaValue(strings.Join(tr.Authors, ", ")); newAuthors != "" {
+		a = newAuthors
+	}
+	if yearRE.MatchString(tr.Year) {
+		y = tr.Year
+	}
+	if _, err := conn.Exec(
+		"UPDATE documents SET title=?, authors=?, year=? WHERE id=?",
+		t, a, y, docID); err != nil {
+		return err
+	}
+	progress("metadata updated")
+	pairs := make([][2]string, 0, len(tr.Tags)+len(tr.TagsOther))
+	for _, tg := range tr.Tags {
+		pairs = append(pairs, [2]string{tg, "vocab"})
+	}
+	for _, tg := range tr.TagsOther {
+		pairs = append(pairs, [2]string{tg, "suggested"})
+	}
+	if err := db.SetTags(conn, docID, pairs); err != nil {
+		return err
+	}
+	progress("tags updated")
+
+	// ---- summary LAST: the kind's fast path (abstract / front matter)
+	// where possible, else map-reduce.
+	produced, err := produceSummary(ctx, cfg, kind, text, progress)
+	if err != nil {
+		return err
+	}
+	if _, err := conn.Exec(
+		"UPDATE documents SET summary=?, summary_source=?, status='done', error=NULL, processed_at=datetime('now') WHERE id=?",
+		produced.Summary, produced.Source, docID); err != nil {
+		return err
+	}
+	progress("summary updated")
+	return nil
+}
+
+// PendingUnderDirs lists the ids of pending documents (status='ingested')
+// whose path lies under one of dirs. Used by the filesystem watcher and
+// `vellum watch run`.
+func PendingUnderDirs(conn *sql.DB, dirs []string) ([]int64, error) {
+	cleaned := make([]string, 0, len(dirs))
+	for _, d := range dirs {
+		cleaned = append(cleaned, filepath.Clean(d))
+	}
+	rows, err := conn.Query(
+		"SELECT id, path FROM documents WHERE status='ingested' ORDER BY id")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		var p string
+		if err := rows.Scan(&id, &p); err != nil {
+			return nil, err
+		}
+		cp := filepath.Clean(p)
+		for _, d := range cleaned {
+			if cp == d || strings.HasPrefix(cp, d+string(os.PathSeparator)) {
+				ids = append(ids, id)
+				break
+			}
+		}
+	}
+	return ids, rows.Err()
+}
+
 func or_(s string) string {
 	if s == "" {
 		return "(generic)"
