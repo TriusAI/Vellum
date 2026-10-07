@@ -379,7 +379,7 @@ Docker: `pack/Dockerfile` + `docker-entrypoint.sh`; Hub is proxy-blocked
 
 ## 10. Where things state-wise
 
-- HEAD: v0.19.0 (see git log), all tests green. Since 0.19: semantic
+- HEAD: v0.19.0 (`9e3a20d`), all tests green. Since 0.19: semantic
   search applies each embed model's asymmetric retrieval prefixes
   (internal/search.embedPrefixes; model detected via /v1/models,
   basename-normalized; part of the embed_model identity, so adopting them
@@ -396,11 +396,15 @@ Docker: `pack/Dockerfile` + `docker-entrypoint.sh`; Hub is proxy-blocked
 - v0.16: auto-filing learns from user corrections (ShelvingExample/
   bestExamples in internal/summarize); category chips suppressed in the
   tree; flash-free updates.
-- Pack stage `pack/stage/vellum-0847ed6-linux-amd64/` (user's live
-  library inside) updated to the 0.18.1 binary; distributable tarball
-  `pack/vellum-0847ed6-linux-x86_64.tar.gz` (clean of the DB — verified
-  with tar -tzf | grep -c library.db = 0). New tables (collections etc.)
-  are created on first Open of an existing library. The user's
+- Pack stage `pack/stage/vellum-9e3a20d-linux-amd64/` (user's live
+  library inside) updated to the 0.19.0 binary; distributable tarball
+  `pack/vellum-9e3a20d-linux-x86_64.tar.gz` (clean of the DB — verified
+  with tar -tzf | grep -c library.db = 0). IMPORTANT for the user's live
+  library: the embed_model identity changed (basename+`|pfx`), so the
+  FIRST semantic search after their next ./vellum.sh serve will
+  invalidate + re-embed every chunk synchronously — run `vellum embed`
+  (or the UI's embed step) once with the servers up to do it with
+  progress instead of blocking a search query. The user's
   long-running serve (PID from an OLDER deleted stage, port 8097) still
   runs its old binary/DB — the new one takes effect on the next
   ./vellum.sh serve. NOTE: that serve's library.db exists only via its
