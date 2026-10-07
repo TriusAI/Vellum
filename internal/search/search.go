@@ -8,11 +8,62 @@ import (
 	"encoding/binary"
 	"math"
 	"strings"
+	"sync"
 
 	"vellum/internal/config"
 	"vellum/internal/db"
 	"vellum/internal/llm"
 )
+
+// Embedding retrieval models are trained with ASYMMETRIC task
+// instructions: the query and the document are prefixed differently, and
+// skipping the prefixes costs recall. embedPrefixes returns them for a
+// model name; unknown models get none.
+//
+//	nom   → "search_query: "        / "search_document: "
+//	gemma → "task: search result | query: " / "title: none | text: "
+func embedPrefixes(model string) (queryPrefix, docPrefix string) {
+	m := strings.ToLower(model)
+	switch {
+	case strings.Contains(m, "embeddinggemma"):
+		return "task: search result | query: ", "title: none | text: "
+	case strings.Contains(m, "nomic"):
+		return "search_query: ", "search_document: "
+	default:
+		return "", ""
+	}
+}
+
+// embedModelCache remembers the detected model name per server URL (the
+// server is authoritative; a model swap is accompanied by a serve
+// restart).
+var embedModelCache sync.Map // baseURL -> string
+
+// resolveEmbedModel names the embedding model in use: the Ollama model
+// name, else whatever the server reports at /v1/models, else the bundled
+// GGUF name from the config. A filesystem path is reduced to its
+// basename — the full path contains the versioned pack directory, which
+// changes on every release and must NOT change the vector-space identity.
+func resolveEmbedModel(cfg *config.Config) string {
+	if cfg.Embed.Provider == "ollama" {
+		return cfg.Embed.Model
+	}
+	if v, ok := embedModelCache.Load(cfg.Tools.EmbedURL); ok {
+		return v.(string)
+	}
+	name := ""
+	if id, err := llm.ModelID(cfg.Tools.EmbedURL); err == nil {
+		name = id
+	}
+	if name == "" {
+		name = cfg.Models.Embed
+	}
+	if i := strings.LastIndexAny(name, `/\`); i >= 0 {
+		name = name[i+1:]
+	}
+	embedModelCache.Store(cfg.Tools.EmbedURL, name)
+	return name
+}
 
 // KeywordHit is one FTS5 match.
 type KeywordHit struct {
@@ -81,12 +132,15 @@ func Semantic(cfg *config.Config, conn *sql.DB, query string, k int) ([]Semantic
 	if _, err := EmbedPending(cfg, conn); err != nil {
 		return nil, err
 	}
+	// asymmetric retrieval prefixes: the query side
+	queryPrefix, _ := embedPrefixes(resolveEmbedModel(cfg))
+	qtext := queryPrefix + query
 	var vecs [][]float32
 	var err error
 	if cfg.Embed.Provider == "ollama" {
-		vecs, err = llm.OllamaEmbed(cfg.Tools.EmbedURL, cfg.Embed.Model, []string{query})
+		vecs, err = llm.OllamaEmbed(cfg.Tools.EmbedURL, cfg.Embed.Model, []string{qtext})
 	} else {
-		vecs, err = llm.Embed(cfg.Tools.EmbedURL, []string{query})
+		vecs, err = llm.Embed(cfg.Tools.EmbedURL, []string{qtext})
 	}
 	if err != nil {
 		return nil, err
@@ -195,13 +249,15 @@ WHERE c.embedding IS NOT NULL`)
 // 2048 tokens — inputs beyond that are not embeddable, the head carries
 // the topical signal).
 func EmbedPending(cfg *config.Config, conn *sql.DB) (int, error) {
-	modelName := "" // ollama embed model name ("" = llama-server mode)
-	if cfg.Embed.Provider == "ollama" {
-		modelName = cfg.Embed.Model
+	mname := resolveEmbedModel(cfg)
+	_, docPrefix := embedPrefixes(mname)
+	// identity = provider + server + model (+ the retrieval prefixes,
+	// which are part of the vector space): switching any of them
+	// invalidates the stored vectors so they re-embed.
+	model := cfg.Embed.Provider + "@" + cfg.Tools.EmbedURL + "/" + mname
+	if docPrefix != "" {
+		model += "|pfx"
 	}
-	// identity = server + provider + model: vectors live in one model's
-	// space; switching any of them invalidates the lot
-	model := cfg.Embed.Provider + "@" + cfg.Tools.EmbedURL + "/" + modelName
 	if stored := db.MetaGet(conn, "embed_model"); stored != "" && stored != model {
 		if _, err := conn.Exec("UPDATE chunks SET embedding=NULL"); err != nil {
 			return 0, err
@@ -259,7 +315,7 @@ func EmbedPending(cfg *config.Config, conn *sql.DB) (int, error) {
 					trimmed = t[:max]
 				}
 			}
-			texts = append(texts, trimmed)
+			texts = append(texts, docPrefix+trimmed)
 		}
 		var vecs [][]float32
 		if cfg.Embed.Provider == "ollama" {

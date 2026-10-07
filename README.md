@@ -20,6 +20,7 @@ ingest ──▶ text extraction (mutool)      born-digital PDFs, EPUB (via conv
 process ──▶ summarize (map-reduce)       long docs: per-chunk summaries, then one paragraph
          └▶ tag (constrained decoding)  the LLM *cannot* spell a tag outside your vocabulary
 search ───▶ FTS5 keyword + semantic      embeddings via nomic-embed-text, cosine search
+                                          (model-appropriate retrieval task prefixes applied)
 ```
 
 ### Why tags don't drift

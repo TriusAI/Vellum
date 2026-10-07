@@ -167,6 +167,17 @@ and reopens it. UI: the "Import/Export…" dialog.
     POST /api/library/import     # request body = the backup file
                                  # (loopback-only, like /api/fs)
 
+## Semantic search + embedding prefixes
+vellum search Q --semantic (and the UI "semantic" toggle) embeds the
+query and ranks chunk vectors by cosine similarity. Retrieval models are
+trained with ASYMMETRIC task instructions, so vellum prepends the model's
+prefixes automatically (detected from the running embed server):
+nomic -> "search_query: "/"search_document: "; EmbeddingGemma ->
+"task: search result | query: "/"title: none | text: ". Unknown models
+get none. Prefixes are part of the vector space: changing the embed
+model/provider/URL (or the prefix scheme) invalidates stored vectors and
+they re-embed lazily. vellum embed re-embeds the whole library up front.
+
 ## Ask an LLM (about one document)
 A freeform streaming chat per document, powered by an EXTERNAL model
 (config: ask: {provider: none|openai|anthropic|ollama, model, api_key,

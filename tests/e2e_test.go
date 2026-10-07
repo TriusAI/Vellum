@@ -514,8 +514,17 @@ The rain began before the road did, and the field kept its own counsel.
 	if len(semHits) == 0 {
 		t.Fatal("semantic search found nothing")
 	}
-	if !strings.Contains(semHits[0].Path, "cognitive_machines") {
-		t.Fatalf("unexpected top hit: %s", semHits[0].Path)
+	// The top hit must be about the query. NOTE: long_document.md is the
+	// cognitive-machines text repeated (see `lorem`), so it is a
+	// legitimate on-topic hit — the two are near-tied and the exact
+	// ordering is not meaningful. The OFF-topic doc must never win.
+	top := semHits[0].Path
+	onTopic := strings.Contains(top, "cognitive_machines") || strings.Contains(top, "long_document")
+	if !onTopic {
+		t.Fatalf("semantic top hit is not about the query: %s", top)
+	}
+	if strings.Contains(top, "engineering_notes") {
+		t.Fatalf("off-topic document ranked first: %s", top)
 	}
 
 	// summary sanity

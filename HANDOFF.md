@@ -173,6 +173,15 @@ Fast paths by kind (`internal/classify` + `produceSummary` in ingest):
   `[Collection] <name>` page per collection (add/remove docs), and an
   add/remove control on the Summary page. See internal/db (ListCollections
   et al.) and the collections block in internal/api.
+- semantic search uses the embed model's ASYMMETRIC retrieval prefixes:
+  `internal/search.embedPrefixes` maps the model name (detected from the
+  running server via `/v1/models`, basename-normalized so a versioned pack
+  path never changes identity) to nomic ("search_query: "/
+  "search_document: ") or EmbeddingGemma ("task: search result | query: "/
+  "title: none | text: ") prefixes. Prefixes are part of the
+  `meta.embed_model` identity, so adopting them (or swapping models)
+  invalidates stored vectors and re-embeds lazily — `vellum embed` does it
+  up front.
 - collection sharing: `vellum collection export NAME|ID [PATH.zip]` /
   `GET /api/collections/{id}/export` bundle a collection (member files +
   manifest.json with metadata/tags) into a zip; `vellum collection import
@@ -370,23 +379,23 @@ Docker: `pack/Dockerfile` + `docker-entrypoint.sh`; Hub is proxy-blocked
 
 ## 10. Where things state-wise
 
-- HEAD: v0.18.1 (`0847ed6`), all tests green. Since 0.17: per-message
-  notice durations (quick confirmations self-dismiss fast, job outcomes
-  linger); kind detection learns from user pins (classify.DetectWithExamples
-  + ingest.userKindExamples); category edits refresh open collection
-  pages; collection sharing (.zip export/import via internal/collection);
-  All Documents + Collections pages are closable and All Documents has a
-  top-bar opener; list/tree styles are class-scoped (.item-list) so rows
-  look clickable everywhere (incl. collection pages), with hover
-  accent+underline on names.
-- v0.17.0: COLLECTIONS (collections + collection_docs tables, CRUD
-  API/CLI, a Collections root page + [Collection] pages, add/remove on
-  the Summary page); page moves use CSS order (previews don't reload);
-  status bar for the job queue.
-- v0.16: auto-filing LEARNS from user corrections (user-shelved docs
-  matched by keyword overlap, top-3 fed as few-shot examples — see
-  ShelvingExample/bestExamples in internal/summarize); category chips
-  suppressed inside the tree; flash-free updates.
+- HEAD: v0.19.0 (see git log), all tests green. Since 0.19: semantic
+  search applies each embed model's asymmetric retrieval prefixes
+  (internal/search.embedPrefixes; model detected via /v1/models,
+  basename-normalized; part of the embed_model identity, so adopting them
+  re-embeds lazily). The e2e semantic assertion now judges *relevance*
+  (the long_document fixture is the cognitive text repeated, a legitimate
+  top hit) rather than one exact file.
+- v0.18: per-message notice durations; kind detection learns from user
+  pins; category edits refresh open collection pages; collection .zip
+  export/import; closable root pages + All Documents opener; .item-list
+  styling everywhere with hover accent+underline.
+- v0.17: COLLECTIONS (collections + collection_docs, CRUD API/CLI,
+  Collections root page + [Collection] pages, Summary add/remove); page
+  moves via CSS order; bottom status bar.
+- v0.16: auto-filing learns from user corrections (ShelvingExample/
+  bestExamples in internal/summarize); category chips suppressed in the
+  tree; flash-free updates.
 - Pack stage `pack/stage/vellum-0847ed6-linux-amd64/` (user's live
   library inside) updated to the 0.18.1 binary; distributable tarball
   `pack/vellum-0847ed6-linux-x86_64.tar.gz` (clean of the DB — verified

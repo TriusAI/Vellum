@@ -116,7 +116,10 @@ func Default() *Config {
 	c.Embed.Model = ""
 	c.Embed.Batch = 32
 	// nomic-embed-text-v1.5 has a 2048-token context: chunk embedding
-	// inputs are trimmed to this cap (the head of each chunk)
+	// inputs are trimmed to this cap (the head of each chunk).
+	// NOTE: internal/search prepends the model's retrieval task
+	// instructions (search_query:/search_document:, or the EmbeddingGemma
+	// equivalents), detected from the running server — see embedPrefixes.
 	c.Embed.MaxTokens = 1500
 	c.Tools.Mutool = "mutool"
 	c.Tools.Tesseract = "tesseract"

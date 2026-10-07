@@ -198,6 +198,42 @@ func ChatJSON(ctx context.Context, baseURL string, messages []Message, schema ma
 	return decodeJSONObject(stripThink(content))
 }
 
+// ModelID asks an OpenAI-compatible server (/v1/models) which model it is
+// serving, so callers can pick model-specific embedding task prefixes.
+// Handles both the OpenAI shape (data[].id) and llama.cpp's (models[].name).
+func ModelID(baseURL string) (string, error) {
+	body, err := get(baseURL + "/v1/models")
+	if err != nil {
+		return "", err
+	}
+	var resp struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+		Models []struct {
+			Name  string `json:"name"`
+			Model string `json:"model"`
+		} `json:"models"`
+	}
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return "", fmt.Errorf("bad /v1/models response: %w", err)
+	}
+	for _, d := range resp.Data {
+		if d.ID != "" {
+			return d.ID, nil
+		}
+	}
+	for _, m := range resp.Models {
+		if m.Name != "" {
+			return m.Name, nil
+		}
+		if m.Model != "" {
+			return m.Model, nil
+		}
+	}
+	return "", fmt.Errorf("server reported no model")
+}
+
 // Embed calls /v1/embeddings for a batch of texts.
 func Embed(baseURL string, texts []string) ([][]float32, error) {
 	body, err := post(baseURL+"/v1/embeddings", embeddingsRequest{Input: texts})
@@ -232,6 +268,23 @@ func orCtx(ctx context.Context) context.Context {
 		return context.Background()
 	}
 	return ctx
+}
+
+// get fetches a URL and returns the body (200 only).
+func get(url string) ([]byte, error) {
+	resp, err := http.Get(url)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("GET %s: %s", url, resp.Status)
+	}
+	return body, nil
 }
 
 // postCtx is post with cancellation: an aborted job's HTTP call dies
