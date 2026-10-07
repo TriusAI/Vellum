@@ -395,13 +395,15 @@ Docker: `pack/Dockerfile` + `docker-entrypoint.sh`; Hub is proxy-blocked
 
 ## 10. Where things state-wise
 
-- HEAD: v0.21.1 (`4b75735`), all tests green. Since 0.21.1: fixed the
-  broken Ask page — /api/config's ask section lacked JSON tags
-  (capitalized keys), so Settings showed blank and a Settings save wiped
-  the ask config; PUT /api/ask/config returned a partial {ok,enabled}
-  object the UI cached; Settings-save nulled askConfig with nothing to
-  reload it; the Ask page now reloads its config on every render and
-  re-renders after either save (Send re-enables).
+- HEAD: v0.21.2 (see git log), all tests green. Since 0.21.2: the Ask
+  page now SHOWS the provider's real error (the server returns 502 with
+  "ask provider: …" and the client reads the JSON error body — before it
+  printed only "Bad Request"); base URLs pasted with a version prefix
+  ("…/v1" or "…/api") are joined correctly (no more "…/v1/v1/…", see
+  ask.endpoint); disabled buttons are visibly gray; Send says "Sending…"
+  while a reply streams.
+- v0.21.1: fixed the broken Ask page (config json tags, PUT echo, config
+  reload on render).
 - v0.21: the UI is URL-ADDRESSABLE and directory ingest is recursive +
   skips hidden entries.
 - v0.20: TAGS page (cloud → [Tag] pages), NOTES (scratchpad table, CRUD,

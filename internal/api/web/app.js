@@ -1069,7 +1069,7 @@ function askPanel(page) {
   const inKey = el("input", { type: "password", value: "",
     placeholder: askConfig.key_set ? "api key (stored — leave blank to keep)" : "api key" });
   const inBase = el("input", { value: askConfig.base_url || "",
-    placeholder: "base url (default: api endpoint; any openai-compatible server)" });
+    placeholder: "base url (optional; a host or a /v1 base, e.g. https://host/v1)" });
   const cfgMsg = el("span", { class: "hint" }, "");
   const cfgRow = el("div", { class: "row" },
     el("button", {
@@ -1128,7 +1128,13 @@ function askPanel(page) {
   const input = el("textarea", { rows: 2, placeholder: "ask about this document…" });
   let busy = false;
   const sendBtn = el("button", { onclick: send, disabled: !askConfig?.enabled }, "Send");
-  const setBusy = (b) => { busy = b; sendBtn.disabled = b || !askConfig?.enabled; input.disabled = b; };
+  // while a reply streams, Send shows a clearly disabled (gray) state
+  const setBusy = (b) => {
+    busy = b;
+    sendBtn.disabled = b || !askConfig?.enabled;
+    sendBtn.textContent = b ? "Sending…" : "Send";
+    input.disabled = b;
+  };
   async function send() {
     const q = input.value.trim();
     if (!q || busy) return;
@@ -1144,7 +1150,16 @@ function askPanel(page) {
         body: JSON.stringify({ messages: [...askHistory[id] || [],
           { role: "user", content: q }] }),
       });
-      if (!res.ok || !res.body) throw new Error(res.statusText);
+      if (!res.ok || !res.body) {
+        // the server puts the real reason in {"error": "..."} (an upstream
+        // provider failure, a missing config, …) — show it, not "Bad Request"
+        let msg = res.statusText;
+        try {
+          const j = await res.json();
+          if (j && j.error) msg = j.error;
+        } catch (_) { /* non-JSON body */ }
+        throw new Error(msg);
+      }
       askHistory[id] = [...(askHistory[id] || []), { role: "user", content: q }];
       let acc = "";
       const reader = res.body.getReader();

@@ -1979,7 +1979,9 @@ func (s *Server) postAsk(w http.ResponseWriter, r *http.Request) {
 	}
 	deltas, err := out.Stream(sys, body.Messages)
 	if err != nil {
-		writeErr(w, 400, err.Error())
+		// surface the provider's own error (e.g. "connection refused",
+		// "401 Unauthorized", a 400 JSON body) — the UI shows this text
+		writeErr(w, 502, "ask provider: "+err.Error())
 		return
 	}
 	flush, ok := w.(http.Flusher)

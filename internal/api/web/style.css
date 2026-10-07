@@ -27,6 +27,9 @@ button {
 button.plain { background: transparent; color: var(--muted); border: 1px solid var(--line); }
 button.small { padding: .15rem .55rem; font-size: .8rem; }
 button:hover { filter: brightness(1.08); }
+button:disabled, button[disabled] {
+  opacity: .5; cursor: not-allowed; filter: grayscale(.45) brightness(.95);
+}
 #notice {
   position: absolute; top: 0; left: 0; right: 0; z-index: 10;
   display: flex; align-items: center; gap: .8rem;

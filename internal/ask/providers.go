@@ -31,6 +31,21 @@ func (c Config) client() *http.Client {
 	return &http.Client{Timeout: 0} // stream duration is controlled by the request body
 }
 
+// endpoint joins an API base with its version + path, tolerating a base the
+// user pasted WITH the version already on it (OpenAI-compatible servers are
+// commonly addressed as "…/v1", which must not become "…/v1/v1/…"), or the
+// full endpoint path.
+func endpoint(base, version, path string) string {
+	base = strings.TrimRight(base, "/")
+	if strings.HasSuffix(base, path) {
+		return base // the user pasted the full endpoint
+	}
+	if strings.HasSuffix(base, "/"+version) {
+		return base + path
+	}
+	return base + "/" + version + path
+}
+
 // ---- openai-compatible -------------------------------------------------
 
 type openaiStreamReq struct {
@@ -61,7 +76,7 @@ func (c Config) streamOpenAI(sys string, msgs []Message) (<-chan Delta, error) {
 	payload, _ := json.Marshal(openaiStreamReq{
 		Model: c.Model, Messages: all, Stream: true, MaxTokens: maxTokens,
 	})
-	req, err := http.NewRequest("POST", c.baseURL()+"/v1/chat/completions",
+	req, err := http.NewRequest("POST", endpoint(c.baseURL(), "v1", "/chat/completions"),
 		bytes.NewReader(payload))
 	if err != nil {
 		return nil, err
@@ -133,7 +148,7 @@ func (c Config) streamAnthropic(sys string, msgs []Message) (<-chan Delta, error
 		Model: c.Model, System: sys, Messages: rest,
 		MaxTokens: 4096, Stream: true,
 	})
-	req, err := http.NewRequest("POST", c.baseURL()+"/v1/messages",
+	req, err := http.NewRequest("POST", endpoint(c.baseURL(), "v1", "/messages"),
 		bytes.NewReader(payload))
 	if err != nil {
 		return nil, err
@@ -210,7 +225,7 @@ func (c Config) streamOllama(sys string, msgs []Message) (<-chan Delta, error) {
 	payload, _ := json.Marshal(ollamaChatReq{
 		Model: c.Model, Messages: all, Stream: true,
 	})
-	req, err := http.NewRequest("POST", c.baseURL()+"/api/chat",
+	req, err := http.NewRequest("POST", endpoint(c.baseURL(), "api", "/chat"),
 		bytes.NewReader(payload))
 	if err != nil {
 		return nil, err
