@@ -370,7 +370,7 @@ Docker: `pack/Dockerfile` + `docker-entrypoint.sh`; Hub is proxy-blocked
 
 ## 10. Where things state-wise
 
-- HEAD: v0.18.0 (see git log), all tests green. Since 0.17: per-message
+- HEAD: v0.18.0 (`5d69e41`), all tests green. Since 0.17: per-message
   notice durations (quick confirmations self-dismiss fast, job outcomes
   linger); kind detection learns from user pins (classify.DetectWithExamples
   + ingest.userKindExamples); category edits refresh open collection
@@ -385,10 +385,13 @@ Docker: `pack/Dockerfile` + `docker-entrypoint.sh`; Hub is proxy-blocked
   matched by keyword overlap, top-3 fed as few-shot examples — see
   ShelvingExample/bestExamples in internal/summarize); category chips
   suppressed inside the tree; flash-free updates.
-- Pack stage `pack/stage/vellum-c5edb8e-linux-amd64/` was the 0.17.0
-  build; the stage/tarball are rebuilt for each release per §7. The
-  user's long-running serve (PID from an OLDER deleted stage, port 8097)
-  runs an old binary/DB — the new one takes effect on the next
+- Pack stage `pack/stage/vellum-5d69e41-linux-amd64/` (user's live
+  library inside) updated to the 0.18.0 binary; distributable tarball
+  `pack/vellum-5d69e41-linux-x86_64.tar.gz` (clean of the DB — verified
+  with tar -tzf | grep -c library.db = 0). New tables (collections etc.)
+  are created on first Open of an existing library. The user's
+  long-running serve (PID from an OLDER deleted stage, port 8097) still
+  runs its old binary/DB — the new one takes effect on the next
   ./vellum.sh serve. NOTE: that serve's library.db exists only via its
   open fds (its stage dir was deleted); if it was used for real work,
   recover it from /proc/701/fd BEFORE stopping it.
