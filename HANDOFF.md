@@ -395,7 +395,7 @@ Docker: `pack/Dockerfile` + `docker-entrypoint.sh`; Hub is proxy-blocked
 
 ## 10. Where things state-wise
 
-- HEAD: v0.21.0 (see git log), all tests green. Since 0.21: the UI is
+- HEAD: v0.21.0 (`2fdcbfa`), all tests green. Since 0.21: the UI is
   URL-ADDRESSABLE (?doc=42&view=preview&page=7, ?tag=, ?collection=,
   ?note=, ?view=tags|notes|collections, ?q=&semantic=1; mirrored on
   navigation; 🔗 copies a link) and directory ingest is recursive +
@@ -409,14 +409,14 @@ Docker: `pack/Dockerfile` + `docker-entrypoint.sh`; Hub is proxy-blocked
   pages; .item-list styling with hover affordance.
 - v0.17: COLLECTIONS; CSS-order page moves; bottom status bar.
 - v0.16: auto-filing learns from user corrections; flash-free updates.
-- Pack stage `pack/stage/vellum-95eaf5c-linux-amd64/` (user's live
-  library inside) updated to the 0.20.0 binary; distributable tarball
-  `pack/vellum-95eaf5c-linux-x86_64.tar.gz` (clean of the DB — verified
-  with tar -tzf | grep -c library.db = 0). NOTE: the user has their OWN
-  serve running from this stage (launched with --open, port 8090, its
-  binary now shows "(deleted)" after the version-dir rename) — it keeps
-  running the old in-memory binary and its DB fd; do NOT kill it. The
-  0.20.0 UI/API takes effect on their next ./vellum.sh serve.
+- Pack stage `pack/stage/vellum-2fdcbfa-linux-amd64/` (user's live
+  library inside) updated to the 0.21.0 binary; distributable tarball
+  `pack/vellum-2fdcbfa-linux-x86_64.tar.gz` (clean of the DB — verified
+  with tar -tzf | grep -c library.db = 0). NOTE: the user runs their OWN
+  serve(s): an old one (PID 701, port 8097) and a current one they keep
+  restarting from the stage (PID 15944, port 8090, 0.20.0, its exe now
+  "(deleted)" after the version-dir rename). Do NOT kill them; the
+  0.21.0 UI takes effect on their next ./vellum.sh serve.
 - The user runs `./vellum.sh serve` (their own llama-servers on 8081/8082
   are LONG-RUNNING — do not kill them; kill only ephemeral test ones).
 - `AGENTS.md` (repo root) carries the agent-focused subset of this
