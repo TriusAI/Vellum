@@ -76,6 +76,14 @@ type Config struct {
 	// tagging is UNAFFECTED — this is for the freeform chat only.
 	Ask ask.Config `yaml:"ask"`
 
+	// Theme customizes the web UI: a named preset (light|dark|sepia|
+	// contrast) plus optional per-color overrides (CSS variable name ->
+	// hex). Presentation only; the UI reads it at boot.
+	Theme struct {
+		Preset string            `yaml:"preset"`
+		Colors map[string]string `yaml:"colors,omitempty"`
+	} `yaml:"theme"`
+
 	Tools struct {
 		Mutool    string `yaml:"mutool"`
 		Tesseract string `yaml:"tesseract"`
@@ -124,6 +132,7 @@ func Default() *Config {
 	c.Tools.Mutool = "mutool"
 	c.Tools.Tesseract = "tesseract"
 	c.Ask.Provider = "none"
+	c.Theme.Preset = "light"
 	c.Tools.LLMURL = "http://127.0.0.1:8081"
 	c.Tools.EmbedURL = "http://127.0.0.1:8082"
 	return c

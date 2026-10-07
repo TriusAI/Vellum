@@ -242,6 +242,31 @@ The API accepts kind/category in GET/PATCH /api/documents, filter params
 on GET /api/documents and GET /api/search (kind, category, repeated tag),
 and GET /api/categories lists distinct categories with counts.
 
+## Tags page + per-tag pages
+The UI's "Tags…" opens a tag CLOUD (tag size grows with how many
+documents carry it); each tag opens a [Tag] page listing its documents
+(like a collection page). Sources: the controlled vocabulary, tags
+actually applied, and LLM-suggested tags (shown dashed).
+    GET /api/tags          # [{tag, documents, description, suggested}]
+    GET /api/tags/{tag}    # {tag, description, documents:[documentJSON]}
+
+## Notes (scratchpad)
+Freeform notes for jotting ideas while reading — a body plus created_at /
+updated_at, nothing else. The UI's "Notes…" management page lists them
+(first line = title); each opens a [Note] page that is a single textarea
+with debounced autosave.
+    vellum note list|add "text"|show ID|delete ID   (add - reads stdin)
+    GET/POST /api/notes          GET/PATCH/DELETE /api/notes/{id}
+    PATCH {"body":"..."} bumps updated_at.
+
+## Themes (UI colors)
+The web UI's colors are data: a preset (light|dark|sepia|contrast) plus
+optional per-variable overrides, saved in config.yaml under theme: and
+applied as CSS variables. Settings -> Theme has a preset picker and a
+color input per variable (--bg, --fg, --muted, --accent, --card, --line,
+--chip). Presentation only; the pipeline is unaffected. GET/PUT /api/config
+carry it (theme: {preset, colors}).
+
 ## Collections (research projects)
 A collection is a user-managed group of documents — e.g. an applied-ML
 project holding ML papers plus the medicine papers you plan to apply
@@ -315,6 +340,13 @@ Editing vocab.yaml by hand is also fine (name: description, YAML map).
     GET  /api/vocab/suggestions     # LLM-proposed tags for review
     POST /api/vocab                 # {"name":..,"description":..} add/promote
     DELETE /api/vocab/{name}
+    GET  /api/tags                  # tag cloud: [{tag,documents,description,suggested}]
+    GET  /api/tags/{tag}            # {tag,description,documents:[...]}
+    GET  /api/notes                 # [{id,body,created_at,updated_at}]
+    POST /api/notes                 # {"body":..} -> the new note
+    GET  /api/notes/{id}            # one note
+    PATCH /api/notes/{id}           # {"body":..}, bumps updated_at
+    DELETE /api/notes/{id}
 Errors: {"error":"..."} with 4xx/5xx status codes.
 
 ## Gotchas

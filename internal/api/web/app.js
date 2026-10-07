@@ -61,6 +61,10 @@ const PAGE_KINDS = {
   library:     { label: null },
   collections: { label: null },
   collection:  { label: "Collection" },
+  tags:        { label: null },
+  tag:         { label: "Tag" },
+  notes:       { label: null },
+  note:        { label: "Note" },
   summary:     { label: "Summary" },
   preview:     { label: "Preview" },
   text:        { label: "Text" },
@@ -70,8 +74,11 @@ const PAGE_KINDS = {
 let pages = [];        // ordered: the strip order IS the array order
 let activePage = null; // last-interacted page (Esc closes it)
 
-// library and collections are singletons (no per-document id).
-const SINGLETON_PAGES = { library: "library", collections: "collections" };
+// library, collections, tags and notes are singletons (no per-item id).
+const SINGLETON_PAGES = {
+  library: "library", collections: "collections",
+  tags: "tags", notes: "notes",
+};
 const isSingleton = (kind) => kind in SINGLETON_PAGES;
 const pageKey = (kind, docId) =>
   isSingleton(kind) ? kind : kind + ":" + docId;
@@ -99,6 +106,28 @@ function openPage(kind, docId, opts = {}) {
   refreshPage(page);
   return page;
 }
+
+// openTagPage opens a [Tag] <name> page (tags are keyed by their name,
+// not a numeric id).
+function openTagPage(name) {
+  const key = "tag:" + name;
+  let page = pages.find((p) => p.key === key);
+  if (!page) {
+    page = { key, kind: "tag", tag: name, docId: 0, data: null, token: 0,
+      width: 430, expanded: false };
+    pages.push(page);
+    buildPageChrome(page);
+    $("#pages").append(page.el);
+    syncPageOrder();
+  }
+  markActive(page);
+  page.el.scrollIntoView({ block: "nearest", inline: "nearest" });
+  refreshPage(page);
+  return page;
+}
+
+// openNotePage opens the scratchpad for a note id.
+const openNotePage = (id) => openPage("note", id);
 
 // buildPageChrome creates the page's frame (title bar + content area +
 // resize handle). The frame lives as long as the page is open — content
@@ -136,6 +165,13 @@ function buildPageChrome(page) {
 function updatePageTitle(page) {
   if (page.kind === "library") { page.titleEl.textContent = "All Documents"; return; }
   if (page.kind === "collections") { page.titleEl.textContent = "Collections"; return; }
+  if (page.kind === "tags") { page.titleEl.textContent = "Tags"; return; }
+  if (page.kind === "notes") { page.titleEl.textContent = "Notes"; return; }
+  if (page.kind === "tag") { page.titleEl.textContent = "[Tag] " + page.tag; return; }
+  if (page.kind === "note") {
+    page.titleEl.textContent = "[Note] " + noteTitle(page.data);
+    return;
+  }
   if (page.kind === "collection") {
     const c = page.data?.collection;
     page.titleEl.textContent = "[Collection] " + (c ? c.name : "#" + page.docId);
@@ -231,11 +267,13 @@ async function refreshPage(page) {
   if (!page.data)
     page.content.replaceChildren(el("div", { class: "hint" }, "loading…"));
   try {
-    const data = page.kind === "collections"
-      ? await api("/api/collections")
-      : page.kind === "collection"
-        ? await api(`/api/collections/${page.docId}`)
-        : await api(`/api/documents/${page.docId}`);
+    const data = page.kind === "collections" ? await api("/api/collections")
+      : page.kind === "collection" ? await api(`/api/collections/${page.docId}`)
+      : page.kind === "tags" ? await api("/api/tags")
+      : page.kind === "tag" ? await api("/api/tags/" + encodeURIComponent(page.tag))
+      : page.kind === "notes" ? await api("/api/notes")
+      : page.kind === "note" ? await api(`/api/notes/${page.docId}`)
+      : await api(`/api/documents/${page.docId}`);
     if (token !== page.token) return; // a newer refresh won
     const unchanged = page.data && JSON.stringify(data) === JSON.stringify(page.data);
     page.data = data;
@@ -272,6 +310,10 @@ function renderPageContent(page) {
   switch (page.kind) {
     case "collections": page.content.replaceChildren(collectionsContent(page)); break;
     case "collection":  page.content.replaceChildren(collectionContent(page)); break;
+    case "tags":        page.content.replaceChildren(tagsContent(page)); break;
+    case "tag":         page.content.replaceChildren(tagContent(page)); break;
+    case "notes":       page.content.replaceChildren(notesContent(page)); break;
+    case "note":        page.content.replaceChildren(noteContent(page)); break;
     case "summary": page.content.replaceChildren(summaryContent(page)); break;
     case "preview": page.content.replaceChildren(previewContent(page)); break;
     case "text":    page.content.replaceChildren(textContent(page)); break;
@@ -643,6 +685,167 @@ async function openAddDocsPicker(page) {
   document.body.append(dlg);
   dlg.addEventListener("close", () => dlg.remove());
   dlg.showModal();
+}
+
+/* ------------------------------------------------------------ tags cloud */
+
+// tagsContent renders the tag cloud: each tag sized by how many documents
+// carry it; suggested tags (outside the vocabulary) are dashed.
+function tagsContent(page) {
+  const tags = page.data || [];
+  const wrap = el("div");
+  wrap.append(el("p", { class: "hint" },
+    "Every tag in play — the controlled vocabulary, tags applied to documents, " +
+    "and LLM-suggested ones. Click one to see its documents."));
+  if (!tags.length) {
+    wrap.append(el("p", { class: "hint" },
+      "No tags yet — process documents, or add tags in Vocabulary."));
+    return wrap;
+  }
+  const max = Math.max(1, ...tags.map((t) => t.documents));
+  const cloud = el("div", { class: "tag-cloud" });
+  for (const t of tags) {
+    const size = 0.85 + 1.5 * Math.sqrt(t.documents / max);
+    const tip = t.description ||
+      (t.suggested ? "suggested by the LLM (not in the vocabulary)" : "");
+    const item = el("a", {
+      class: "tag-cloud-item" + (t.suggested ? " suggested" : "") +
+        (t.documents ? "" : " unused"),
+      style: `font-size:${size.toFixed(2)}rem`,
+      title: tip,
+      onclick: () => openTagPage(t.tag),
+    }, "#" + esc(t.tag));
+    item.append(el("span", { class: "n" }, String(t.documents)));
+    cloud.append(item);
+  }
+  wrap.append(cloud);
+  return wrap;
+}
+
+// tagContent lists the documents carrying one tag.
+function tagContent(page) {
+  const data = page.data || {};
+  const docs = data.documents || [];
+  const wrap = el("div");
+  if (data.description) wrap.append(el("p", { class: "hint" }, esc(data.description)));
+  wrap.append(el("div", { class: "row" },
+    el("span", { class: "hint" }, `${docs.length} document(s)`)));
+  if (!docs.length) {
+    wrap.append(el("p", { class: "hint" }, "No documents carry this tag."));
+    return wrap;
+  }
+  const tree = el("div", { class: "item-list" });
+  renderTree(tree, docs, {});
+  wrap.append(tree);
+  return wrap;
+}
+
+/* ---------------------------------------------------------------- notes */
+
+// noteTitle derives a display title from a note's first non-empty line.
+function noteTitle(n) {
+  const body = n?.body || "";
+  for (let line of body.split("\n")) {
+    line = line.replace(/^[#*>\- ]+/, "").trim();
+    if (line) return line.length > 60 ? line.slice(0, 60) + "…" : line;
+  }
+  return "Note #" + (n?.id ?? "?");
+}
+
+function notesContent(page) {
+  const notes = page.data || [];
+  const wrap = el("div");
+  wrap.append(el("div", { class: "row" },
+    el("button", { onclick: createNote }, "New note"),
+    el("span", { class: "hint" }, "jot ideas while reading")));
+  if (!notes.length) {
+    wrap.append(el("p", { class: "hint" },
+      "No notes yet — create one to write down ideas without leaving your library."));
+    return wrap;
+  }
+  const ul = el("ul", { class: "cat-items" });
+  for (const n of notes) {
+    const snippet = (n.body || "").replace(/\s+/g, " ").trim().slice(0, 160);
+    const row = el("li", { class: "item hit", onclick: () => openNotePage(n.id) },
+      el("span", { class: "item-title" }, esc(noteTitle(n))),
+      el("div", { class: "chips" },
+        el("span", { class: "chip" }, "updated " + (n.updated_at || "").slice(0, 10)),
+        el("button", {
+          class: "mini plain", title: "delete note",
+          onclick: async (ev) => {
+            ev.stopPropagation();
+            if (!confirm("Delete this note? This cannot be undone.")) return;
+            try {
+              await api("/api/notes/" + n.id, { method: "DELETE" });
+              for (const p of [...pages])
+                if (p.kind === "note" && p.docId === n.id) closePage(p);
+              refreshNotesRoot();
+              notice("Note deleted.", NOTICE_MID);
+            } catch (e) { notice("note: " + e.message); }
+          },
+        }, "✕")));
+    if (snippet) row.append(el("div", { class: "hit-snippet" }, esc(snippet)));
+    ul.append(row);
+  }
+  const box = el("div", { class: "item-list" });
+  box.append(el("details", { class: "group", open: true },
+    el("summary", {}, "all notes", el("span", { class: "count" }, String(notes.length))),
+    ul));
+  wrap.append(box);
+  return wrap;
+}
+
+async function createNote() {
+  try {
+    const n = await api("/api/notes", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ body: "" }),
+    });
+    refreshNotesRoot();
+    const page = openNotePage(n.id);
+    page.el.querySelector(".note-body")?.focus();
+    notice("New note created.", NOTICE_QUICK);
+  } catch (e) { notice("note: " + e.message); }
+}
+
+// noteContent is a single textarea (autosaved, debounced) plus timestamps.
+function noteContent(page) {
+  const n = page.data || { body: "", created_at: "", updated_at: "" };
+  const wrap = el("div", { class: "note-page" });
+  const ta = el("textarea", { class: "note-body", placeholder: "Write down an idea…", spellcheck: "false" });
+  ta.value = n.body || "";
+  const status = el("div", { class: "hint", style: "margin-top:.3rem" },
+    `created ${n.created_at} · updated ${n.updated_at}`);
+  let timer = null;
+  let lastSaved = ta.value;
+  const save = async () => {
+    clearTimeout(timer);
+    if (ta.value === lastSaved) return;
+    try {
+      const r = await api("/api/notes/" + page.docId, {
+        method: "PATCH", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ body: ta.value }),
+      });
+      lastSaved = ta.value;
+      page.data = r;
+      updatePageTitle(page);
+      status.textContent = `created ${r.created_at} · updated ${r.updated_at}`;
+      refreshNotesRoot();
+    } catch (e) { notice("note: " + e.message); }
+  };
+  ta.addEventListener("input", () => {
+    clearTimeout(timer);
+    timer = setTimeout(save, 800);
+  });
+  ta.addEventListener("blur", save);
+  wrap.append(ta, status);
+  return wrap;
+}
+
+// refreshNotesRoot re-renders the Notes list page (not the open note being
+// edited, whose textarea must not be clobbered).
+function refreshNotesRoot() {
+  for (const p of pages) if (p.kind === "notes") refreshPage(p);
 }
 
 /* ---------------------------------------------------- category rename UI */
@@ -1600,6 +1803,8 @@ $("#btn-process").onclick = () => processIds([]);
 
 $("#btn-collections").onclick = () => openPage("collections");
 $("#btn-all-docs").onclick = () => openPage("library");
+$("#btn-tags").onclick = () => openPage("tags");
+$("#btn-notes").onclick = () => openPage("notes");
 
 /* ------------------------------------------------------------------ vocab */
 
@@ -1689,6 +1894,8 @@ async function loadVocabNames() {
     // once here (never awaited inside a page render: [object Promise])
     try { askConfig = await api("/api/ask/config"); }
     catch (e) { askConfig = { enabled: false, provider: "none" }; }
+    // apply the saved theme (presentation comes from config.yaml)
+    try { const cc = await api("/api/config"); applyTheme(cc.theme); } catch (e) { /* default */ }
     const st = await refresh();
     if (!st.llm_up) notice("Model server is not running — search still works, but summarize/tag/semantic need the llama-servers (start via vellum.sh).");
     await loadDocs();
@@ -1700,6 +1907,32 @@ async function loadVocabNames() {
 })();
 
 /* ---------------------------------------------------------------- settings */
+
+/* ----------------------------------------------------------------- theme */
+
+// Presentation is data: a preset palette plus per-variable overrides,
+// persisted in config.yaml (theme:) and applied as CSS variables. The
+// stylesheet's :root values are the "light" preset.
+const THEME_PRESETS = {
+  light:    { bg: "#faf9f6", fg: "#22211d", muted: "#7a766c", accent: "#5b4a2f", card: "#ffffff", line: "#d8d4c8", chip: "#efe9dc" },
+  dark:     { bg: "#191a1e", fg: "#e7e5df", muted: "#98948a", accent: "#c8b88c", card: "#24252b", line: "#3a3b44", chip: "#2e2f36" },
+  sepia:    { bg: "#f4ecd8", fg: "#3a3226", muted: "#8a7f6a", accent: "#8a5a2b", card: "#fbf5e6", line: "#d9cdb0", chip: "#e8dcc0" },
+  contrast: { bg: "#ffffff", fg: "#000000", muted: "#3a3a3a", accent: "#0033cc", card: "#ffffff", line: "#000000", chip: "#eaeaea" },
+};
+const THEME_VARS = ["bg", "fg", "muted", "accent", "card", "line", "chip"];
+
+// applyTheme sets the CSS variables for a {preset, colors} theme. Colors
+// override the preset per variable; an empty value removes the override
+// so the stylesheet default applies.
+function applyTheme(theme) {
+  const preset = THEME_PRESETS[theme?.preset] || THEME_PRESETS.light;
+  const colors = Object.assign({}, preset, theme?.colors || {});
+  const root = document.documentElement.style;
+  for (const v of THEME_VARS) {
+    if (colors[v]) root.setProperty("--" + v, colors[v]);
+    else root.removeProperty("--" + v);
+  }
+}
 
 const settings = {};
 const SETTINGS_GROUPS = [
@@ -1804,9 +2037,58 @@ async function settingsOpen() {
     tabs.push(tab);
     side.append(tab);
   });
+  themePane(cfg, panes, tabs, side, main, showGroup);
   body.append(side, main);
   showGroup(settingsGroup); // remember the last-open group
   $("#settings-msg").textContent = "";
+}
+
+// themePane builds the Theme group (preset + per-variable color pickers)
+// and wires live preview. Kept out of SETTINGS_GROUPS because it is not a
+// flat sec.key list.
+function themePane(cfg, panes, tabs, side, main, showGroup) {
+  const cur = cfg.theme?.colors || {};
+  const presetSel = el("select", {}, ...Object.keys(THEME_PRESETS).map((p) =>
+    el("option", { value: p }, p)));
+  presetSel.value = cfg.theme?.preset || "light";
+  settings.themePreset = presetSel;
+  settings.themeInputs = {};
+  const pane = el("div", { class: "settings-pane hidden" });
+  pane.append(el("h3", {}, "Theme"));
+  pane.append(el("p", { class: "hint", style: "margin:.1rem 0 .6rem" },
+    "Colors for the web UI. A preset sets the whole palette; a color picker overrides that one variable."));
+  pane.append(el("div", { class: "settings-row" },
+    el("label", {}, el("div", { class: "set-name" }, "preset"),
+      el("div", { class: "hint" }, "base palette")), presetSel));
+  const preview = () => applyTheme({ preset: presetSel.value, colors: readThemeColors() });
+  const syncPreset = () => {
+    const p = THEME_PRESETS[presetSel.value] || THEME_PRESETS.light;
+    for (const v of THEME_VARS) settings.themeInputs[v].value = p[v];
+    preview();
+  };
+  for (const v of THEME_VARS) {
+    const inp = el("input", { type: "color", value: cur[v] || THEME_PRESETS[presetSel.value][v] });
+    settings.themeInputs[v] = inp;
+    inp.addEventListener("input", preview);
+    pane.append(el("div", { class: "settings-row" },
+      el("label", {}, el("div", { class: "set-name" }, "--" + v),
+        el("div", { class: "hint" }, "override")), inp));
+  }
+  presetSel.addEventListener("change", syncPreset);
+  panes.push(pane);
+  main.append(pane);
+  const tab = el("button", { onclick: () => showGroup(panes.length - 1) }, "Theme");
+  tabs.push(tab);
+  side.append(tab);
+}
+
+function readThemeColors() {
+  const out = {};
+  for (const v of THEME_VARS) {
+    const inp = settings.themeInputs?.[v];
+    if (inp && inp.value) out[v] = inp.value;
+  }
+  return out;
 }
 
 $("#btn-settings").onclick = () => settingsOpen().catch((e) =>
@@ -1838,11 +2120,16 @@ $("#settings-save").onclick = async () => {
       }
     }
   }
+  payload.theme = {
+    preset: settings.themePreset?.value || "light",
+    colors: readThemeColors(),
+  };
   try {
     await api("/api/config", {
       method: "PUT", headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
+    applyTheme(payload.theme);
     askConfig = null; // re-read on next use
     $("#settings-msg").textContent = "saved + applied ✓";
     await refresh();

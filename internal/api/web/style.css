@@ -281,6 +281,30 @@ button.mini { font-size: .72rem; padding: 0 .45rem; }
 #dlg-lib .row input[type="file"] { flex: 1; }
 #dlg-lib h3 { font-size: .95rem; color: var(--accent); margin: .8rem 0 .2rem; }
 
+/* tag cloud (Tags page) */
+.tag-cloud { display: flex; flex-wrap: wrap; gap: .35rem .7rem; align-items: baseline;
+  padding: .3rem 0; }
+.tag-cloud-item { color: var(--accent); cursor: pointer; line-height: 1.25;
+  padding: .05rem .35rem; }
+.tag-cloud-item:hover { text-decoration: underline; background: rgba(127,127,127,.09); }
+.tag-cloud-item.suggested { border: 1px dashed var(--muted); }
+.tag-cloud-item.unused { color: var(--muted); opacity: .7; }
+.tag-cloud-item .n { font-size: .6em; color: var(--muted); margin-left: .25rem; vertical-align: super; }
+
+/* notes: a single textarea fills the page */
+.note-page textarea.note-body {
+  width: 100%; min-height: 58vh; resize: vertical;
+  border: 1px solid var(--line); background: var(--bg);
+  font: inherit; padding: .6rem .7rem; line-height: 1.55;
+}
+.note-page textarea.note-body:focus { outline: 2px solid var(--accent); outline-offset: -2px; }
+
+/* theme color pickers in Settings */
+.settings-row input[type="color"] {
+  width: 100%; height: 2rem; padding: 0; border: 1px solid var(--line);
+  background: var(--card);
+}
+
 /* status bar: bottom line showing the queue situation; opens the Jobs
  * dialog on click */
 #statusbar {

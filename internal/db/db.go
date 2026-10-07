@@ -81,6 +81,15 @@ CREATE TABLE IF NOT EXISTS collection_docs(
   PRIMARY KEY(collection_id, doc_id)
 );
 
+-- Notes: freeform scratchpad entries (ideas jotted while reading). Only
+-- a body plus timestamps — no other metadata.
+CREATE TABLE IF NOT EXISTS notes(
+  id INTEGER PRIMARY KEY,
+  body TEXT NOT NULL DEFAULT '',
+  created_at TEXT DEFAULT (datetime('now')),
+  updated_at TEXT DEFAULT (datetime('now'))
+);
+
 CREATE VIRTUAL TABLE IF NOT EXISTS fts USING fts5(
   text, content='chunks', content_rowid='id'
 );
@@ -434,4 +443,72 @@ WHERE cd.doc_id = ? ORDER BY c.name`, docID)
 		out = append(out, c)
 	}
 	return out, rows.Err()
+}
+
+// ------------------------------------------------------------------------
+// Notes: freeform scratchpad entries (body + timestamps only).
+
+// Note is one scratchpad entry.
+type Note struct {
+	ID        int64  `json:"id"`
+	Body      string `json:"body"`
+	CreatedAt string `json:"created_at"`
+	UpdatedAt string `json:"updated_at"`
+}
+
+// ListNotes lists notes, most recently updated first.
+func ListNotes(conn *sql.DB) ([]Note, error) {
+	rows, err := conn.Query(
+		"SELECT id, body, created_at, updated_at FROM notes ORDER BY updated_at DESC, id DESC")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []Note{}
+	for rows.Next() {
+		var n Note
+		if err := rows.Scan(&n.ID, &n.Body, &n.CreatedAt, &n.UpdatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, n)
+	}
+	return out, rows.Err()
+}
+
+// CreateNote inserts a note and returns it.
+func CreateNote(conn *sql.DB, body string) (Note, error) {
+	res, err := conn.Exec("INSERT INTO notes(body) VALUES(?)", body)
+	if err != nil {
+		return Note{}, err
+	}
+	id, _ := res.LastInsertId()
+	return GetNote(conn, id)
+}
+
+// GetNote reads one note.
+func GetNote(conn *sql.DB, id int64) (Note, error) {
+	var n Note
+	err := conn.QueryRow(
+		"SELECT id, body, created_at, updated_at FROM notes WHERE id=?", id).
+		Scan(&n.ID, &n.Body, &n.CreatedAt, &n.UpdatedAt)
+	return n, err
+}
+
+// UpdateNote replaces a note's body and bumps updated_at.
+func UpdateNote(conn *sql.DB, id int64, body string) (Note, error) {
+	res, err := conn.Exec(
+		"UPDATE notes SET body=?, updated_at=datetime('now') WHERE id=?", body, id)
+	if err != nil {
+		return Note{}, err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return Note{}, sql.ErrNoRows
+	}
+	return GetNote(conn, id)
+}
+
+// DeleteNote removes a note.
+func DeleteNote(conn *sql.DB, id int64) error {
+	_, err := conn.Exec("DELETE FROM notes WHERE id=?", id)
+	return err
 }

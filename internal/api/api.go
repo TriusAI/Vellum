@@ -14,6 +14,7 @@ import (
 	"io/fs"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -241,6 +242,13 @@ func (s *Server) Mux() http.Handler {
 	mux.HandleFunc("GET /api/vocab/suggestions", s.suggestions)
 	mux.HandleFunc("POST /api/vocab", s.postVocab)
 	mux.HandleFunc("DELETE /api/vocab/{name}", s.deleteVocab)
+	mux.HandleFunc("GET /api/tags", s.listTags)
+	mux.HandleFunc("GET /api/tags/{tag}", s.getTag)
+	mux.HandleFunc("GET /api/notes", s.listNotes)
+	mux.HandleFunc("POST /api/notes", s.createNote)
+	mux.HandleFunc("GET /api/notes/{id}", s.getNote)
+	mux.HandleFunc("PATCH /api/notes/{id}", s.patchNote)
+	mux.HandleFunc("DELETE /api/notes/{id}", s.deleteNote)
 
 	sub, _ := fs.Sub(webFS, "web")
 	mux.Handle("/", http.FileServer(http.FS(sub)))
@@ -1557,6 +1565,197 @@ func (s *Server) deleteVocab(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]string{"removed": name})
 }
 
+// ------------------------------- tags (cloud + per-tag pages) -------------
+
+// tagInfo is one entry of the Tags page / cloud.
+type tagInfo struct {
+	Tag         string `json:"tag"`
+	Documents   int    `json:"documents"`
+	Description string `json:"description"`
+	Suggested   bool   `json:"suggested"`
+}
+
+// listTags returns every tag known to the library — the controlled
+// vocabulary, tags actually applied, and LLM-proposed ones — with usage
+// counts and descriptions.
+func (s *Server) listTags(w http.ResponseWriter, r *http.Request) {
+	counts := map[string]int{}
+	if rows, err := s.conn.Query(
+		"SELECT tag, COUNT(DISTINCT doc_id) FROM doc_tags GROUP BY tag"); err == nil {
+		for rows.Next() {
+			var t string
+			var n int
+			rows.Scan(&t, &n)
+			counts[t] = n
+		}
+		rows.Close()
+	}
+	suggested := map[string]bool{}
+	if rows, err := s.conn.Query(
+		"SELECT DISTINCT tag FROM doc_tags WHERE source='suggested'"); err == nil {
+		for rows.Next() {
+			var t string
+			rows.Scan(&t)
+			suggested[t] = true
+		}
+		rows.Close()
+	}
+	info := map[string]*tagInfo{}
+	add := func(tag string) *tagInfo {
+		if ti, ok := info[tag]; ok {
+			return ti
+		}
+		ti := &tagInfo{Tag: tag, Suggested: suggested[tag]}
+		info[tag] = ti
+		return ti
+	}
+	if v, err := vocab.Load(s.cfg.VocabPath); err == nil {
+		for name, desc := range v.Tags {
+			add(name).Description = desc
+		}
+	}
+	for tag, n := range counts {
+		add(tag).Documents = n
+	}
+	out := make([]tagInfo, 0, len(info))
+	for _, ti := range info {
+		out = append(out, *ti)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Documents != out[j].Documents {
+			return out[i].Documents > out[j].Documents
+		}
+		return out[i].Tag < out[j].Tag
+	})
+	writeJSON(w, 200, out)
+}
+
+// getTag returns one tag with its documents (for a [Tag] page).
+func (s *Server) getTag(w http.ResponseWriter, r *http.Request) {
+	tag := r.PathValue("tag")
+	if unescaped, err := url.PathUnescape(tag); err == nil {
+		tag = unescaped
+	}
+	if tag == "" {
+		writeErr(w, 400, "tag required")
+		return
+	}
+	desc := ""
+	if v, err := vocab.Load(s.cfg.VocabPath); err == nil {
+		desc = v.Tags[tag]
+	}
+	docs, err := s.allDocuments()
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	matched := []documentJSON{}
+	for _, d := range docs {
+		for _, t := range d.Tags {
+			if strings.EqualFold(t, tag) {
+				matched = append(matched, d)
+				break
+			}
+		}
+	}
+	writeJSON(w, 200, map[string]any{
+		"tag": tag, "description": desc, "documents": matched})
+}
+
+// ------------------------------- notes (scratchpad) -----------------------
+
+func (s *Server) listNotes(w http.ResponseWriter, r *http.Request) {
+	notes, err := db.ListNotes(s.conn)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, 200, notes)
+}
+
+func (s *Server) createNote(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Body string `json:"body"`
+	}
+	if r.ContentLength > 0 {
+		if err := decodeBody(r, &body); err != nil {
+			writeErr(w, 400, "bad JSON body: "+err.Error())
+			return
+		}
+	}
+	n, err := db.CreateNote(s.conn, body.Body)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, 200, n)
+}
+
+func (s *Server) getNote(w http.ResponseWriter, r *http.Request) {
+	id, err := pathID(r)
+	if err != nil {
+		writeErr(w, 400, "bad note id")
+		return
+	}
+	n, err := db.GetNote(s.conn, id)
+	if err == sql.ErrNoRows {
+		writeErr(w, 404, "no such note")
+		return
+	}
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, 200, n)
+}
+
+func (s *Server) patchNote(w http.ResponseWriter, r *http.Request) {
+	id, err := pathID(r)
+	if err != nil {
+		writeErr(w, 400, "bad note id")
+		return
+	}
+	var body struct {
+		Body *string `json:"body"`
+	}
+	if err := decodeBody(r, &body); err != nil {
+		writeErr(w, 400, "bad JSON body: "+err.Error())
+		return
+	}
+	if body.Body == nil {
+		writeErr(w, 400, "body required")
+		return
+	}
+	n, err := db.UpdateNote(s.conn, id, *body.Body)
+	if err == sql.ErrNoRows {
+		writeErr(w, 404, "no such note")
+		return
+	}
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, 200, n)
+}
+
+func (s *Server) deleteNote(w http.ResponseWriter, r *http.Request) {
+	id, err := pathID(r)
+	if err != nil {
+		writeErr(w, 400, "bad note id")
+		return
+	}
+	res, err := s.conn.Exec("DELETE FROM notes WHERE id=?", id)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		writeErr(w, 404, "no such note")
+		return
+	}
+	writeJSON(w, 200, map[string]any{"deleted": id})
+}
+
 // ------------------------------- ask (LLM chat about an item) ------------
 
 // getAskConfig returns the ask configuration with the API key masked
@@ -1849,6 +2048,10 @@ func (s *Server) getConfig(w http.ResponseWriter, r *http.Request) {
 			Provider: c.Ask.Provider, Model: c.Ask.Model,
 			BaseURL: c.Ask.BaseURL, KeySet: c.Ask.APIKey != "",
 		},
+		"theme": map[string]any{
+			"preset": c.Theme.Preset,
+			"colors": c.Theme.Colors,
+		},
 	})
 }
 
@@ -1892,6 +2095,10 @@ func (s *Server) putConfig(w http.ResponseWriter, r *http.Request) {
 			APIKey   *string `json:"api_key"`
 			BaseURL  *string `json:"base_url"`
 		} `json:"ask"`
+		Theme struct {
+			Preset *string           `json:"preset"`
+			Colors map[string]string `json:"colors"`
+		} `json:"theme"`
 	}
 	if err := decodeBody(r, &body); err != nil {
 		writeErr(w, 400, "bad JSON body: "+err.Error())
@@ -1968,6 +2175,12 @@ func (s *Server) putConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	if a.BaseURL != nil {
 		c.Ask.BaseURL = *a.BaseURL
+	}
+	if body.Theme.Preset != nil && *body.Theme.Preset != "" {
+		c.Theme.Preset = *body.Theme.Preset
+	}
+	if body.Theme.Colors != nil {
+		c.Theme.Colors = body.Theme.Colors
 	}
 	// persist
 	if err := s.cfg.Save(); err != nil {

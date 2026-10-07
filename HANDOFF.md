@@ -68,6 +68,10 @@ vellum serve  ────  HTTP :8090 (127.0.0.1)
   them. New TABLES (not columns) land via the idempotent
   `CREATE TABLE IF NOT EXISTS` in the schema const — no migrate() row
   needed, old libraries pick them up at Open.
+- `notes` — freeform scratchpad (id, body, created_at, updated_at);
+  the UI's Notes pages. Also a new table (idempotent CREATE).
+- `theme` (config.yaml) — {preset, colors} for the web UI only; carried
+  by GET/PUT /api/config and applied as CSS variables.
 
 ## 3. Schema rules (non-negotiable)
 
@@ -154,6 +158,12 @@ Fast paths by kind (`internal/classify` + `produceSummary` in ingest):
 - remove: `vellum remove ID [ID...]` / `DELETE /api/documents/{id}` —
   index-only removal (chunks + tags + FTS rows + cover cache go; the FILE
   stays on disk). Also a "Remove from library…" button in the UI.
+- tags/notes/theme: `GET /api/tags` (cloud) + `GET /api/tags/{tag}`;
+  `vellum note list|add|show|delete` + `/api/notes` CRUD; `theme` in
+  config (preset + color overrides) drives the UI's CSS variables.
+  UI: a Tags page (cloud → [Tag] pages), a Notes management page
+  (→ [Note] pages, one textarea, debounced autosave), and a Theme group
+  in Settings. Tags/notes are new tables (idempotent CREATE).
 - rename category: `vellum rename-category OLD NEW` /
   `POST /api/categories/rename` — renames a shelf everywhere and moves
   its whole subtree (machine-learning → computer-science/machine-learning
@@ -379,23 +389,21 @@ Docker: `pack/Dockerfile` + `docker-entrypoint.sh`; Hub is proxy-blocked
 
 ## 10. Where things state-wise
 
-- HEAD: v0.19.0 (`9e3a20d`), all tests green. Since 0.19: semantic
-  search applies each embed model's asymmetric retrieval prefixes
-  (internal/search.embedPrefixes; model detected via /v1/models,
-  basename-normalized; part of the embed_model identity, so adopting them
-  re-embeds lazily). The e2e semantic assertion now judges *relevance*
-  (the long_document fixture is the cognitive text repeated, a legitimate
-  top hit) rather than one exact file.
-- v0.18: per-message notice durations; kind detection learns from user
-  pins; category edits refresh open collection pages; collection .zip
-  export/import; closable root pages + All Documents opener; .item-list
-  styling everywhere with hover accent+underline.
-- v0.17: COLLECTIONS (collections + collection_docs, CRUD API/CLI,
-  Collections root page + [Collection] pages, Summary add/remove); page
-  moves via CSS order; bottom status bar.
-- v0.16: auto-filing learns from user corrections (ShelvingExample/
-  bestExamples in internal/summarize); category chips suppressed in the
-  tree; flash-free updates.
+- HEAD: v0.20.0 (see git log), all tests green. Since 0.20: TAGS page
+  (cloud sized by usage → [Tag] pages), NOTES (scratchpad: new `notes`
+  table, /api/notes CRUD, `vellum note list|add|show|delete`, a Notes
+  management page → [Note] pages that are a single autosaved textarea),
+  and THEMES (config `theme: {preset, colors}` carried by /api/config,
+  applied as CSS variables; Settings → Theme with preset + per-color
+  overrides). All new tables land via idempotent CREATE.
+- v0.19: semantic search applies each embed model's asymmetric retrieval
+  prefixes (embedPrefixes; model via /v1/models, basename-normalized;
+  part of the embed_model identity → re-embeds lazily).
+- v0.18: notice durations; learnable kind detection; category edits
+  refresh collection pages; collection .zip export/import; closable root
+  pages + All Documents opener; .item-list styling with hover affordance.
+- v0.17: COLLECTIONS; CSS-order page moves; bottom status bar.
+- v0.16: auto-filing learns from user corrections; flash-free updates.
 - Pack stage `pack/stage/vellum-9e3a20d-linux-amd64/` (user's live
   library inside) updated to the 0.19.0 binary; distributable tarball
   `pack/vellum-9e3a20d-linux-x86_64.tar.gz` (clean of the DB — verified

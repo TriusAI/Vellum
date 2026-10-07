@@ -481,6 +481,53 @@ func TestAPI(t *testing.T) {
 	// garbage is rejected
 	request("POST", "/api/collections/import", "not a zip", nil, 400)
 
+	// ---- notes: scratchpad entries (body + timestamps only)
+	var note map[string]any
+	request("POST", "/api/notes", `{"body":"first idea\nsecond line"}`, &note, 200)
+	noteID := strconv.Itoa(int(note["id"].(float64)))
+	if note["body"] != "first idea\nsecond line" || note["created_at"] == "" {
+		t.Fatalf("create note: %v", note)
+	}
+	request("GET", "/api/notes/"+noteID, "", &note, 200)
+	request("PATCH", "/api/notes/"+noteID, `{"body":"edited"}`, &note, 200)
+	if note["body"] != "edited" {
+		t.Fatalf("patch note: %v", note)
+	}
+	var notes []map[string]any
+	request("GET", "/api/notes", "", &notes, 200)
+	if len(notes) != 1 {
+		t.Fatalf("notes list: %d", len(notes))
+	}
+	request("GET", "/api/notes/99999", "", nil, 404)
+	request("PATCH", "/api/notes/99999", `{"body":"x"}`, nil, 404)
+	request("DELETE", "/api/notes/"+noteID, "", nil, 200)
+	request("DELETE", "/api/notes/"+noteID, "", nil, 404)
+
+	// ---- tags: cloud listing + per-tag documents
+	var tagList []map[string]any
+	request("GET", "/api/tags", "", &tagList, 200)
+	if len(tagList) == 0 {
+		t.Fatal("tags list empty")
+	}
+	// the paper carries the manual tags we set earlier
+	var tagDetail struct {
+		Tag       string           `json:"tag"`
+		Documents []map[string]any `json:"documents"`
+	}
+	request("GET", "/api/tags/epistemology", "", &tagDetail, 200)
+	if tagDetail.Tag != "epistemology" || len(tagDetail.Documents) != 1 {
+		t.Fatalf("tag detail: tag=%q docs=%d", tagDetail.Tag, len(tagDetail.Documents))
+	}
+
+	// ---- theme: persisted in the config surface
+	var themeCfg map[string]any
+	request("PUT", "/api/config",
+		`{"theme":{"preset":"dark","colors":{"accent":"#123456"}}}`, &themeCfg, 200)
+	th := themeCfg["theme"].(map[string]any)
+	if th["preset"] != "dark" {
+		t.Fatalf("theme preset not saved: %v", th)
+	}
+
 	// ---- document delete: index-only removal (the file stays on disk)
 	var delRes map[string]any
 	var docsBefore []map[string]any

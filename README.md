@@ -102,6 +102,11 @@ vellum collection show applied-ml          # browse just this project's papers
 vellum collection export applied-ml applied-ml.zip
 vellum collection import applied-ml.zip    # restore it elsewhere
 
+# notes: freeform scratchpad (ideas jotted while reading)
+vellum note add "revisit the attention section in ch. 3"
+vellum note list
+vellum note show 1
+
 # 4. curate the vocabulary
 vellum vocab list
 vellum vocab review                          # what the LLM suggested beyond the vocabulary
@@ -112,7 +117,11 @@ vellum vocab add my-new-tag "what it covers"
 #    pages: "All Documents" (the shelf tree, with per-shelf rename) plus
 #    one page per document view — [Summary], [Preview], [Text], [Ask].
 #    "Collections…" opens a Collections page for user-made research
-#    groups, each opening as its own [Collection] page.
+#    groups, each opening as its own [Collection] page; "Tags…" opens a
+#    tag cloud (each tag → a [Tag] page); "Notes…" is a scratchpad
+#    management page (each note → a single-textarea [Note] page).
+#    Settings → Theme switches palettes (light/dark/sepia/contrast) and
+#    lets you override individual colors.
 #    Pages can be re-ordered, drag-resized and expanded; search results
 #    show the matching snippet with a jump to the page; pending/error
 #    documents are marked in the list; long jobs get a cancel button in

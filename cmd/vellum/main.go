@@ -45,6 +45,8 @@ Commands:
                         rename a shelf; its whole subtree moves with it
   collection list|create|delete|add|remove|show
                         user-managed groups of documents (research projects)
+  note list|add|show|delete
+                        freeform scratchpad notes (ideas while reading)
   export [PATH]        write a consistent snapshot of the library (backup)
   import PATH          replace the library with a backup (old kept aside)
   vocab list|add|remove|review|promote
@@ -60,7 +62,7 @@ file (FTS5). Models served locally by llama.cpp llama-server.
 `
 
 // versionString is reported by --version, /api/status and `vellum agent`.
-const versionString = "0.19.0"
+const versionString = "0.20.0"
 
 // documentColumns is the explicit projection used everywhere (never SELECT *,
 // so the scan order is fixed even if the schema gains columns).
@@ -158,6 +160,8 @@ func main() {
 		cmdRenameCategory(cfg, args[1:])
 	case "collection":
 		cmdCollection(cfg, args[1:])
+	case "note":
+		cmdNote(cfg, args[1:])
 	case "export":
 		cmdExport(cfg, args[1:])
 	case "import":
@@ -969,6 +973,108 @@ func cmdCollection(cfg *config.Config, args []string) {
 	default:
 		log.Fatalf("collection: unknown subcommand %q (list|create|delete|add|remove|show|export|import)", sub)
 	}
+}
+
+// cmdNote manages scratchpad notes (body + timestamps only).
+//
+//	vellum note list
+//	vellum note add "text"      # or - to read stdin
+//	vellum note show ID
+//	vellum note delete ID
+func cmdNote(cfg *config.Config, args []string) {
+	if len(args) < 1 {
+		log.Fatalf("usage: vellum note list|add|show|delete ...")
+	}
+	conn := mustOpen(cfg)
+	switch args[0] {
+	case "list":
+		notes, err := db.ListNotes(conn)
+		if err != nil {
+			log.Fatalf("note: %s", err)
+		}
+		if jsonOut {
+			printJSON(notes)
+			return
+		}
+		if len(notes) == 0 {
+			fmt.Println("no notes yet (vellum note add \"...\")")
+			return
+		}
+		for _, n := range notes {
+			fmt.Printf("#%d  %s  (updated %s)\n", n.ID, noteTitle(n), n.UpdatedAt)
+		}
+
+	case "add":
+		if len(args) < 2 {
+			log.Fatalf("usage: vellum note add \"text\"   (use - to read stdin)")
+		}
+		body := args[1]
+		if body == "-" {
+			data, err := io.ReadAll(os.Stdin)
+			if err != nil {
+				log.Fatalf("note add: %s", err)
+			}
+			body = string(data)
+		}
+		n, err := db.CreateNote(conn, body)
+		if err != nil {
+			log.Fatalf("note add: %s", err)
+		}
+		if jsonOut {
+			printJSON(n)
+			return
+		}
+		fmt.Printf("created note #%d\n", n.ID)
+
+	case "show":
+		if len(args) < 2 {
+			log.Fatalf("usage: vellum note show ID")
+		}
+		id, err := strconv.ParseInt(args[1], 10, 64)
+		if err != nil {
+			log.Fatalf("note show expects a numeric id")
+		}
+		n, err := db.GetNote(conn, id)
+		if err != nil {
+			log.Fatalf("note show: %s", err)
+		}
+		if jsonOut {
+			printJSON(n)
+			return
+		}
+		fmt.Printf("#%d (created %s, updated %s)\n\n%s\n", n.ID, n.CreatedAt, n.UpdatedAt, n.Body)
+
+	case "delete":
+		if len(args) < 2 {
+			log.Fatalf("usage: vellum note delete ID")
+		}
+		id, err := strconv.ParseInt(args[1], 10, 64)
+		if err != nil {
+			log.Fatalf("note delete expects a numeric id")
+		}
+		if err := db.DeleteNote(conn, id); err != nil {
+			log.Fatalf("note delete: %s", err)
+		}
+		fmt.Printf("deleted note #%d\n", id)
+
+	default:
+		log.Fatalf("note: unknown subcommand %q (list|add|show|delete)", args[0])
+	}
+}
+
+// noteTitle derives a display title from a note body (its first non-empty
+// line, capped), falling back to "Note #id".
+func noteTitle(n db.Note) string {
+	for _, line := range strings.Split(n.Body, "\n") {
+		line = strings.TrimSpace(strings.TrimLeft(line, "#*-> "))
+		if line != "" {
+			if len(line) > 60 {
+				line = line[:60] + "…"
+			}
+			return line
+		}
+	}
+	return fmt.Sprintf("Note #%d", n.ID)
 }
 
 // cmdExport writes a consistent snapshot of the library to PATH (a
