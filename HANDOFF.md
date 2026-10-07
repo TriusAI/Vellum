@@ -389,7 +389,7 @@ Docker: `pack/Dockerfile` + `docker-entrypoint.sh`; Hub is proxy-blocked
 
 ## 10. Where things state-wise
 
-- HEAD: v0.20.0 (see git log), all tests green. Since 0.20: TAGS page
+- HEAD: v0.20.0 (`95eaf5c`), all tests green. Since 0.20: TAGS page
   (cloud sized by usage → [Tag] pages), NOTES (scratchpad: new `notes`
   table, /api/notes CRUD, `vellum note list|add|show|delete`, a Notes
   management page → [Note] pages that are a single autosaved textarea),
@@ -404,20 +404,14 @@ Docker: `pack/Dockerfile` + `docker-entrypoint.sh`; Hub is proxy-blocked
   pages + All Documents opener; .item-list styling with hover affordance.
 - v0.17: COLLECTIONS; CSS-order page moves; bottom status bar.
 - v0.16: auto-filing learns from user corrections; flash-free updates.
-- Pack stage `pack/stage/vellum-9e3a20d-linux-amd64/` (user's live
-  library inside) updated to the 0.19.0 binary; distributable tarball
-  `pack/vellum-9e3a20d-linux-x86_64.tar.gz` (clean of the DB — verified
-  with tar -tzf | grep -c library.db = 0). IMPORTANT for the user's live
-  library: the embed_model identity changed (basename+`|pfx`), so the
-  FIRST semantic search after their next ./vellum.sh serve will
-  invalidate + re-embed every chunk synchronously — run `vellum embed`
-  (or the UI's embed step) once with the servers up to do it with
-  progress instead of blocking a search query. The user's
-  long-running serve (PID from an OLDER deleted stage, port 8097) still
-  runs its old binary/DB — the new one takes effect on the next
-  ./vellum.sh serve. NOTE: that serve's library.db exists only via its
-  open fds (its stage dir was deleted); if it was used for real work,
-  recover it from /proc/701/fd BEFORE stopping it.
+- Pack stage `pack/stage/vellum-95eaf5c-linux-amd64/` (user's live
+  library inside) updated to the 0.20.0 binary; distributable tarball
+  `pack/vellum-95eaf5c-linux-x86_64.tar.gz` (clean of the DB — verified
+  with tar -tzf | grep -c library.db = 0). NOTE: the user has their OWN
+  serve running from this stage (launched with --open, port 8090, its
+  binary now shows "(deleted)" after the version-dir rename) — it keeps
+  running the old in-memory binary and its DB fd; do NOT kill it. The
+  0.20.0 UI/API takes effect on their next ./vellum.sh serve.
 - The user runs `./vellum.sh serve` (their own llama-servers on 8081/8082
   are LONG-RUNNING — do not kill them; kill only ephemeral test ones).
 - `AGENTS.md` (repo root) carries the agent-focused subset of this
