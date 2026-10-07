@@ -114,8 +114,27 @@ func collectFiles(paths []string) []string {
 			continue
 		}
 		if st.IsDir() {
+			// Recursive: a directory contributes every supported file
+			// beneath it, at any depth (this is what makes ingesting an
+			// Obsidian vault — or any notes folder — a one-liner).
+			// Hidden entries are skipped: a vault's .obsidian/ (config
+			// + plugins), .trash/, and .git/ are not library material.
+			root := p
 			filepath.WalkDir(p, func(path string, d os.DirEntry, err error) error {
-				if err == nil && !d.IsDir() && extract.Supported(path) {
+				if err != nil {
+					return nil
+				}
+				name := d.Name()
+				if d.IsDir() {
+					if path != root && strings.HasPrefix(name, ".") {
+						return filepath.SkipDir
+					}
+					return nil
+				}
+				if strings.HasPrefix(name, ".") {
+					return nil
+				}
+				if extract.Supported(path) {
 					files = append(files, path)
 				}
 				return nil

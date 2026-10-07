@@ -66,6 +66,7 @@ To add a language, drop its `.traineddata` there and extend `ocr.langs`.
 ```bash
 # 1. index things
 vellum ingest ~/papers/that-scan.pdf ~/books/
+vellum ingest ~/MyObsidianVault   # recursive; skips .obsidian/, .trash/
 vellum process [ID...]     # summarize + tag pending (all, or specific docs by id)
 
 # 2. find things
@@ -122,6 +123,8 @@ vellum vocab add my-new-tag "what it covers"
 #    management page (each note → a single-textarea [Note] page).
 #    Settings → Theme switches palettes (light/dark/sepia/contrast) and
 #    lets you override individual colors.
+#    Pages are URL-addressable deep links (?doc=42&view=preview&page=7,
+#    ?tag=…, ?collection=…, ?note=…, ?q=…); the 🔗 button copies one.
 #    Pages can be re-ordered, drag-resized and expanded; search results
 #    show the matching snippet with a jump to the page; pending/error
 #    documents are marked in the list; long jobs get a cancel button in

@@ -51,6 +51,26 @@ func TestAPI(t *testing.T) {
 		0o644); err != nil {
 		t.Fatal(err)
 	}
+	// a nested subdirectory (recursive ingest) and vault noise that must
+	// be SKIPPED: .obsidian/ and .trash/ are not library material.
+	if err := os.MkdirAll(filepath.Join(lib, "subdir"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(lib, "subdir", "nested.md"),
+		[]byte("# Nested\n\nA note in a subfolder.\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, noise := range []string{
+		filepath.Join(lib, ".obsidian", "plugins", "config.md"),
+		filepath.Join(lib, ".trash", "deleted.md"),
+	} {
+		if err := os.MkdirAll(filepath.Dir(noise), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(noise, []byte("# noise\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
 
 	vocabSrc, err := os.ReadFile(filepath.Join(repoRoot(t), "vocab.yaml"))
 	if err != nil {
@@ -130,8 +150,30 @@ func TestAPI(t *testing.T) {
 		Added int `json:"Added"`
 	}
 	request("POST", "/api/ingest", `{"paths":["`+lib+`"]}`, &st, 200)
-	if st.Added != 2 {
-		t.Fatalf("expected added=2, got %+v", st)
+	if st.Added != 3 {
+		t.Fatalf("expected added=3 (doc.pdf, notes.md, subdir/nested.md), got %+v", st)
+	}
+	// recursive ingest found the nested file, and skipped the hidden dirs
+	var pathsAfter []string
+	if rows, err := conn.Query("SELECT path FROM documents"); err == nil {
+		for rows.Next() {
+			var p string
+			rows.Scan(&p)
+			pathsAfter = append(pathsAfter, p)
+		}
+		rows.Close()
+	}
+	sawNested := false
+	for _, p := range pathsAfter {
+		if strings.Contains(p, "/.obsidian/") || strings.Contains(p, "/.trash/") {
+			t.Fatalf("hidden vault dir was ingested: %s", p)
+		}
+		if strings.HasSuffix(p, "subdir/nested.md") {
+			sawNested = true
+		}
+	}
+	if !sawNested {
+		t.Fatalf("recursive ingest missed subdir/nested.md: %v", pathsAfter)
 	}
 
 	// fs listing backs the ingest picker: entries typed, unsupported
@@ -212,7 +254,7 @@ func TestAPI(t *testing.T) {
 	}
 	coverResp.Body.Close()
 	var mdID int64
-	if err := conn.QueryRow("SELECT id FROM documents WHERE path LIKE '%.md'").
+	if err := conn.QueryRow("SELECT id FROM documents WHERE path LIKE '%/notes.md'").
 		Scan(&mdID); err != nil {
 		t.Fatal(err)
 	}
@@ -246,8 +288,8 @@ func TestAPI(t *testing.T) {
 	// documents list
 	var docs []map[string]any
 	request("GET", "/api/documents", "", &docs, 200)
-	if len(docs) != 2 {
-		t.Fatalf("expected 2 documents, got %d", len(docs))
+	if len(docs) != 3 {
+		t.Fatalf("expected 3 documents, got %d", len(docs))
 	}
 	pdfID := ""
 	for _, d := range docs {

@@ -109,6 +109,27 @@ tags stay grammar-bound on every backend (llama-server response_format
 = ollama "format" = the same JSON schema), and llm.num_ctx must match
 the actual server context on any backend (ollama: num_ctx option).
 
+## Ingesting (folders, and notes vaults)
+Ingest is RECURSIVE: a directory contributes every supported file beneath
+it at ANY depth, so pointing ingest at a folder — including an Obsidian
+vault — indexes it in one go:
+    vellum ingest ~/MyVault          # .md/.markdown/.txt/.rst + PDF-likes
+    POST /api/ingest {"paths":["/abs/dir"]}
+Hidden entries are SKIPPED (a vault's .obsidian/, .trash/, .git/ and
+dotfiles are not library material). Supported = .md/.markdown/.txt/.rst
+and .pdf/.epub/.mobi/.azw/.azw3/.fb2; anything else is ignored.
+
+## Deep links (the web UI is URL-addressable)
+The active page is mirrored into the URL, so any view can be pasted,
+bookmarked, or linked from another app (e.g. an Obsidian note):
+    /?doc=42                      [Summary] for document 42
+    /?doc=42&view=preview&page=7  [Preview] open at page 7
+    /?doc=42&view=text   /?doc=42&view=ask
+    /?tag=attention   /?collection=3   /?note=5
+    /?view=tags   /?view=notes   /?view=collections
+    /?q=terms&semantic=1          All Documents showing search results
+The link button in each page's title bar copies the current page's URL.
+
 ## Ingest is two-phase (fast ingest, OCR at process time)
 ingest reads TEXT LAYERS only and never OCRs: a scanned 300-page book
 indexes in seconds, marked ocr_pending=1 with a thin (or empty) chunk

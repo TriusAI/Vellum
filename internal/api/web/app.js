@@ -129,6 +129,58 @@ function openTagPage(name) {
 // openNotePage opens the scratchpad for a note id.
 const openNotePage = (id) => openPage("note", id);
 
+/* ------------------------------------------------------- deep links (URL) */
+
+// The active page is mirrored into the URL as query parameters, so any view
+// is addressable (paste it, link it from Obsidian, bookmark it):
+//   /?doc=42                 [Summary]
+//   /?doc=42&view=preview&page=7
+//   /?doc=42&view=text|ask
+//   /?tag=attention          /?collection=3   /?note=5
+//   /?view=tags|notes|collections
+//   /?q=...&semantic=1       (the library page showing search results)
+let lastSearch = null; // {q, semantic} while All Documents shows search hits
+
+function pageQuery(page) {
+  const q = new URLSearchParams();
+  if (!page) return "";
+  switch (page.kind) {
+    case "library":
+      if (lastSearch) {
+        q.set("q", lastSearch.q);
+        if (lastSearch.semantic) q.set("semantic", "1");
+      }
+      break;
+    case "collections": q.set("view", "collections"); break;
+    case "tags":        q.set("view", "tags"); break;
+    case "notes":       q.set("view", "notes"); break;
+    case "collection":  q.set("collection", page.docId); break;
+    case "tag":         q.set("tag", page.tag); break;
+    case "note":        q.set("note", page.docId); break;
+    case "summary":     q.set("doc", page.docId); break;
+    case "preview":
+      q.set("doc", page.docId); q.set("view", "preview");
+      if (page.pageNo) q.set("page", page.pageNo);
+      break;
+    case "text": q.set("doc", page.docId); q.set("view", "text"); break;
+    case "ask":  q.set("doc", page.docId); q.set("view", "ask"); break;
+  }
+  return q.toString();
+}
+
+// syncURL mirrors a page into the address bar (replaceState: no history
+// spam). location.pathname keeps any mount prefix.
+function syncURL(page) {
+  const q = pageQuery(page);
+  history.replaceState(null, "", location.pathname + (q ? "?" + q : ""));
+}
+
+// linkFor returns an absolute link to a page (for the copy-link button).
+function linkFor(page) {
+  const q = pageQuery(page);
+  return location.origin + location.pathname + (q ? "?" + q : "");
+}
+
 // buildPageChrome creates the page's frame (title bar + content area +
 // resize handle). The frame lives as long as the page is open — content
 // updates replace only page.content, so in-flight states (ask streaming,
@@ -144,6 +196,11 @@ function buildPageChrome(page) {
   controls.append(mkBtn("▶", "move page right", () => movePage(page, 1)));
   controls.append(mkBtn("⤢", "expand to fill the frame / restore width",
     () => toggleExpand(page)));
+  controls.append(mkBtn("🔗", "copy a link to this page", () => {
+    const url = linkFor(page);
+    if (navigator.clipboard) navigator.clipboard.writeText(url).catch(() => {});
+    notice("Link copied: " + url, NOTICE_MID);
+  }));
   controls.append(mkBtn("✕", "close page", () => closePage(page)));
   const head = el("div", { class: "page-head" }, title, controls);
   const content = el("div", { class: "page-body" });
@@ -185,6 +242,7 @@ function updatePageTitle(page) {
 function markActive(page) {
   activePage = page;
   for (const p of pages) p.el.classList.toggle("active", p === page);
+  syncURL(page);
 }
 
 function movePage(page, dir) {
@@ -238,6 +296,7 @@ function closePage(page) {
   syncPageOrder();
   if (activePage === page)
     activePage = pages[Math.min(i, pages.length - 1)] || null;
+  syncURL(activePage);
 }
 
 // DOC_PAGE_KINDS are the per-document views (their page.docId is a
@@ -343,8 +402,12 @@ const hasFilters = () => {
 async function loadDocs() {
   const p = filterParams();
   allDocs = await api("/api/documents" + (p.toString() ? "?" + p : ""));
+  lastSearch = null; // browsing, not searching
   const page = libraryPage();
-  if (page) renderList(allDocs);
+  if (page) {
+    renderList(allDocs);
+    if (activePage === page) syncURL(page); // drop a stale ?q= from the URL
+  }
 }
 
 async function loadCategories() {
@@ -1566,6 +1629,13 @@ async function doSearch() {
     const hits = await api(`/api/search?q=${encodeURIComponent(q)}&mode=${mode}&limit=25`
       + (fp.toString() ? "&" + fp : ""));
     renderHits(hits, mode, q);
+    // the library page shows the results and carries them in the URL
+    lastSearch = { q, semantic: mode === "semantic" };
+    const lib = libraryPage();
+    if (lib) {
+      markActive(lib); // syncs the URL (?q=…&semantic=1)
+      lib.el.scrollIntoView({ block: "nearest", inline: "nearest" });
+    }
   } catch (e) { notice("search: " + e.message); }
 }
 
@@ -1887,9 +1957,42 @@ async function loadVocabNames() {
 
 /* ------------------------------------------------------------------- boot */
 
+// openFromURL restores the view named by the query string (a deep link).
+// Returns "search" if a search should run, "page" if a page was opened,
+// or "" when the URL names nothing (open All Documents).
+function openFromURL() {
+  const p = new URLSearchParams(location.search);
+  if (p.get("q")) {
+    $("#q").value = p.get("q");
+    if (p.get("semantic") === "1") $("#semantic").checked = true;
+    return "search";
+  }
+  if (p.get("doc")) {
+    const id = Number(p.get("doc"));
+    if (id > 0) {
+      const view = p.get("view");
+      const pageNo = Number(p.get("page")) || 0;
+      if (view === "preview" || pageNo) openPage("preview", id, { page: pageNo });
+      else if (view === "text") openPage("text", id);
+      else if (view === "ask") openPage("ask", id);
+      else openPage("summary", id);
+      return "page";
+    }
+  }
+  if (p.get("tag")) { openTagPage(p.get("tag")); return "page"; }
+  if (p.get("collection")) { const id = Number(p.get("collection")); if (id > 0) { openPage("collection", id); return "page"; } }
+  if (p.get("note")) { const id = Number(p.get("note")); if (id > 0) { openPage("note", id); return "page"; } }
+  const view = p.get("view");
+  if (view === "tags") { openPage("tags"); return "page"; }
+  if (view === "notes") { openPage("notes"); return "page"; }
+  if (view === "collections") { openPage("collections"); return "page"; }
+  return "";
+}
+
 (async () => {
   try {
-    openPage("library");
+    const target = openFromURL();
+    if (!target) openPage("library");
     // the ask page renders synchronously — the provider config is loaded
     // once here (never awaited inside a page render: [object Promise])
     try { askConfig = await api("/api/ask/config"); }
@@ -1898,9 +2001,10 @@ async function loadVocabNames() {
     try { const cc = await api("/api/config"); applyTheme(cc.theme); } catch (e) { /* default */ }
     const st = await refresh();
     if (!st.llm_up) notice("Model server is not running — search still works, but summarize/tag/semantic need the llama-servers (start via vellum.sh).");
-    await loadDocs();
     await loadCategories();
     await loadVocabNames();
+    if (target === "search") await doSearch();
+    else await loadDocs();
   } catch (e) {
     notice("API error: " + e.message);
   }

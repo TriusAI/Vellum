@@ -218,7 +218,13 @@ Fast paths by kind (`internal/classify` + `produceSummary` in ingest):
 - covers: `GET /api/documents/{id}/cover` (page 1 PNG, lazily cached in
   `<basedir>/covers/`; dropped on re-ingest of a changed file).
 - ingest picker: `GET /api/fs?path=` (loopback-only, read-only listing) +
-  a filesystem-browser dialog in the UI.
+  a filesystem-browser dialog in the UI. Directory ingest is RECURSIVE
+  (filepath.WalkDir) and skips hidden entries — pointing it at an Obsidian
+  vault indexes the notes and ignores .obsidian/ etc.
+- deep links: the UI mirrors the active page into the URL
+  (`?doc=`, `&view=preview&page=`, `?tag=`, `?collection=`, `?note=`,
+  `?view=tags|notes|collections`, `?q=&semantic=1`); `pageQuery`/`syncURL`/
+  `openFromURL` in app.js, a 🔗 copy-link button per page.
 - backends: bundled llama.cpp | your own llama.cpp
   (`llm.external: true`) | Ollama (`llm.backend: ollama`; tags remain
   grammar-bound through Ollama's `"format"`). `vellum backends` prints
@@ -389,19 +395,18 @@ Docker: `pack/Dockerfile` + `docker-entrypoint.sh`; Hub is proxy-blocked
 
 ## 10. Where things state-wise
 
-- HEAD: v0.20.0 (`95eaf5c`), all tests green. Since 0.20: TAGS page
-  (cloud sized by usage → [Tag] pages), NOTES (scratchpad: new `notes`
-  table, /api/notes CRUD, `vellum note list|add|show|delete`, a Notes
-  management page → [Note] pages that are a single autosaved textarea),
-  and THEMES (config `theme: {preset, colors}` carried by /api/config,
-  applied as CSS variables; Settings → Theme with preset + per-color
-  overrides). All new tables land via idempotent CREATE.
-- v0.19: semantic search applies each embed model's asymmetric retrieval
-  prefixes (embedPrefixes; model via /v1/models, basename-normalized;
-  part of the embed_model identity → re-embeds lazily).
+- HEAD: v0.21.0 (see git log), all tests green. Since 0.21: the UI is
+  URL-ADDRESSABLE (?doc=42&view=preview&page=7, ?tag=, ?collection=,
+  ?note=, ?view=tags|notes|collections, ?q=&semantic=1; mirrored on
+  navigation; 🔗 copies a link) and directory ingest is recursive +
+  skips hidden entries (vault-friendly).
+- v0.20: TAGS page (cloud → [Tag] pages), NOTES (scratchpad table, CRUD,
+  CLI, management + [Note] pages), THEMES (config theme → CSS variables).
+- v0.19: embed models' asymmetric retrieval prefixes (embedPrefixes;
+  basename-normalized identity → lazy re-embed).
 - v0.18: notice durations; learnable kind detection; category edits
   refresh collection pages; collection .zip export/import; closable root
-  pages + All Documents opener; .item-list styling with hover affordance.
+  pages; .item-list styling with hover affordance.
 - v0.17: COLLECTIONS; CSS-order page moves; bottom status bar.
 - v0.16: auto-filing learns from user corrections; flash-free updates.
 - Pack stage `pack/stage/vellum-95eaf5c-linux-amd64/` (user's live
