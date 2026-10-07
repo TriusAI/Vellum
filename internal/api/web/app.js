@@ -118,7 +118,7 @@ function buildPageChrome(page) {
   controls.append(mkBtn("✕", "close page", () => closePage(page)));
   const head = el("div", { class: "page-head" }, title, controls);
   const content = el("div", { class: "page-body" });
-  if (page.kind === "library") content.id = "list";
+  if (page.kind === "library") { content.id = "list"; content.classList.add("item-list"); }
   if (page.kind === "collections") content.id = "collections-list";
   if (page.kind === "preview") content.style.padding = "0"; // full-bleed viewer
   const resize = el("div", { class: "page-resize", title: "drag to resize" });
@@ -511,9 +511,11 @@ function collectionsContent(page) {
         }, "✕")));
     ul.append(row);
   }
-  wrap.append(el("details", { class: "group", open: true },
+  const listBox = el("div", { class: "item-list" });
+  listBox.append(el("details", { class: "group", open: true },
     el("summary", {}, "all collections", el("span", { class: "count" }, String(cols.length))),
     ul));
+  wrap.append(listBox);
   return wrap;
 }
 
@@ -536,7 +538,7 @@ function collectionContent(page) {
       "Empty — use \u201cAdd documents\u2026\u201d to pick from the library."));
     return wrap;
   }
-  const tree = el("div");
+  const tree = el("div", { class: "item-list" });
   renderTree(tree, docs, { onRemove: (d) => removeFromCollection(page, d) });
   wrap.append(tree);
   return wrap;
