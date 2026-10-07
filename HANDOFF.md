@@ -395,7 +395,7 @@ Docker: `pack/Dockerfile` + `docker-entrypoint.sh`; Hub is proxy-blocked
 
 ## 10. Where things state-wise
 
-- HEAD: v0.21.1 (see git log), all tests green. Since 0.21.1: fixed the
+- HEAD: v0.21.1 (`4b75735`), all tests green. Since 0.21.1: fixed the
   broken Ask page — /api/config's ask section lacked JSON tags
   (capitalized keys), so Settings showed blank and a Settings save wiped
   the ask config; PUT /api/ask/config returned a partial {ok,enabled}
@@ -413,14 +413,14 @@ Docker: `pack/Dockerfile` + `docker-entrypoint.sh`; Hub is proxy-blocked
   pages; .item-list styling with hover affordance.
 - v0.17: COLLECTIONS; CSS-order page moves; bottom status bar.
 - v0.16: auto-filing learns from user corrections; flash-free updates.
-- Pack stage `pack/stage/vellum-2fdcbfa-linux-amd64/` (user's live
-  library inside) updated to the 0.21.0 binary; distributable tarball
-  `pack/vellum-2fdcbfa-linux-x86_64.tar.gz` (clean of the DB — verified
+- Pack stage `pack/stage/vellum-4b75735-linux-amd64/` (user's live
+  library inside) updated to the 0.21.1 binary; distributable tarball
+  `pack/vellum-4b75735-linux-x86_64.tar.gz` (clean of the DB — verified
   with tar -tzf | grep -c library.db = 0). NOTE: the user runs their OWN
-  serve(s): an old one (PID 701, port 8097) and a current one they keep
-  restarting from the stage (PID 15944, port 8090, 0.20.0, its exe now
-  "(deleted)" after the version-dir rename). Do NOT kill them; the
-  0.21.0 UI takes effect on their next ./vellum.sh serve.
+  serve(s) and keeps RESTARTING them — an old one (PID 701, port 8097)
+  plus a current one from the stage (PID 25339, port 8090, 0.21.0, its
+  exe now "(deleted)" after the version-dir rename). Do NOT kill them;
+  each restart picks up the current stage binary.
 - The user runs `./vellum.sh serve` (their own llama-servers on 8081/8082
   are LONG-RUNNING — do not kill them; kill only ephemeral test ones).
 - `AGENTS.md` (repo root) carries the agent-focused subset of this
