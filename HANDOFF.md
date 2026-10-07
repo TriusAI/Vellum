@@ -395,7 +395,7 @@ Docker: `pack/Dockerfile` + `docker-entrypoint.sh`; Hub is proxy-blocked
 
 ## 10. Where things state-wise
 
-- HEAD: v0.21.2 (see git log), all tests green. Since 0.21.2: the Ask
+- HEAD: v0.21.2 (`f9666fa`), all tests green. Since 0.21.2: the Ask
   page now SHOWS the provider's real error (the server returns 502 with
   "ask provider: …" and the client reads the JSON error body — before it
   printed only "Bad Request"); base URLs pasted with a version prefix
@@ -415,12 +415,12 @@ Docker: `pack/Dockerfile` + `docker-entrypoint.sh`; Hub is proxy-blocked
   pages; .item-list styling with hover affordance.
 - v0.17: COLLECTIONS; CSS-order page moves; bottom status bar.
 - v0.16: auto-filing learns from user corrections; flash-free updates.
-- Pack stage `pack/stage/vellum-4b75735-linux-amd64/` (user's live
-  library inside) updated to the 0.21.1 binary; distributable tarball
-  `pack/vellum-4b75735-linux-x86_64.tar.gz` (clean of the DB — verified
+- Pack stage `pack/stage/vellum-f9666fa-linux-amd64/` (user's live
+  library inside) updated to the 0.21.2 binary; distributable tarball
+  `pack/vellum-f9666fa-linux-x86_64.tar.gz` (clean of the DB — verified
   with tar -tzf | grep -c library.db = 0). NOTE: the user runs their OWN
   serve(s) and keeps RESTARTING them — an old one (PID 701, port 8097)
-  plus a current one from the stage (PID 25339, port 8090, 0.21.0, its
+  plus a current one from the stage (PID 32619, port 8090, 0.21.1, its
   exe now "(deleted)" after the version-dir rename). Do NOT kill them;
   each restart picks up the current stage binary.
 - The user runs `./vellum.sh serve` (their own llama-servers on 8081/8082
