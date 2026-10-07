@@ -29,14 +29,18 @@ const esc = (s) =>
   String(s ?? "").replace(/[&<>"']/g, (c) =>
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
-function notice(msg) { setNotice(msg ? [document.createTextNode(msg)] : []); }
+// notice shows a transient message. The dismiss period is per-message:
+// quick confirmations (a new collection) shouldn't sit over the page
+// title bars, while job outcomes deserve to be readable. Progress
+// polling rewrites the notice each tick, so a running job stays visible.
+const NOTICE_JOB = 6000;     // job outcomes: readable
+const NOTICE_QUICK = 1200;  // confirmations that would just get in the way
+const NOTICE_MID = 2000;    // membership edits etc.
 
-// The notice bar overlays the pages (it has no space of its own): it
-// carries a manual close button on the right and auto-dismisses a few
-// seconds after the last update — progress polling rewrites it every
-// tick, so a running job stays visible until it goes quiet.
+function notice(msg, ms = 3000) { setNotice(msg ? [document.createTextNode(msg)] : [], ms); }
+
 let noticeTimer = null;
-function setNotice(children) {
+function setNotice(children, ms = 3000) {
   const box = $("#notice");
   clearTimeout(noticeTimer);
   box.replaceChildren(...children);
@@ -45,7 +49,7 @@ function setNotice(children) {
     class: "notice-close", title: "dismiss",
     onclick: () => setNotice([]),
   }, "✕"));
-  noticeTimer = setTimeout(() => setNotice([]), 7000);
+  noticeTimer = setTimeout(() => setNotice([]), ms);
 }
 
 const isPdf = (path) => /\.pdf$/i.test(path);
@@ -111,8 +115,7 @@ function buildPageChrome(page) {
   controls.append(mkBtn("▶", "move page right", () => movePage(page, 1)));
   controls.append(mkBtn("⤢", "expand to fill the frame / restore width",
     () => toggleExpand(page)));
-  if (!isSingleton(page.kind))
-    controls.append(mkBtn("✕", "close page", () => closePage(page)));
+  controls.append(mkBtn("✕", "close page", () => closePage(page)));
   const head = el("div", { class: "page-head" }, title, controls);
   const content = el("div", { class: "page-body" });
   if (page.kind === "library") content.id = "list";
@@ -476,7 +479,7 @@ function collectionsContent(page) {
         body: JSON.stringify({ name, description: descIn.value.trim() }),
       });
       nameIn.value = ""; descIn.value = "";
-      notice(`Created collection "${c.name}".`);
+      notice(`Created collection "${c.name}".`, NOTICE_QUICK);
       refreshCollectionPages();
       openPage("collection", c.id);
     } catch (e) { notice("collection: " + e.message); }
@@ -484,7 +487,8 @@ function collectionsContent(page) {
   nameIn.addEventListener("keydown", (e) => { if (e.key === "Enter") create(); });
   descIn.addEventListener("keydown", (e) => { if (e.key === "Enter") create(); });
   wrap.append(el("div", { class: "row collection-new" },
-    nameIn, descIn, el("button", { onclick: create }, "New collection")));
+    nameIn, descIn, el("button", { onclick: create }, "New collection"),
+    el("button", { class: "plain", onclick: importCollectionZip }, "Import .zip…")));
 
   if (!cols.length) {
     wrap.append(el("p", { class: "hint" },
@@ -521,6 +525,9 @@ function collectionContent(page) {
   if (c.description) wrap.append(el("p", { class: "hint" }, esc(c.description)));
   wrap.append(el("div", { class: "row" },
     el("button", { class: "small", onclick: () => openAddDocsPicker(page) }, "Add documents…"),
+    el("button", { class: "small plain", onclick: () => {
+      window.location.href = `/api/collections/${page.docId}/export`;
+    } }, "Export .zip"),
     el("button", { class: "small plain", onclick: () => renameCollection(c) }, "Rename…"),
     el("button", { class: "small plain", onclick: () => deleteCollection(c) }, "Delete collection…"),
     el("span", { class: "hint" }, `${docs.length} document(s)`)));
@@ -538,7 +545,7 @@ function collectionContent(page) {
 async function removeFromCollection(page, d) {
   try {
     await api(`/api/collections/${page.docId}/documents/${d.id}`, { method: "DELETE" });
-    notice(`Removed "${d.title || d.path.split("/").pop()}" from this collection.`);
+    notice(`Removed "${d.title || d.path.split("/").pop()}" from this collection.`, NOTICE_MID);
     refreshCollectionPages();
   } catch (e) { notice("collection: " + e.message); }
 }
@@ -553,7 +560,7 @@ function renameCollection(c) {
     method: "PATCH", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ name: trimmed, description: desc }),
   }).then(() => {
-    notice(`Renamed collection to "${trimmed}".`);
+    notice(`Renamed collection to "${trimmed}".`, NOTICE_MID);
     refreshCollectionPages();
   }).catch((e) => notice("collection: " + e.message));
 }
@@ -562,11 +569,34 @@ function deleteCollection(c) {
   if (!confirm(`Delete the collection "${c.name}"?\n` +
       "The documents themselves are untouched — only the grouping is removed.")) return;
   api(`/api/collections/${c.id}`, { method: "DELETE" }).then(() => {
-    notice(`Deleted collection "${c.name}".`);
+    notice(`Deleted collection "${c.name}".`, NOTICE_MID);
     for (const p of [...pages])
       if (p.kind === "collection" && p.docId === c.id) closePage(p);
     refreshCollectionPages();
   }).catch((e) => notice("collection: " + e.message));
+}
+
+// importCollectionZip prompts for a collection bundle (.zip from
+// "Export .zip"), uploads it, and opens the recreated collection.
+function importCollectionZip() {
+  const inp = el("input", { type: "file", accept: ".zip", style: "display:none" });
+  inp.addEventListener("change", async () => {
+    const f = inp.files[0];
+    inp.remove();
+    if (!f) return;
+    notice("Importing collection…", NOTICE_JOB);
+    try {
+      const res = await api("/api/collections/import", { method: "POST", body: f });
+      notice(`Imported collection "${res.collection.name}" ` +
+        `(${res.documents} document(s)).`, NOTICE_JOB);
+      await loadDocs();
+      await loadCategories();
+      refreshCollectionPages();
+      openPage("collection", res.collection.id);
+    } catch (e) { notice("import: " + e.message, NOTICE_JOB); }
+  });
+  document.body.append(inp);
+  inp.click();
 }
 
 // openAddDocsPicker shows a modal of every library document with a
@@ -600,7 +630,7 @@ async function openAddDocsPicker(page) {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ doc_ids: ids }),
       });
-      notice(`Added ${res.added} document(s) to the collection.`);
+      notice(`Added ${res.added} document(s) to the collection.`, NOTICE_MID);
       dlg.close();
       refreshCollectionPages();
     } catch (e) { notice("collection: " + e.message); }
@@ -645,6 +675,7 @@ async function renameCategory() {
     notice(`Renamed "${renameFrom}" → "${res.to}" (${res.updated} document(s) moved).`);
     await loadCategories();
     await loadDocs();
+    refreshCollectionPages(); // grouping in collection pages follows the shelf rename
   } catch (e) { $("#rename-msg").textContent = e.message; }
 }
 
@@ -718,11 +749,12 @@ async function processIds(ids) {
       if (r.category) msg += ` — filed under: ${r.category}`;
     for (const r of done) if (r.tags_other?.length) msg += ` — suggested new tags: ${r.tags_other.join(", ")}`;
     if (failed.length) msg += `; ${failed.length} failed (status chip shows why)`;
-    notice(msg);
+    notice(msg, NOTICE_JOB);
     stopProgressPolling();
     await loadDocs();
     await refresh();
     refreshAllDocPages();
+    refreshCollectionPages(); // reprocessing may have re-filed documents
   } catch (e) { notice("process: " + e.message); }
   stopProgressPolling();
 }
@@ -949,7 +981,7 @@ async function reextractPage(id, pageNo) {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ force: true, pages: [pageNo] }),
     });
-    notice(`Page ${pageNo} OCR'd → text replaced; document pending re-processing.`);
+    notice(`Page ${pageNo} OCR'd → text replaced; document pending re-processing.`, NOTICE_JOB);
     await loadDocs();
     await loadCategories();
     refreshDocPages(id);
@@ -967,7 +999,7 @@ async function reextract(page, force, pageNos) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(pageNos ? { force: true, pages: pageNos } : { force }),
     });
-    notice(`${prefix} done — text replaced; the document is pending re-processing.`);
+    notice(`${prefix} done — text replaced; the document is pending re-processing.`, NOTICE_JOB);
     await loadDocs();
     await loadCategories();
     refreshDocPages(page.docId);
@@ -1045,6 +1077,7 @@ function summaryContent(page) {
       await loadDocs();
       await loadCategories();
       refreshDocPages(id);
+      refreshCollectionPages(); // a category change regroups open collection pages
     },
   }, label);
   regenRow.append(regen(["meta"], "metadata"));
@@ -1074,6 +1107,7 @@ function summaryContent(page) {
       await loadDocs();
       await loadCategories();
       refreshDocPages(id);
+      refreshCollectionPages(); // a category change regroups open collection pages
     },
   }, "Save metadata"));
   saveRow.append(el("button", { class: "plain", onclick: () => processIds([id]) },
@@ -1089,6 +1123,7 @@ function summaryContent(page) {
       await loadDocs();
       await loadCategories();
       await refresh();
+      refreshCollectionPages(); // membership cascades with the document
     } catch (e) { notice("remove: " + e.message); }
   } }, "Remove from library…"));
   body.append(saveRow);
@@ -1155,7 +1190,7 @@ function collectionsOfDocSection(page) {
       onclick: async () => {
         try {
           await api(`/api/collections/${c.id}/documents/${id}`, { method: "DELETE" });
-          notice(`Removed from "${c.name}".`);
+          notice(`Removed from "${c.name}".`, NOTICE_MID);
           refreshDetailCollections(page);
           refreshCollectionPages();
         } catch (e) { notice("collection: " + e.message); }
@@ -1167,9 +1202,7 @@ function collectionsOfDocSection(page) {
   wrap.append(chips);
 
   const sel = el("select", {},
-    el("option", { value: "" }, "add to collection…"),
-    ...cols.length ? [] : [],
-  );
+    el("option", { value: "" }, "add to collection…"));
   // choices: all collections the doc is NOT in, plus "New collection…"
   api("/api/collections").then((all) => {
     const inSet = new Set(cols.map((c) => c.id));
@@ -1195,7 +1228,7 @@ function collectionsOfDocSection(page) {
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ doc_ids: [id] }),
         });
-        notice(`Added to new collection "${c.name}".`);
+        notice(`Added to new collection "${c.name}".`, NOTICE_MID);
         refreshDetailCollections(page);
         refreshCollectionPages();
       } catch (e) { notice("collection: " + e.message); }
@@ -1206,7 +1239,7 @@ function collectionsOfDocSection(page) {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ doc_ids: [id] }),
       });
-      notice("Added to collection.");
+      notice("Added to collection.", NOTICE_MID);
       refreshDetailCollections(page);
       refreshCollectionPages();
     } catch (e) { notice("collection: " + e.message); }
@@ -1320,6 +1353,9 @@ async function doSearch() {
   if (!q) { loadDocs(); return; }
   notice("");
   try {
+    // search results render into the All Documents page's list — make
+    // sure it is open (it can be closed via its ✕)
+    if (!libraryPage()) openPage("library");
     if (!allDocs.length) await loadDocs(); // for chips (category/tags) of hits
     const fp = filterParams();
     const hits = await api(`/api/search?q=${encodeURIComponent(q)}&mode=${mode}&limit=25`
@@ -1552,6 +1588,7 @@ $("#lib-import").onclick = async () => {
     await refresh();
     await loadDocs();
     await loadCategories();
+    refreshCollectionPages();
   } catch (e) { msg.textContent = "import failed: " + e.message; }
 };
 
@@ -1560,6 +1597,7 @@ $("#lib-import").onclick = async () => {
 $("#btn-process").onclick = () => processIds([]);
 
 $("#btn-collections").onclick = () => openPage("collections");
+$("#btn-all-docs").onclick = () => openPage("library");
 
 /* ------------------------------------------------------------------ vocab */
 

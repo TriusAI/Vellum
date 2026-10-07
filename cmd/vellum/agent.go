@@ -41,6 +41,11 @@ Everything is local; no network calls except the local model servers.
     vellum collection list|create|delete|add|remove|show
                                   # user-managed groups of documents
                                   # (research projects; a doc can be in many)
+    vellum collection export NAME|ID [PATH.zip]
+                                  # bundle a collection (files + metadata)
+                                  # into a shareable .zip
+    vellum collection import PATH.zip [--name NAME]
+                                  # restore a bundle into this library
     vellum vocab list|review|promote|add|remove
     vellum serve [--listen ADDR] # local web UI + JSON API (see below)
 
@@ -248,6 +253,21 @@ document or a collection cleans up membership rows (cascade).
 GET /api/documents/{id} also returns "collections" (the doc's memberships).
 The UI has a "Collections…" page (create/browse/manage) and per-document
 [Collection] pages; the Summary page has an add/remove control.
+
+## Sharing a collection (.zip bundle)
+A collection can be exported as a self-contained .zip and handed to
+someone else: it holds the member documents' original files under files/
+and a manifest.json (collection name/description + each document's
+metadata and tags). Importing extracts the files under
+<library_dir>/collections/<name>/, ingests them (text layers only, no
+OCR), recreates the collection (the name is made unique if taken; --name
+or ?name= overrides) and restores the metadata — the originator's
+kind/category become user pins (they were human-set). Loopback-only.
+    vellum collection export applied-ml applied-ml.zip   # share this
+    vellum collection import applied-ml.zip [--name other]
+    GET  /api/collections/{id}/export    # the zip (Content-Disposition)
+    POST /api/collections/import         # body = the zip
+UI: "Export .zip" on a collection page; "Import .zip…" on Collections….
 
 ## Vocabulary curation (IMPORTANT)
 Tags are constrained to vocab.yaml. The tagging prompt also invites the

@@ -25,6 +25,7 @@ import (
 
 	"vellum/internal/ask"
 	"vellum/internal/classify"
+	"vellum/internal/collection"
 	"vellum/internal/config"
 	"vellum/internal/db"
 	"vellum/internal/extract"
@@ -212,6 +213,8 @@ func (s *Server) Mux() http.Handler {
 	mux.HandleFunc("DELETE /api/collections/{id}", s.deleteCollection)
 	mux.HandleFunc("POST /api/collections/{id}/documents", s.addCollectionDocs)
 	mux.HandleFunc("DELETE /api/collections/{id}/documents/{docID}", s.removeCollectionDoc)
+	mux.HandleFunc("GET /api/collections/{id}/export", s.exportCollection)
+	mux.HandleFunc("POST /api/collections/import", s.importCollection)
 	mux.HandleFunc("GET /api/documents/{id}", s.document)
 	mux.HandleFunc("DELETE /api/documents/{id}", s.deleteDocument)
 	mux.HandleFunc("GET /api/documents/{id}/file", s.file)
@@ -748,6 +751,58 @@ func (s *Server) removeCollectionDoc(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, map[string]any{"removed": docID})
+}
+
+// exportCollection streams a collection as a shareable .zip (manifest +
+// the documents' original files). See internal/collection.
+func (s *Server) exportCollection(w http.ResponseWriter, r *http.Request) {
+	id, err := pathID(r)
+	if err != nil {
+		writeErr(w, 400, "bad collection id")
+		return
+	}
+	var name string
+	err = s.conn.QueryRow("SELECT name FROM collections WHERE id=?", id).Scan(&name)
+	if err == sql.ErrNoRows {
+		writeErr(w, 404, "no such collection")
+		return
+	}
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	// headers must be set before the stream starts (they can't change after)
+	w.Header().Set("Content-Type", "application/zip")
+	w.Header().Set("Content-Disposition",
+		fmt.Sprintf("attachment; filename=%q", "collection-"+collection.Slug(name)+".zip"))
+	if _, err := collection.Export(s.conn, id, w); err != nil {
+		return // headers are out; the abbreviated zip is the only signal
+	}
+}
+
+// importCollection accepts a bundle from exportCollection (raw .zip body),
+// extracts + ingests it, and recreates the collection. Loopback-only.
+func (s *Server) importCollection(w http.ResponseWriter, r *http.Request) {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err == nil {
+		host = strings.Trim(host, "[]")
+	}
+	if err != nil || (host != "127.0.0.1" && host != "::1") {
+		writeErr(w, 403, "collection import is loopback-only")
+		return
+	}
+	if r.ContentLength <= 0 {
+		writeErr(w, 400, "empty upload — POST the collection .zip as the request body")
+		return
+	}
+	res, err := collection.Import(r.Context(), s.cfg, s.conn, r.Body,
+		strings.TrimSpace(r.URL.Query().Get("name")))
+	if err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]any{
+		"collection": res.Collection, "documents": res.Documents, "dir": res.Dir})
 }
 
 func (s *Server) document(w http.ResponseWriter, r *http.Request) {

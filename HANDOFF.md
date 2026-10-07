@@ -173,6 +173,17 @@ Fast paths by kind (`internal/classify` + `produceSummary` in ingest):
   `[Collection] <name>` page per collection (add/remove docs), and an
   add/remove control on the Summary page. See internal/db (ListCollections
   et al.) and the collections block in internal/api.
+- collection sharing: `vellum collection export NAME|ID [PATH.zip]` /
+  `GET /api/collections/{id}/export` bundle a collection (member files +
+  manifest.json with metadata/tags) into a zip; `vellum collection import
+  PATH.zip` / `POST /api/collections/import` (loopback-only) extract under
+  `<library_dir>/collections/<name>/`, ingest, recreate the collection
+  (unique name; --name/?name= override) and restore metadata (originator
+  kind/category become user pins). Core: internal/collection.
+- kind detection is LEARNABLE: `classify.DetectWithExamples` folds the
+  user's `kind_user` pins in as votes (keyword overlap, saturating) —
+  one strong example makes an unconfident call confident, overriding a
+  confident heuristic takes two+ agreeing pins (ingest.userKindExamples).
 - re-extract/repair: `vellum reextract ID [--force-ocr] [--pages 3,7-12]`
 - skip: `vellum skip ID [PAGES|-]`
 - jobs: every slow op is a Job; FIFO queue; per-job cancel (queued =
@@ -359,25 +370,25 @@ Docker: `pack/Dockerfile` + `docker-entrypoint.sh`; Hub is proxy-blocked
 
 ## 10. Where things state-wise
 
-- HEAD: v0.17.0 (`c5edb8e`), all tests green. Since 0.16: COLLECTIONS
-  (user-managed research groups: collections + collection_docs tables,
-  CRUD API/CLI, a Collections root page + [Collection] pages, add/remove
-  on the Summary page); page moves use CSS order (previews don't reload);
+- HEAD: v0.18.0 (see git log), all tests green. Since 0.17: per-message
+  notice durations (quick confirmations self-dismiss fast, job outcomes
+  linger); kind detection learns from user pins (classify.DetectWithExamples
+  + ingest.userKindExamples); category edits refresh open collection
+  pages; collection sharing (.zip export/import via internal/collection);
+  All Documents + Collections pages are closable and All Documents has a
+  top-bar opener.
+- v0.17.0: COLLECTIONS (collections + collection_docs tables, CRUD
+  API/CLI, a Collections root page + [Collection] pages, add/remove on
+  the Summary page); page moves use CSS order (previews don't reload);
   status bar for the job queue.
-- Earlier in 0.16: auto-filing LEARNS from user corrections
-  (user-shelved docs matched by keyword overlap, top-3 fed as few-shot
-  examples to the tagging call — see ShelvingExample/bestExamples in
-  internal/summarize); category chips suppressed inside the tree;
-  flash-free updates (refreshPage skips unchanged data + preserves
-  scroll; renderList preserves scroll and collapsed groups).
-- Pack stage `pack/stage/vellum-c5edb8e-linux-amd64/` (user's live
-  library inside) updated to the 0.17.0 binary; distributable tarball
-  `pack/vellum-c5edb8e-linux-x86_64.tar.gz` (clean of the DB — verified
-  with tar -tzf | grep -c library.db = 0). The collections tables are
-  created on first Open of an existing library (verified against a
-  hand-built old-schema DB: data intact, tables appear). The user's
-  long-running serve (PID from an OLDER deleted stage, port 8097) still
-  runs its old binary/DB — the new one takes effect on the next
+- v0.16: auto-filing LEARNS from user corrections (user-shelved docs
+  matched by keyword overlap, top-3 fed as few-shot examples — see
+  ShelvingExample/bestExamples in internal/summarize); category chips
+  suppressed inside the tree; flash-free updates.
+- Pack stage `pack/stage/vellum-c5edb8e-linux-amd64/` was the 0.17.0
+  build; the stage/tarball are rebuilt for each release per §7. The
+  user's long-running serve (PID from an OLDER deleted stage, port 8097)
+  runs an old binary/DB — the new one takes effect on the next
   ./vellum.sh serve. NOTE: that serve's library.db exists only via its
   open fds (its stage dir was deleted); if it was used for real work,
   recover it from /proc/701/fd BEFORE stopping it.

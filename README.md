@@ -97,6 +97,9 @@ vellum remove 42 43
 vellum collection create applied-ml "ML x medicine"
 vellum collection add applied-ml 3 7 12
 vellum collection show applied-ml          # browse just this project's papers
+# share a project: export it as a self-contained .zip (files + metadata)
+vellum collection export applied-ml applied-ml.zip
+vellum collection import applied-ml.zip    # restore it elsewhere
 
 # 4. curate the vocabulary
 vellum vocab list

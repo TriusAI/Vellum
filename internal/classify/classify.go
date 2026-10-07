@@ -50,6 +50,15 @@ var (
 	reAppendix   = regexp.MustCompile(`(?im)^[\s]*appendix\b`)
 )
 
+// Example is a document the user explicitly classified (kind_user): a
+// teaching signal. Its Kind votes for structurally/topically similar
+// documents, so corrections propagate.
+type Example struct {
+	Kind  string
+	Title string
+	Text  string // a short sample (title page / opening text)
+}
+
 // Detect scores the kind from the EXTRACTED TEXT (the full text layer;
 // large documents are capped internally — the leading ~40k chars carry
 // title/front-matter signal, the trailing ~20k carry colophon and
@@ -57,6 +66,53 @@ var (
 // nPages = total page count). Page count is a first-class signal:
 // papers are small, monographs are not.
 func Detect(text string, ocrPages, nPages int) (kind string, scores []Scored) {
+	return DetectWithExamples(text, ocrPages, nPages, nil)
+}
+
+// DetectWithExamples is Detect plus the user's explicit kind pins as
+// few-shot votes: each strongly-similar example adds weight to its kind,
+// so a corrected document teaches the classifier about alike documents
+// (deterministic, no model call). A lone example nudges an unconfident
+// call; overriding a confident heuristic takes agreement from several.
+func DetectWithExamples(text string, ocrPages, nPages int, examples []Example) (kind string, scores []Scored) {
+	scores = scoreKinds(text, ocrPages, nPages)
+	if len(examples) > 0 {
+		docSample := head(text, 6000)
+		add := map[string]float64{}
+		for _, ex := range examples {
+			w := matchWeight(docSample, ex.Title+" "+ex.Text)
+			if w > 0 {
+				add[ex.Kind] += w
+			}
+		}
+		for i := range scores {
+			if v := add[scores[i].Kind]; v > 0 {
+				scores[i].Score += v
+			}
+		}
+	}
+	best := ""
+	bestScore := 0.0
+	for _, s := range scores {
+		if s.Score > bestScore {
+			best, bestScore = s.Kind, s.Score
+		}
+	}
+	if bestScore < 3.5 {
+		return "", scores // not confident: generic processing
+	}
+	return best, scores
+}
+
+// head returns the first n bytes of s (UTF-8 safe enough for matching).
+func head(s string, n int) string {
+	if len(s) > n {
+		return s[:n]
+	}
+	return s
+}
+
+func scoreKinds(text string, ocrPages, nPages int) (scores []Scored) {
 	t := text
 	if len(t) > 40000 {
 		t = t[:40000]
@@ -160,21 +216,66 @@ func Detect(text string, ocrPages, nPages int) (kind string, scores []Scored) {
 	}
 
 	_ = tl
-	scores = []Scored{
+	return []Scored{
 		{"paper", paper}, {"book", book}, {"gallery", gallery},
 		{"course", course}, {"reference", reference},
 	}
-	best := ""
-	bestScore := 0.0
-	for _, s := range scores {
-		if s.Score > bestScore {
-			best, bestScore = s.Kind, s.Score
+}
+
+// kindStopwords: words too generic to indicate a document's kind.
+var kindStopwords = map[string]bool{
+	"the": true, "and": true, "for": true, "with": true, "from": true,
+	"that": true, "this": true, "are": true, "was": true, "were": true,
+	"into": true, "about": true, "their": true, "which": true,
+	"how": true, "what": true, "why": true, "can": true, "its": true,
+	"one": true, "two": true, "new": true, "study": true, "using": true,
+	"paper": true, "document": true, "introduction": true, "abstract": true,
+	"chapter": true, "section": true, "figure": true, "table": true,
+	"page": true, "pages": true, "volume": true, "journal": true,
+}
+
+// matchWeight scores how strongly an example matches the document under
+// classification: distinctive shared terms, saturating. 0 means no
+// usable overlap.
+func matchWeight(doc, example string) float64 {
+	docTerms := map[string]bool{}
+	for _, t := range kindTokens(doc) {
+		docTerms[t] = true
+	}
+	seen := map[string]bool{}
+	shared := 0
+	for _, t := range kindTokens(example) {
+		if docTerms[t] && !seen[t] {
+			seen[t] = true
+			shared++
 		}
 	}
-	if bestScore < 3.5 {
-		return "", scores // not confident: generic processing
+	if shared < 2 {
+		return 0
 	}
-	return best, scores
+	// A strong match is worth enough to make an otherwise-unconfident
+	// document confident (3.0 + growth), but one alone ties a confident
+	// heuristic (4.0) and loses to it — overriding a confident call
+	// takes agreement from two or more examples.
+	w := 3.0 + 0.25*float64(shared-2)
+	if w > 4.0 {
+		w = 4.0
+	}
+	return w
+}
+
+// kindTokens lowercases and splits into word tokens (length > 2,
+// non-stopword).
+func kindTokens(s string) []string {
+	out := []string{}
+	for _, t := range strings.FieldsFunc(strings.ToLower(s), func(r rune) bool {
+		return (r < 'a' || r > 'z') && (r < '0' || r > '9') && r < 128
+	}) {
+		if len(t) > 2 && !kindStopwords[t] {
+			out = append(out, t)
+		}
+	}
+	return out
 }
 
 // stopHeadings are the section headings that terminate an Abstract.

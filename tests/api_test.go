@@ -3,6 +3,7 @@
 package tests
 
 import (
+	"archive/zip"
 	"bytes"
 	"encoding/json"
 	"fmt"
@@ -58,7 +59,9 @@ func TestAPI(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "vocab.yaml"), vocabSrc, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	cfgBody := "db: " + filepath.Join(dir, "test.db") + "\ntools:\n  mutool: " + mutool + "\n"
+	cfgBody := "db: " + filepath.Join(dir, "test.db") +
+		"\nlibrary_dir: " + filepath.Join(dir, "library") +
+		"\ntools:\n  mutool: " + mutool + "\n"
 	if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte(cfgBody), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -417,8 +420,71 @@ func TestAPI(t *testing.T) {
 	request("DELETE", "/api/collections/99999", "", nil, 404)
 	request("POST", "/api/collections/99999/documents", `{"doc_ids":[1]}`, nil, 404)
 
+	// ---- collection export/import: a shareable .zip bundle
+	reqExpC, _ := http.NewRequest("GET", ts.URL+"/api/collections/"+colID+"/export", nil)
+	respExpC, err := ts.Client().Do(reqExpC)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bundle, err := io.ReadAll(respExpC.Body)
+	respExpC.Body.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if respExpC.StatusCode != 200 || len(bundle) == 0 {
+		t.Fatalf("collection export: status=%d len=%d", respExpC.StatusCode, len(bundle))
+	}
+	zr, err := zip.NewReader(bytes.NewReader(bundle), int64(len(bundle)))
+	if err != nil {
+		t.Fatalf("export is not a zip: %v", err)
+	}
+	names := map[string]bool{}
+	for _, f := range zr.File {
+		names[f.Name] = true
+	}
+	if !names["manifest.json"] {
+		t.Fatalf("bundle missing manifest.json: %v", names)
+	}
+	// import it back: a NEW collection, files ingested under library_dir
+	reqImpC, _ := http.NewRequest("POST", ts.URL+"/api/collections/import",
+		bytes.NewReader(bundle))
+	reqImpC.Header.Set("Content-Type", "application/zip")
+	respImpC, err := ts.Client().Do(reqImpC)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var impColRes map[string]any
+	json.NewDecoder(respImpC.Body).Decode(&impColRes)
+	respImpC.Body.Close()
+	if respImpC.StatusCode != 200 {
+		t.Fatalf("collection import: status=%d res=%v", respImpC.StatusCode, impColRes)
+	}
+	if impColRes["documents"].(float64) != 1 {
+		t.Fatalf("imported collection should have 1 document: %v", impColRes)
+	}
+	impCol := impColRes["collection"].(map[string]any)
+	if !strings.HasPrefix(impCol["name"].(string), "applied-ml-2026") {
+		t.Fatalf("imported collection name: %v", impCol["name"])
+	}
+	// the metadata (the member's category) must have been restored
+	impColID := strconv.Itoa(int(impCol["id"].(float64)))
+	var impDetail struct {
+		Documents []map[string]any `json:"documents"`
+	}
+	request("GET", "/api/collections/"+impColID, "", &impDetail, 200)
+	if len(impDetail.Documents) != 1 {
+		t.Fatalf("imported collection members: %d", len(impDetail.Documents))
+	}
+	if impDetail.Documents[0]["category"] != "shelf-b" {
+		t.Fatalf("imported metadata not restored: %v", impDetail.Documents[0]["category"])
+	}
+	// garbage is rejected
+	request("POST", "/api/collections/import", "not a zip", nil, 400)
+
 	// ---- document delete: index-only removal (the file stays on disk)
 	var delRes map[string]any
+	var docsBefore []map[string]any
+	request("GET", "/api/documents", "", &docsBefore, 200)
 	request("DELETE", fmt.Sprintf("/api/documents/%d", mdID), "", &delRes, 200)
 	if delRes["deleted"] == nil {
 		t.Fatal("delete returned no id")
@@ -427,9 +493,9 @@ func TestAPI(t *testing.T) {
 	request("DELETE", fmt.Sprintf("/api/documents/%d", mdID), "", nil, 404)
 	var docsAfter []map[string]any
 	request("GET", "/api/documents", "", &docsAfter, 200)
-	if len(docsAfter) != len(docs)-1 {
+	if len(docsAfter) != len(docsBefore)-1 {
 		t.Fatalf("expected %d documents after delete, got %d",
-			len(docs)-1, len(docsAfter))
+			len(docsBefore)-1, len(docsAfter))
 	}
 	// chunks and tags must have cascaded with the row
 	var nChunks, nTags int
@@ -470,8 +536,8 @@ func TestAPI(t *testing.T) {
 	if err := os.WriteFile(snapFile, snap, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if n, err := db.ValidateLibrary(snapFile); err != nil || n != 1 {
-		t.Fatalf("exported snapshot: n=%d err=%v (want 1 document)", n, err)
+	if n, err := db.ValidateLibrary(snapFile); err != nil || n != len(docsAfter) {
+		t.Fatalf("exported snapshot: n=%d err=%v (want %d documents)", n, err, len(docsAfter))
 	}
 	// import the snapshot back (replaces the live db; old kept aside)
 	reqImp, _ := http.NewRequest("POST", ts.URL+"/api/library/import", bytes.NewReader(snap))
@@ -483,13 +549,13 @@ func TestAPI(t *testing.T) {
 	var impRes map[string]any
 	json.NewDecoder(respImp.Body).Decode(&impRes)
 	respImp.Body.Close()
-	if respImp.StatusCode != 200 || impRes["documents"].(float64) != 1 {
-		t.Fatalf("import: status=%d res=%v", respImp.StatusCode, impRes)
+	if respImp.StatusCode != 200 || impRes["documents"].(float64) != float64(len(docsAfter)) {
+		t.Fatalf("import: status=%d res=%v (want %d docs)", respImp.StatusCode, impRes, len(docsAfter))
 	}
 	var docsReloaded []map[string]any
 	request("GET", "/api/documents", "", &docsReloaded, 200)
-	if len(docsReloaded) != 1 {
-		t.Fatalf("expected 1 document after import, got %d", len(docsReloaded))
+	if len(docsReloaded) != len(docsAfter) {
+		t.Fatalf("expected %d documents after import, got %d", len(docsAfter), len(docsReloaded))
 	}
 	// a pre-import copy must exist next to the replaced library
 	if _, err := os.Stat(cfg.DBPath + ".pre-import-"); err != nil {

@@ -199,3 +199,50 @@ func TestDetectLongPaperStaysPaper(t *testing.T) {
 		t.Fatalf("long paper not classified as paper: %v", scores)
 	}
 }
+
+// User kind pins vote on alike documents: one example nudges an
+// unconfident call, several flip a confident heuristic.
+func TestDetectWithExamplesLearnsFromUserPins(t *testing.T) {
+	// heuristic calls this a paper (an Abstract heading → paper=4)
+	text := "Abstract\nWe study renormalization and gauge anomalies in " +
+		"quantum field theory and their consequences for scattering.\n"
+	if k, _ := Detect(text, 0, 20); k != "paper" {
+		t.Fatalf("baseline heuristic should call it paper, got %q", k)
+	}
+
+	// one strongly-similar example pinned as course: not enough to flip
+	one := []Example{{Kind: "course", Title: "QFT lecture notes",
+		Text: "renormalization gauge anomalies quantum field theory lecture"}}
+	if k, _ := DetectWithExamples(text, 0, 20, one); k != "paper" {
+		t.Fatalf("a single example must not override a confident heuristic, got %q", k)
+	}
+
+	// two agreeing examples: the user's pins win
+	two := []Example{
+		{Kind: "course", Title: "QFT lecture notes",
+			Text: "renormalization gauge anomalies quantum field theory lecture"},
+		{Kind: "course", Title: "QFT problem sets",
+			Text: "renormalization gauge anomalies quantum field theory homework"},
+	}
+	if k, _ := DetectWithExamples(text, 0, 20, two); k != "course" {
+		t.Fatalf("two agreeing user pins should win, got %q", k)
+	}
+
+	// an unconfident doc (no signal → "") adopts one strong example
+	vague := "renormalization gauge anomalies quantum field theory notes"
+	if k, _ := Detect(vague, 0, 4); k != "" {
+		t.Fatalf("baseline should be unconfident, got %q", k)
+	}
+	ex := []Example{{Kind: "reference", Title: "QFT handbook",
+		Text: "renormalization gauge anomalies quantum field theory handbook"}}
+	if k, _ := DetectWithExamples(vague, 0, 4, ex); k != "reference" {
+		t.Fatalf("an unconfident doc should adopt a strong example, got %q", k)
+	}
+
+	// unrelated examples never vote
+	if k, _ := DetectWithExamples(vague, 0, 4,
+		[]Example{{Kind: "book", Title: "Gardening", Text: "soil compost roses"}},
+	); k != "" {
+		t.Fatalf("unrelated examples must not vote, got %q", k)
+	}
+}

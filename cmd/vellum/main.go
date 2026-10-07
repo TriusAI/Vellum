@@ -4,6 +4,7 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"flag"
@@ -18,6 +19,7 @@ import (
 	"time"
 
 	"vellum/internal/classify"
+	"vellum/internal/collection"
 	"vellum/internal/config"
 	"vellum/internal/db"
 	"vellum/internal/extract"
@@ -58,7 +60,7 @@ file (FTS5). Models served locally by llama.cpp llama-server.
 `
 
 // versionString is reported by --version, /api/status and `vellum agent`.
-const versionString = "0.17.0"
+const versionString = "0.18.0"
 
 // documentColumns is the explicit projection used everywhere (never SELECT *,
 // so the scan order is fixed even if the schema gains columns).
@@ -904,8 +906,68 @@ func cmdCollection(cfg *config.Config, args []string) {
 			fmt.Printf("  #%d  %s  (%s)\n", d.ID, firstNonEmpty(d.Title, filepath.Base(d.Path)), d.Status)
 		}
 
+	case "export":
+		if len(rest) < 1 {
+			log.Fatalf("usage: vellum collection export NAME|ID [PATH.zip]")
+		}
+		c := collectionRef(rest[0])
+		out := "collection-" + collection.Slug(c.Name) + ".zip"
+		if len(rest) > 1 {
+			out = rest[1]
+		}
+		if _, err := os.Stat(out); err == nil {
+			log.Fatalf("collection export: %s already exists", out)
+		}
+		f, err := os.Create(out)
+		if err != nil {
+			log.Fatalf("collection export: %s", err)
+		}
+		name, err := collection.Export(conn, c.ID, f)
+		if cerr := f.Close(); err == nil {
+			err = cerr
+		}
+		if err != nil {
+			os.Remove(out)
+			log.Fatalf("collection export: %s", err)
+		}
+		if jsonOut {
+			printJSON(map[string]any{"path": out, "collection": name})
+			return
+		}
+		fmt.Printf("exported %q -> %s   (share it; import with: vellum collection import %s)\n",
+			name, out, out)
+
+	case "import":
+		if len(rest) < 1 {
+			log.Fatalf("usage: vellum collection import PATH.zip [--name NAME]")
+		}
+		zipPath := rest[0]
+		nameOverride := ""
+		for i := 1; i < len(rest); i++ {
+			if rest[i] == "--name" && i+1 < len(rest) {
+				nameOverride = rest[i+1]
+				i++
+			}
+		}
+		f, err := os.Open(zipPath)
+		if err != nil {
+			log.Fatalf("collection import: %s", err)
+		}
+		defer f.Close()
+		res, err := collection.Import(context.Background(), cfg, conn, f, nameOverride)
+		if err != nil {
+			log.Fatalf("collection import: %s", err)
+		}
+		if jsonOut {
+			printJSON(map[string]any{
+				"collection": res.Collection, "documents": res.Documents, "dir": res.Dir})
+			return
+		}
+		fmt.Printf("imported collection #%d %q (%d document(s); files in %s)\n",
+			res.Collection.ID, res.Collection.Name, res.Documents, res.Dir)
+
 	default:
-		log.Fatalf("collection: unknown subcommand %q (list|create|delete|add|remove|show)", sub)
+		log.Fatalf("collection: unknown subcommand %q (list|create|delete|add|remove|show|export|import)", sub)
 	}
 }
 

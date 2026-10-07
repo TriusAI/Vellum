@@ -401,6 +401,10 @@ func processOne(ctx context.Context, cfg *config.Config, conn *sql.DB, v *vocab.
 	if err != nil {
 		return nil, err
 	}
+	kindExamples, err := userKindExamples(conn, docID)
+	if err != nil {
+		return nil, err
+	}
 
 	// ---- re-classify on the current text unless the user set the kind:
 	// ingest classified from the text layer alone; OCR text (chapters,
@@ -411,7 +415,7 @@ func processOne(ctx context.Context, cfg *config.Config, conn *sql.DB, v *vocab.
 		if err := conn.QueryRow(
 			"SELECT ocr_pages, n_pages FROM documents WHERE id=?", docID).
 			Scan(&ocrPages, &nPages); err == nil {
-			newKind, _ := classify.Detect(text, int(ocrPages), int(nPages))
+			newKind, _ := classify.DetectWithExamples(text, int(ocrPages), int(nPages), kindExamples)
 			if newKind != kind {
 				kind = newKind
 				if _, err := conn.Exec(
@@ -559,6 +563,36 @@ func userShelvingExamples(conn *sql.DB, excludeDocID int64) ([]summarize.Shelvin
 			return nil, err
 		}
 		ex.Authors = authors.String
+		out = append(out, ex)
+	}
+	return out, rows.Err()
+}
+
+// userKindExamples returns the documents the user classified personally
+// (kind_user): their kind votes on alike documents at classification
+// time, so kind corrections are learned. A short sample (opening chunk)
+// is matched; the list is capped so classification stays cheap.
+func userKindExamples(conn *sql.DB, excludeDocID int64) ([]classify.Example, error) {
+	rows, err := conn.Query(`
+		SELECT d.kind, COALESCE(d.title, ''),
+		       COALESCE((SELECT c.text FROM chunks c
+		                 WHERE c.doc_id = d.id ORDER BY c.seq LIMIT 1), '')
+		FROM documents d
+		WHERE d.kind_user = 1 AND d.kind != '' AND d.id != ?
+		ORDER BY d.id DESC LIMIT 300`, excludeDocID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []classify.Example{}
+	for rows.Next() {
+		var ex classify.Example
+		if err := rows.Scan(&ex.Kind, &ex.Title, &ex.Text); err != nil {
+			return nil, err
+		}
+		if len(ex.Text) > 4000 {
+			ex.Text = ex.Text[:4000]
+		}
 		out = append(out, ex)
 	}
 	return out, rows.Err()
@@ -785,7 +819,8 @@ func Regenerate(ctx context.Context, cfg *config.Config, conn *sql.DB, v *vocab.
 	}
 
 	if want["kind"] {
-		newKind, _ := classify.Detect(text, int(ocrPages), int(nPages))
+		kindEx, _ := userKindExamples(conn, docID)
+		newKind, _ := classify.DetectWithExamples(text, int(ocrPages), int(nPages), kindEx)
 		if _, err := conn.Exec(
 			"UPDATE documents SET kind=?, kind_user=0 WHERE id=?",
 			newKind, docID); err != nil {
