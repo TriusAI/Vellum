@@ -370,13 +370,15 @@ Docker: `pack/Dockerfile` + `docker-entrypoint.sh`; Hub is proxy-blocked
 
 ## 10. Where things state-wise
 
-- HEAD: v0.18.0 (`5d69e41`), all tests green. Since 0.17: per-message
+- HEAD: v0.18.1 (`0847ed6`), all tests green. Since 0.17: per-message
   notice durations (quick confirmations self-dismiss fast, job outcomes
   linger); kind detection learns from user pins (classify.DetectWithExamples
   + ingest.userKindExamples); category edits refresh open collection
   pages; collection sharing (.zip export/import via internal/collection);
   All Documents + Collections pages are closable and All Documents has a
-  top-bar opener.
+  top-bar opener; list/tree styles are class-scoped (.item-list) so rows
+  look clickable everywhere (incl. collection pages), with hover
+  accent+underline on names.
 - v0.17.0: COLLECTIONS (collections + collection_docs tables, CRUD
   API/CLI, a Collections root page + [Collection] pages, add/remove on
   the Summary page); page moves use CSS order (previews don't reload);
@@ -385,9 +387,9 @@ Docker: `pack/Dockerfile` + `docker-entrypoint.sh`; Hub is proxy-blocked
   matched by keyword overlap, top-3 fed as few-shot examples — see
   ShelvingExample/bestExamples in internal/summarize); category chips
   suppressed inside the tree; flash-free updates.
-- Pack stage `pack/stage/vellum-5d69e41-linux-amd64/` (user's live
-  library inside) updated to the 0.18.0 binary; distributable tarball
-  `pack/vellum-5d69e41-linux-x86_64.tar.gz` (clean of the DB — verified
+- Pack stage `pack/stage/vellum-0847ed6-linux-amd64/` (user's live
+  library inside) updated to the 0.18.1 binary; distributable tarball
+  `pack/vellum-0847ed6-linux-x86_64.tar.gz` (clean of the DB — verified
   with tar -tzf | grep -c library.db = 0). New tables (collections etc.)
   are created on first Open of an existing library. The user's
   long-running serve (PID from an OLDER deleted stage, port 8097) still
