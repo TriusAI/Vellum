@@ -25,7 +25,8 @@ import (
 //	vellum watch remove PATH...  stop watching these folders
 //	vellum watch clear           watch nothing
 //	vellum watch on|off          enable/disable the background watcher
-//	vellum watch interval N      seconds between scans (>= 2)
+//	vellum watch interval N      min seconds between scans (>= 2)
+//	vellum watch notify on|off   event-driven (inotify) vs polling
 //	vellum watch run             scan once now: ingest + enrich, in order
 func cmdWatch(cfg *config.Config, args []string) {
 	sub := "status"
@@ -92,6 +93,13 @@ func cmdWatch(cfg *config.Config, args []string) {
 		cfg.Watch.Interval = n
 		watchSave(cfg)
 		watchStatus(cfg)
+	case "notify":
+		if len(args) != 1 || (args[0] != "on" && args[0] != "off") {
+			log.Fatalf("usage: vellum watch notify on|off")
+		}
+		cfg.Watch.Notify = args[0] == "on"
+		watchSave(cfg)
+		watchStatus(cfg)
 	case "run", "scan":
 		watchRun(cfg)
 	default:
@@ -110,6 +118,7 @@ func watchStatus(cfg *config.Config) {
 			"enabled":  cfg.Watch.Enabled,
 			"dirs":     cfg.Watch.Dirs,
 			"interval": cfg.Watch.Interval,
+			"notify":   cfg.Watch.Notify,
 			"pending":  pending,
 		})
 		return
@@ -118,7 +127,12 @@ func watchStatus(cfg *config.Config) {
 	if cfg.Watch.Enabled {
 		state = "on"
 	}
-	fmt.Printf("watcher: %s   interval: %ds\n", state, cfg.Watch.Interval)
+	how := "polling"
+	if cfg.Watch.Notify {
+		how = "event-driven (inotify)"
+	}
+	fmt.Printf("watcher: %s   min interval: %ds   changes: %s\n",
+		state, cfg.Watch.Interval, how)
 	if len(cfg.Watch.Dirs) == 0 {
 		fmt.Println("folders: (none — add one with `vellum watch add PATH`)")
 	} else {

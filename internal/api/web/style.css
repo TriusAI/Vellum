@@ -365,9 +365,22 @@ button.mini { font-size: .72rem; padding: 0 .45rem; }
 .job-dot.error { background: #c0604f; }
 .job-dot.cancelled { background: var(--muted); opacity: .5; }
 /* watch dialog */
-.watch-dir { display: flex; gap: .5rem; align-items: center;
-  border-bottom: 1px dashed var(--line); padding: .3rem 0; }
-.watch-dir:last-child { border-bottom: none; }
-.watch-path { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis;
+.watch-controls { display: flex; gap: 1rem; align-items: center;
+  flex-wrap: wrap; margin: .5rem 0 .2rem; }
+.watch-controls .chk { display: flex; gap: .35rem; align-items: center;
+  font-size: .85rem; color: var(--fg); }
+.watch-controls .chk input[type="number"] { border: 1px solid var(--line);
+  background: var(--bg); padding: .2rem .35rem; font: inherit; }
+#watch-folders { margin: .4rem 0; max-height: 14rem; overflow-y: auto; }
+.watch-folder { display: flex; gap: .6rem; align-items: center;
+  border-bottom: 1px dashed var(--line); padding: .35rem 0; }
+.watch-folder:last-child { border-bottom: none; }
+.wf-path { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis;
   white-space: nowrap; font-family: ui-monospace, monospace; font-size: .82rem; }
-.watch-dir .small { flex: 0 0 auto; }
+.wf-meta { flex: 0 0 auto; color: var(--muted); font-size: .78rem; }
+.wf-meta.bad { color: #c0604f; }
+.watch-folder .small { flex: 0 0 auto; }
+#watch-fs-crumbs { font-size: .8rem; color: var(--muted); margin: .3rem 0 .25rem;
+  word-break: break-all; max-height: 2.6em; overflow: hidden; }
+#watch-fs-list { height: 12rem; overflow-y: auto; border: 1px solid var(--line); }
+#watch-fs-list p { margin: 0; }

@@ -87,9 +87,14 @@ type Server struct {
 	watchSeen    map[string]fileStamp // last scan's stamps (settle check)
 	watchDone    map[string]fileStamp // stamps already handed to ingest
 	watchRunning bool
+	watchEvents  bool  // an inotify watcher is active (event-driven)
+	watchGen     int64 // bumped on every settings change; the loop rebuilds
 	watchLast    time.Time
 	watchAdded   int
 	watchErr     string
+
+	// watchChanged wakes the watcher loop when its settings change.
+	watchChanged chan struct{}
 }
 
 // fileStamp identifies a file's version cheaply (no hashing): a download
@@ -218,8 +223,9 @@ func (s *Server) runJob(kind, label string, work func(j *Job) error) *Job {
 func New(cfg *config.Config, conn *sql.DB) *Server {
 	s := &Server{
 		cfg: cfg, conn: conn,
-		watchSeen: map[string]fileStamp{},
-		watchDone: map[string]fileStamp{},
+		watchSeen:    map[string]fileStamp{},
+		watchDone:    map[string]fileStamp{},
+		watchChanged: make(chan struct{}, 1),
 	}
 	go s.watchLoop()
 	return s

@@ -161,24 +161,30 @@ explicitly re-generates kind/category):
     POST /api/documents/{id}/regenerate {"fields":["summary","tags"]}
 
 ## Filesystem watcher (auto-ingest on arrival)
-While vellum serve runs, a background watcher scans the configured
-folders on a timer and auto-runs the pipeline on new/changed files, in
-this order: ingest -> kind -> category -> metadata (title/author/year)
--> tags -> summary. The summary is generated LAST, so tags come from
-the document's text rather than from a summary that does not exist yet.
-Enrichment needs the vocabulary and the chat backend; without them the
-files are still indexed and get enriched on a later scan. A file must
-hold the same size+mtime across two scans before it is picked up, so a
-half-written download is never indexed ("Scan now" acts at once).
-Managed from the UI's Watch dialog or:
+While vellum serve runs, a background watcher monitors the configured
+folders and auto-runs the pipeline on new/changed files, in this order:
+ingest -> kind -> category -> metadata (title/author/year) -> tags ->
+summary. The summary is generated LAST, so tags come from the
+document's text rather than from a summary that does not exist yet.
+Scans are EVENT-DRIVEN by default (inotify): a change schedules a scan,
+and the interval is a MINIMUM gap between scans, so a burst of edits
+coalesces into one scan. With notify off (or no inotify) it polls every
+interval seconds instead. Enrichment needs the vocabulary and the chat
+backend; without them the files are still indexed and get enriched on a
+later scan. A new/changed file is picked up on the change itself; the
+polling fallback additionally requires a stable size+mtime across two
+scans. Managed from the UI's Watch dialog or:
     vellum watch                 # show settings + pending count
     vellum watch add PATH...     # watch these folders (and enable)
     vellum watch remove PATH...  # stop watching these folders
     vellum watch on|off          # toggle the background watcher
-    vellum watch interval N      # seconds between scans (>= 2)
+    vellum watch interval N      # min seconds between scans (>= 2)
+    vellum watch notify on|off   # event-driven (inotify) vs polling
     vellum watch run             # one-shot scan + enrich (cron-friendly)
-Scans run through the same FIFO job queue, so they appear in the Jobs
-API/UI and can be cancelled like any other job.
+GET /api/watch also reports, per folder, whether it exists and how many
+documents/pending documents it holds, plus the active "mode"
+(events|poll|off). Scans run through the same FIFO job queue, so they
+appear in the Jobs API/UI and can be cancelled like any other job.
 
 ## Jobs: queue + cancellation
 process / regenerate / reextract / ingest run through ONE FIFO queue;
@@ -387,9 +393,12 @@ Editing vocab.yaml by hand is also fine (name: description, YAML map).
     GET  /api/fs?path=/abs/dir      # dir listing for the ingest picker
                                     # (loopback-only; no file contents served)
     POST /api/process               # {"ids":[...]} or {} for all pending -> results
-    GET  /api/watch                 # {enabled, dirs, interval, running,
-                                    #  last_scan, added, pending, last_error}
-    PUT  /api/watch                 # {"enabled":..,"dirs":[..],"interval":..}
+    GET  /api/watch                 # {enabled, dirs, folders:[{path,exists,
+                                    #  documents,pending}], interval, notify,
+                                    #  mode:events|poll|off, running, last_scan,
+                                    #  added, pending, last_error}
+    PUT  /api/watch                 # {"enabled":..,"dirs":[..],"interval":..,
+                                    #  "notify":..}
     POST /api/watch/scan            # scan + enrich now -> {ok, job, added}
     GET  /api/search?q=&mode=keyword|semantic&limit=N
     GET  /api/vocab                 # [{"name":..,"description":..}]

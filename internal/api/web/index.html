@@ -73,25 +73,38 @@
 
 <dialog id="dlg-watch">
   <h2>Filesystem watcher</h2>
-  <p class="hint">While <code>vellum serve</code> runs, the watched folders are
-    scanned on a timer. New or changed files are auto-ingested and then
+  <p class="hint">While <code>vellum serve</code> runs, watched folders are
+    monitored for changes. New or changed files are auto-ingested and
     enriched in order: <b>ingest → kind → category → metadata → tags →
-    summary</b>. Enrichment needs the tag vocabulary and the chat backend;
-    files are indexed regardless and enriched once the backend is up. A file
-    must stop changing between two scans before it is picked up, so a
-    half-written download is never indexed.</p>
-  <div class="row">
-    <label><input type="checkbox" id="watch-enabled"> enabled</label>
-    <label class="w6">scan every</label>
-    <input id="watch-interval" type="number" min="2" max="86400" style="width:5rem">
-    <span class="hint">seconds</span>
+    summary</b> (the summary is generated last). A scan runs only after a
+    change, and never more often than the minimum interval below.
+    Enrichment needs the tag vocabulary and the chat backend; files are
+    indexed regardless and enriched once the backend is up.</p>
+
+  <div class="watch-controls">
+    <label class="chk"><input type="checkbox" id="watch-enabled"> enabled</label>
+    <label class="chk"><input type="checkbox" id="watch-notify"> detect changes (inotify)</label>
+    <label class="chk">min interval
+      <input id="watch-interval" type="number" min="2" max="86400" style="width:4.5rem"> s</label>
   </div>
-  <div id="watch-dirs"></div>
+
+  <div id="watch-folders"></div>
+
   <div class="row">
-    <input id="watch-add" placeholder="/home/me/inbox">
+    <button class="plain" id="watch-browse">Browse…</button>
+    <input id="watch-add" placeholder="/home/me/inbox" style="flex:1">
     <button id="watch-add-btn">Add folder</button>
   </div>
-  <pre id="watch-msg" class="hint" style="margin:.2rem 0 0"></pre>
+  <div id="watch-fs" class="hidden">
+    <div id="watch-fs-crumbs"></div>
+    <div id="watch-fs-list"></div>
+    <div class="row right">
+      <button class="plain" id="watch-fs-cancel">Cancel</button>
+      <button id="watch-fs-use">Use this folder</button>
+    </div>
+  </div>
+
+  <pre id="watch-msg" class="hint" style="margin:.4rem 0 0; white-space:pre-wrap"></pre>
   <div class="row right">
     <button class="plain" id="watch-scan">Scan now</button>
     <button class="plain" id="watch-close">Close</button>

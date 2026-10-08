@@ -21,32 +21,27 @@ import (
 
 // ----------------------------- watcher loop --------------------------------
 
-// watchLoop periodically scans the configured directories while the watcher
-// is enabled. Each scan runs through the job queue, so it shows up in the
-// Jobs dialog and can be cancelled like any other job. The loop sleeps
-// between scans; changing the interval takes effect on the next tick.
-func (s *Server) watchLoop() {
-	for {
-		time.Sleep(time.Duration(s.watchIntervalSeconds()) * time.Second)
-		s.watchMu.Lock()
-		enabled := s.cfg.Watch.Enabled && len(s.cfg.Watch.Dirs) > 0
-		s.watchMu.Unlock()
-		if !enabled {
-			continue
-		}
-		s.watchScanJob(true)
-	}
+// fsWatcher signals when something under the watched directories changes.
+// newFSWatcher returns nil on platforms without filesystem-notification
+// support, and the loop falls back to periodic polling.
+type fsWatcher interface {
+	Events() <-chan struct{}
+	Close()
 }
 
-// watchIntervalSeconds clamps the configured scan interval (seconds) to a
-// sane range; 0 means "use the default".
-func (s *Server) watchIntervalSeconds() int {
+// watchConfig snapshots the watcher settings under the lock.
+func (s *Server) watchConfig() (enabled bool, dirs []string, interval int, notify bool, gen int64) {
 	s.watchMu.Lock()
 	defer s.watchMu.Unlock()
-	n := s.cfg.Watch.Interval
+	return s.cfg.Watch.Enabled, append([]string(nil), s.cfg.Watch.Dirs...),
+		clampInterval(s.cfg.Watch.Interval), s.cfg.Watch.Notify, s.watchGen
+}
+
+// clampInterval bounds the min-seconds-between-scans setting (0 = default).
+func clampInterval(n int) int {
 	switch {
 	case n <= 0:
-		return 15
+		return 5
 	case n < 2:
 		return 2
 	case n > 86400:
@@ -56,10 +51,132 @@ func (s *Server) watchIntervalSeconds() int {
 	}
 }
 
-// watchScanJob runs one scan through the FIFO job queue. It blocks until
-// the scan has had its turn, which naturally keeps ticks from piling up.
-// settle=false ("Scan now") skips the settle wait so a just-added file is
-// picked up immediately.
+// watchLoop watches the configured directories. With Notify on it reacts to
+// filesystem events (inotify) and runs at most one scan per Interval seconds
+// — the interval is a debounce FLOOR, so a burst of changes coalesces into
+// one scan. With Notify off, or when the platform has no notification
+// support, it polls every Interval seconds. Changing the settings rebuilds
+// the watcher and scans once immediately. Every scan runs through the job
+// queue, so it is visible in Jobs and cancellable.
+func (s *Server) watchLoop() {
+	var watcher fsWatcher
+	var built bool
+	var watched []string
+	var gen int64
+	var lastScan time.Time
+	var dirty, scheduled bool
+	tick := make(chan struct{}, 1)
+
+	for {
+		enabled, dirs, interval, notify, g := s.watchConfig()
+		if !enabled || len(dirs) == 0 {
+			if watcher != nil {
+				watcher.Close()
+				watcher = nil
+			}
+			s.setWatchEvents(false)
+			built, watched, gen = false, nil, g
+			select {
+			case <-s.watchChanged:
+			case <-time.After(2 * time.Second):
+			}
+			continue
+		}
+
+		if !built || g != gen || !equalStrings(dirs, watched) {
+			if watcher != nil {
+				watcher.Close()
+			}
+			watcher = nil
+			if notify {
+				watcher = newFSWatcher(dirs)
+			}
+			built = true
+			watched, gen = append([]string(nil), dirs...), g
+			s.setWatchEvents(watcher != nil)
+			s.watchMu.Lock()
+			s.watchErr = ""
+			s.watchMu.Unlock()
+			dirty, scheduled = false, false
+			// a new configuration takes effect at once
+			s.watchScanJob(watcher == nil)
+			lastScan = time.Now()
+			continue
+		}
+
+		intervalDur := time.Duration(interval) * time.Second
+
+		if watcher == nil {
+			// polling fallback (Notify off, or no inotify support)
+			select {
+			case <-s.watchChanged:
+			case <-time.After(intervalDur):
+				s.watchScanJob(true)
+				lastScan = time.Now()
+			}
+			continue
+		}
+
+		// event-driven: a change schedules at most one scan per interval
+		select {
+		case <-s.watchChanged:
+			// settings changed: loop to rebuild
+		case <-watcher.Events():
+			dirty = true
+			if !scheduled {
+				delay := intervalDur - time.Since(lastScan)
+				if delay < 0 {
+					delay = 0
+				}
+				time.AfterFunc(delay, func() {
+					select {
+					case tick <- struct{}{}:
+					default:
+					}
+				})
+				scheduled = true
+			}
+		case <-tick:
+			scheduled = false
+			if dirty {
+				dirty = false
+				s.watchScanJob(false)
+				lastScan = time.Now()
+			}
+		}
+	}
+}
+
+func (s *Server) setWatchEvents(on bool) {
+	s.watchMu.Lock()
+	s.watchEvents = on
+	s.watchMu.Unlock()
+}
+
+// pokeWatchChanged wakes the loop after a settings change (non-blocking).
+func (s *Server) pokeWatchChanged() {
+	select {
+	case s.watchChanged <- struct{}{}:
+	default:
+	}
+}
+
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// watchScanJob runs one scan through the FIFO job queue. It blocks until the
+// scan has had its turn, which naturally keeps ticks from piling up.
+// settle=true requires a file to hold the same size+mtime across two scans
+// (the periodic-poll fallback); event-driven and manual scans pass false.
 func (s *Server) watchScanJob(settle bool) *Job {
 	return s.runJob("watch", "filesystem watch", func(j *Job) error {
 		return s.watchScan(j, settle)
@@ -141,11 +258,11 @@ func (s *Server) watchScan(j *Job, settle bool) error {
 
 // watchCandidates walks the watched dirs and returns the supported files
 // that are new or changed since the last ingest. With settle set (the
-// periodic loop) a file must additionally have held the same size+mtime
-// across two consecutive scans, so a partially written download is not
-// indexed; a manual scan passes settle=false to act at once. Seen/done
-// stamps live in memory: a restart simply re-hashes everything once, and
-// ingest's sha256 dedup makes that a no-op for known files.
+// periodic-poll fallback) a file must additionally have held the same
+// size+mtime across two consecutive scans, so a partially written download
+// is not indexed; event-driven and manual scans pass settle=false and act at
+// once. Seen/done stamps live in memory: a restart re-hashes everything
+// once, and ingest's sha256 dedup makes that a no-op for known files.
 func (s *Server) watchCandidates(dirs []string, settle bool) []string {
 	cur := map[string]fileStamp{}
 	for _, d := range dirs {
@@ -156,7 +273,7 @@ func (s *Server) watchCandidates(dirs []string, settle bool) []string {
 	var out []string
 	for p, st := range cur {
 		if prev, seen := s.watchSeen[p]; settle && (!seen || prev != st) {
-			continue // new or still changing: wait for a stable tick
+			continue // still changing: wait for a stable tick
 		}
 		if d, ok := s.watchDone[p]; ok && d == st {
 			continue // already ingested at this exact version
@@ -223,36 +340,89 @@ func collectWatchFiles(dir string, out map[string]fileStamp) {
 
 // ----------------------------- HTTP surface ---------------------------------
 
+// watchFolder is one watched folder's settings + live stats for the dialog.
+type watchFolder struct {
+	Path      string `json:"path"`
+	Exists    bool   `json:"exists"`
+	Documents int    `json:"documents"`
+	Pending   int    `json:"pending"`
+}
+
+func (s *Server) watchFolderStats(dirs []string) []watchFolder {
+	out := make([]watchFolder, len(dirs))
+	for i, d := range dirs {
+		out[i].Path = d
+		if fi, err := os.Stat(d); err == nil && fi.IsDir() {
+			out[i].Exists = true
+		}
+	}
+	rows, err := s.conn.Query("SELECT path, status FROM documents")
+	if err != nil {
+		return out
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var p, st string
+		if rows.Scan(&p, &st) != nil {
+			continue
+		}
+		for i := range out {
+			if pathUnder(out[i].Path, p) {
+				out[i].Documents++
+				if st == "ingested" {
+					out[i].Pending++
+				}
+			}
+		}
+	}
+	return out
+}
+
+func pathUnder(dir, p string) bool {
+	dir, p = filepath.Clean(dir), filepath.Clean(p)
+	return p == dir || strings.HasPrefix(p, dir+string(os.PathSeparator))
+}
+
 // getWatch reports the watcher's settings and live state for the Watch dialog.
 func (s *Server) getWatch(w http.ResponseWriter, r *http.Request) {
 	s.watchMu.Lock()
 	enabled := s.cfg.Watch.Enabled
 	dirs := append([]string(nil), s.cfg.Watch.Dirs...)
-	interval := s.cfg.Watch.Interval
+	interval := clampInterval(s.cfg.Watch.Interval)
+	notify := s.cfg.Watch.Notify
+	events := s.watchEvents
 	running := s.watchRunning
 	last := s.watchLast
 	added := s.watchAdded
 	lastErr := s.watchErr
 	s.watchMu.Unlock()
-	if interval <= 0 {
-		interval = 15
+
+	mode := "off"
+	if enabled && len(dirs) > 0 {
+		if events {
+			mode = "events"
+		} else {
+			mode = "poll"
+		}
 	}
 	lastStr := ""
 	if !last.IsZero() {
 		lastStr = last.Format(time.RFC3339)
 	}
+	folders := s.watchFolderStats(dirs)
 	pending := 0
-	if len(dirs) > 0 {
-		if ids, err := s.watchPendingDocs(dirs); err == nil {
-			pending = len(ids)
-		}
+	for _, f := range folders {
+		pending += f.Pending
 	}
 	pendingAll := 0
 	s.conn.QueryRow("SELECT COUNT(*) FROM documents WHERE status='ingested'").Scan(&pendingAll)
 	writeJSON(w, 200, map[string]any{
 		"enabled":     enabled,
 		"dirs":        dirs,
+		"folders":     folders,
 		"interval":    interval,
+		"notify":      notify,
+		"mode":        mode,
 		"running":     running,
 		"last_scan":   lastStr,
 		"added":       added,
@@ -269,6 +439,7 @@ func (s *Server) putWatch(w http.ResponseWriter, r *http.Request) {
 		Enabled  *bool     `json:"enabled"`
 		Dirs     *[]string `json:"dirs"`
 		Interval *int      `json:"interval"`
+		Notify   *bool     `json:"notify"`
 	}
 	if err := decodeBody(r, &body); err != nil {
 		writeErr(w, 400, "bad JSON body: "+err.Error())
@@ -295,7 +466,12 @@ func (s *Server) putWatch(w http.ResponseWriter, r *http.Request) {
 	if body.Interval != nil && *body.Interval >= 2 && *body.Interval <= 86400 {
 		s.cfg.Watch.Interval = *body.Interval
 	}
+	if body.Notify != nil {
+		s.cfg.Watch.Notify = *body.Notify
+	}
+	s.watchGen++
 	s.watchMu.Unlock()
+	s.pokeWatchChanged()
 	if err := s.cfg.Save(); err != nil {
 		writeErr(w, 500, "config save failed: "+err.Error())
 		return

@@ -1948,39 +1948,53 @@ $("#ingest-go").onclick = async () => {
 
 /* -------------------------------------------------------- filesystem watch */
 
-// The watcher lives in the server (started by `vellum serve`): it scans the
-// watched folders and runs ingest → kind → category → metadata → tags →
-// summary on new/changed files. This dialog is the manual control panel.
+// The watcher lives in the server (started by `vellum serve`): it detects
+// changes under the watched folders and runs ingest → kind → category →
+// metadata → tags → summary on new/changed files. This dialog is the manual
+// control panel.
 
 let watchPolling = null;
+
+const watchTime = (iso) => {
+  if (!iso) return "never";
+  const d = new Date(iso);
+  return isNaN(d) ? "never" : d.toLocaleTimeString();
+};
 
 async function refreshWatch() {
   if (!$("#dlg-watch").open) return;
   const data = await api("/api/watch");
   $("#watch-enabled").checked = !!data.enabled;
-  $("#watch-interval").value = data.interval || 15;
-  const dirs = data.dirs || [];
-  const box = $("#watch-dirs");
+  $("#watch-notify").checked = !!data.notify;
+  $("#watch-interval").value = data.interval || 5;
+
+  const box = $("#watch-folders");
   box.replaceChildren();
-  if (!dirs.length) {
-    box.append(el("p", { class: "hint" }, "no folders watched yet — add one below"));
-  } else {
-    const list = el("div", { class: "item-list" });
-    for (const d of dirs) {
-      list.append(el("div", { class: "watch-dir" },
-        el("span", { class: "watch-path", title: d }, d),
-        el("button", { class: "small", onclick: () => watchSetDirs(
-          currentWatchDirs().filter((x) => x !== d)) }, "remove")));
-    }
-    box.append(list);
+  const folders = data.folders || [];
+  if (!folders.length) {
+    box.append(el("p", { class: "hint", style: "margin:.35rem 0" },
+      "no folders watched yet — add one below"));
   }
-  const bits = [];
-  if (data.running) bits.push("scanning now…");
-  else if (data.last_scan) bits.push("last scan " + new Date(data.last_scan).toLocaleTimeString());
-  else bits.push("not scanned yet");
-  bits.push(`${data.pending} pending under watched folders`);
-  if (data.added) bits.push(`${data.added} new/changed file(s) seen`);
-  $("#watch-msg").textContent = bits.join(" — ") +
+  for (const f of folders) {
+    const meta = [f.exists ? "exists" : "missing",
+      `${f.documents} doc${f.documents === 1 ? "" : "s"}`];
+    if (f.pending) meta.push(`${f.pending} pending`);
+    box.append(el("div", { class: "watch-folder" },
+      el("span", { class: "wf-path", title: f.path }, f.path),
+      el("span", { class: "wf-meta" + (f.exists ? "" : " bad") }, meta.join(" · ")),
+      el("button", {
+        class: "small", title: "stop watching this folder",
+        onclick: () => watchSetDirs(currentWatchDirs().filter((x) => x !== f.path)),
+      }, "remove")));
+  }
+
+  const mode = data.mode === "events" ? "detecting changes (inotify)"
+    : data.mode === "poll" ? `polling every ${data.interval}s` : "idle";
+  const bits = [mode];
+  bits.push(data.running ? "scanning now…" : `last scan ${watchTime(data.last_scan)}`);
+  bits.push(`${data.pending} pending`);
+  if (data.added) bits.push(`${data.added} new/changed so far`);
+  $("#watch-msg").textContent = bits.join(" · ") +
     (data.last_error ? "\nlast error: " + data.last_error : "");
 }
 
@@ -1996,14 +2010,23 @@ async function watchSave(patch) {
 }
 
 function currentWatchDirs() {
-  return [...document.querySelectorAll("#watch-dirs .watch-path")].map((n) => n.title);
+  return [...document.querySelectorAll("#watch-folders .wf-path")].map((n) => n.title);
 }
 
 function watchSetDirs(dirs) {
   watchSave({ dirs }).catch(() => {});
 }
 
+function addWatchDir(p) {
+  const dirs = currentWatchDirs();
+  if (!dirs.includes(p)) dirs.push(p);
+  watchSave({ dirs, enabled: true });
+  $("#watch-add").value = "";
+}
+
 $("#btn-watch").onclick = () => {
+  $("#watch-fs").classList.add("hidden");
+  $("#watch-add").value = "";
   $("#watch-msg").textContent = "loading…";
   $("#dlg-watch").showModal();
   refreshWatch().catch((e) => { $("#watch-msg").textContent = "load failed: " + e.message; });
@@ -2015,21 +2038,18 @@ $("#watch-close").onclick = () => {
   clearInterval(watchPolling);
   refresh();
 };
-$("#watch-add-btn").onclick = () => {
-  const p = $("#watch-add").value.trim();
-  if (!p) return;
-  const dirs = currentWatchDirs();
-  if (!dirs.includes(p)) dirs.push(p);
-  watchSave({ dirs, enabled: true });
-  $("#watch-add").value = "";
-};
-$("#watch-add").addEventListener("keydown", (e) => {
-  if (e.key === "Enter") { e.preventDefault(); $("#watch-add-btn").click(); }
-});
 $("#watch-enabled").addEventListener("change", (e) => watchSave({ enabled: e.target.checked }));
+$("#watch-notify").addEventListener("change", (e) => watchSave({ notify: e.target.checked }));
 $("#watch-interval").addEventListener("change", (e) => {
   const n = parseInt(e.target.value, 10);
   if (n >= 2) watchSave({ interval: n });
+});
+$("#watch-add-btn").onclick = () => {
+  const p = $("#watch-add").value.trim();
+  if (p) addWatchDir(p);
+};
+$("#watch-add").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") { e.preventDefault(); $("#watch-add-btn").click(); }
 });
 $("#watch-scan").onclick = async () => {
   const btn = $("#watch-scan");
@@ -2039,12 +2059,54 @@ $("#watch-scan").onclick = async () => {
     const res = await api("/api/watch/scan", { method: "POST" });
     notice(`watch: scanned, ${res.added} new/changed file(s)`);
     await loadDocs();
+    await loadCategories();
     await refresh();
   } catch (e) { notice("watch scan: " + e.message); }
   btn.disabled = false;
   btn.textContent = "Scan now";
   refreshWatch().catch(() => {});
 };
+
+// directory-only picker embedded in the Watch dialog
+let watchFsPath = null;
+$("#watch-browse").onclick = () => {
+  $("#watch-fs").classList.remove("hidden");
+  watchFsOpen(watchFsPath).catch((e) => notice("fs: " + e.message));
+};
+$("#watch-fs-cancel").onclick = () => $("#watch-fs").classList.add("hidden");
+$("#watch-fs-use").onclick = () => {
+  if (watchFsPath) addWatchDir(watchFsPath);
+  $("#watch-fs").classList.add("hidden");
+};
+
+async function watchFsOpen(path) {
+  const data = await api("/api/fs" + (path ? "?path=" + encodeURIComponent(path) : ""));
+  watchFsPath = data.path;
+  const crumbs = $("#watch-fs-crumbs");
+  crumbs.replaceChildren();
+  const segs = data.path.split("/").filter(Boolean);
+  let acc = "";
+  crumbs.append(el("span", { class: "crumb", onclick: () => watchFsOpen("/") }, "/"));
+  for (const s of segs) {
+    acc += "/" + s;
+    crumbs.append(el("span", { class: "crumb", onclick: () => watchFsOpen(acc) }, s));
+    crumbs.append(el("span", { class: "crumb-sep" }, "/"));
+  }
+  const list = $("#watch-fs-list");
+  list.replaceChildren();
+  if (data.parent) {
+    list.append(el("div", { class: "fs-row dir", onclick: () => watchFsOpen(data.parent) }, "← .."));
+  }
+  const dirs = data.entries.filter((e) => e.dir).sort((a, b) => a.name.localeCompare(b.name));
+  for (const e of dirs) {
+    list.append(el("div", { class: "fs-row dir",
+      onclick: () => watchFsOpen(joinPath(data.path, e.name)) }, "▸ " + e.name));
+  }
+  if (!dirs.length) {
+    list.append(el("p", { class: "hint", style: "padding:.4rem" },
+      "no subfolders here — use this folder"));
+  }
+}
 
 /* ---------------------------------------------------------- import/export */
 
@@ -2472,13 +2534,75 @@ $("#settings-test").onclick = async () => {
 let jobsOpen = false;
 let jobPeak = 0; // peak active count of the current batch (for "2/3")
 
+// Background jobs that change the library: when one finishes, the list,
+// category filter and open document pages are refreshed automatically (the
+// watcher runs while the dialog is shut). jobStates starts null so the
+// history present at page load does not trigger a refresh.
+let jobStates = null;
+const LIBRARY_JOB_KINDS = new Set(["watch", "ingest", "process", "reextract"]);
+function libraryChangedByJobs(jobs) {
+  const next = new Map();
+  let changed = false;
+  for (const j of jobs) {
+    next.set(j.id, j.status);
+    if (!jobStates) continue;
+    if (!LIBRARY_JOB_KINDS.has(j.kind)) continue;
+    if (j.status === "done" && jobStates.get(j.id) !== "done") changed = true;
+  }
+  jobStates = next;
+  return changed;
+}
+
+let libChangeTimer = null;
+let libRefreshing = false;
+let libRefreshQueued = false;
+
+// afterLibraryChange coalesces job-completion events into one refresh; if a
+// refresh is in flight, one more is queued so a change is never dropped.
+function afterLibraryChange() {
+  clearTimeout(libChangeTimer);
+  libChangeTimer = setTimeout(runLibraryRefresh, 400);
+}
+
+async function runLibraryRefresh() {
+  if (libRefreshing) {
+    libRefreshQueued = true;
+    return;
+  }
+  libRefreshing = true;
+  try {
+    if (lastSearch) {
+      // keep the search results on screen; just refresh the cached docs so
+      // result titles stay current
+      const p = filterParams();
+      allDocs = await api("/api/documents" + (p.toString() ? "?" + p : ""));
+    } else {
+      await loadDocs();
+    }
+    await loadCategories();
+    await refresh();
+    refreshAllDocPages();
+    notice("Library updated", NOTICE_MID);
+  } catch (e) {
+    /* transient */
+  } finally {
+    libRefreshing = false;
+    if (libRefreshQueued) {
+      libRefreshQueued = false;
+      afterLibraryChange();
+    }
+  }
+}
+
 async function refreshJobs() {
   try {
     const data = await api("/api/jobs");
     const jobs = data.jobs || [];
+    const changed = libraryChangedByJobs(jobs);
     const active = jobs.filter((j) => j.status === "queued" || j.status === "running");
     $("#jobs-n").textContent = active.length ? String(active.length) : "";
     renderStatusbar(jobs, active);
+    if (changed) afterLibraryChange();
     if (!jobsOpen) return;
     const list = $("#jobs-list");
     list.replaceChildren();

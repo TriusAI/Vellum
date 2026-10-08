@@ -52,7 +52,7 @@ Commands:
   vocab list|add|remove|review|promote
                         manage the controlled tag vocabulary
   embed                 embed chunks lacking embeddings
-  watch [add|remove|clear|on|off|interval N|run]
+  watch [add|remove|clear|on|off|interval N|notify on|off|run]
                         filesystem watcher: auto-ingest + enrich new files
   serve [--listen ADDR] [--open]
                         local web UI + JSON API (default 127.0.0.1:8090)
@@ -64,7 +64,7 @@ file (FTS5). Models served locally by llama.cpp llama-server.
 `
 
 // versionString is reported by --version, /api/status and `vellum agent`.
-const versionString = "0.24.0"
+const versionString = "0.25.0"
 
 // documentColumns is the explicit projection used everywhere (never SELECT *,
 // so the scan order is fixed even if the schema gains columns).

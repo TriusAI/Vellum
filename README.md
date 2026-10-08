@@ -208,24 +208,33 @@ Point Vellum at a folder and, while `vellum serve` runs, a background
 watcher indexes new or changed files and runs the metadata pipeline in
 order: **ingest → kind → category → metadata (title/author/year) → tags
 → summary**. The summary comes last, so tags are derived from the
-document text rather than from a summary that does not exist yet. A file
-must hold the same size and mtime across two scans before it is picked
-up, so a half-written download is never indexed; "Scan now" (or `vellum
-watch run`) acts immediately. Enrichment needs the tag vocabulary and the
-chat backend — without them the files are still indexed and get enriched
-on a later scan.
+document text rather than from a summary that does not exist yet.
+
+Scans are **event-driven** by default (Linux inotify): a change in a
+watched folder schedules a scan, and the interval is a *minimum gap*
+between scans, so a burst of edits coalesces into one scan. Turning the
+change detection off — or running where inotify is unavailable — falls
+back to polling every interval seconds, where a file must also hold the
+same size and mtime across two scans before it is picked up. "Scan now"
+(or `vellum watch run`) acts immediately. Enrichment needs the tag
+vocabulary and the chat backend — without them the files are still
+indexed and get enriched on a later scan. When the watcher adds or
+updates documents, an open web UI refreshes itself automatically.
 
 ```bash
 vellum watch add ~/inbox ~/papers/new   # watch folders (enables the watcher)
 vellum watch                             # show settings + pending count
 vellum watch on | off                   # toggle the background watcher
-vellum watch interval 30                # seconds between scans (>= 2)
+vellum watch interval 5                 # min seconds between scans (>= 2)
+vellum watch notify on | off            # event-driven (inotify) vs polling
 vellum watch run                        # one-shot scan + enrich (cron-friendly)
 vellum watch remove ~/inbox
 vellum watch clear
 ```
 
-The web UI has the same controls in the top bar's **Watch…** dialog.
+The web UI has the same controls in the top bar's **Watch…** dialog —
+enable, change detection, minimum interval, a folder list with per-folder
+document/pending counts, a built-in folder browser, and **Scan now**.
 Each scan runs through the normal job queue, so it shows up in Jobs and
 can be cancelled.
 

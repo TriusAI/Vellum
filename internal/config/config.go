@@ -84,15 +84,18 @@ type Config struct {
 		Colors map[string]string `yaml:"colors,omitempty"`
 	} `yaml:"theme"`
 
-	// Watch is the filesystem watcher: while `vellum serve` runs it scans
-	// Dirs on a timer and runs the enrichment pipeline (ingest → kind →
-	// category → metadata → tags → summary) on new/changed files. Managed
-	// from the UI's Watch dialog or `vellum watch`. Presentation state
-	// only; an empty Dirs list disables it regardless of Enabled.
+	// Watch is the filesystem watcher: while `vellum serve` runs it watches
+	// Dirs and runs the enrichment pipeline (ingest → kind → category →
+	// metadata → tags → summary) on new/changed files. Managed from the
+	// UI's Watch dialog or `vellum watch`. Interval is the MINIMUM seconds
+	// between scans (a debounce floor, so a burst of changes coalesces into
+	// one scan); Notify selects event-driven watching (inotify) instead of
+	// periodic polling. An empty Dirs list disables it regardless of Enabled.
 	Watch struct {
 		Enabled  bool     `yaml:"enabled"`
 		Dirs     []string `yaml:"dirs,omitempty"`
-		Interval int      `yaml:"interval"` // seconds between scans (default 15)
+		Interval int      `yaml:"interval"` // min seconds between scans (default 5)
+		Notify   bool     `yaml:"notify"`   // event-driven (inotify) when true
 	} `yaml:"watch"`
 
 	Tools struct {
@@ -145,7 +148,8 @@ func Default() *Config {
 	c.Ask.Provider = "none"
 	c.Ask.Tools = true // let the ask model fetch external links by default
 	c.Theme.Preset = "light"
-	c.Watch.Interval = 15 // seconds between filesystem-watcher scans
+	c.Watch.Interval = 5  // min seconds between watcher scans (debounce)
+	c.Watch.Notify = true // event-driven (inotify) by default
 	c.Tools.LLMURL = "http://127.0.0.1:8081"
 	c.Tools.EmbedURL = "http://127.0.0.1:8082"
 	return c

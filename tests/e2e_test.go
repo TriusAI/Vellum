@@ -512,7 +512,13 @@ The rain began before the road did, and the field kept its own counsel.
 	}
 	arrival := filepath.Join(watchDir, "arrival.md")
 	if err := os.WriteFile(arrival, []byte(
-		"# Arrival\n\nA newly arrived essay on cryptography and applied epistemology.\n"),
+		"# Arrival\n\nA newly arrived essay on cryptography and applied epistemology. "+
+			"Cryptography is the discipline of assuming adversaries exist; good key "+
+			"management matters more than exotic ciphers. Log analysis, likewise, is a "+
+			"form of applied epistemology: it asks what the evidence actually supports, "+
+			"and it treats every log line as a claim that may or may not be true. The "+
+			"essay argues that engineers who know what they do not know build more "+
+			"trustworthy systems than those who assume their inputs are benign.\n"),
 		0o644); err != nil {
 		t.Fatal(err)
 	}
