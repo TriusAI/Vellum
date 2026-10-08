@@ -75,6 +75,11 @@ vellum serve  ────  HTTP :8090 (127.0.0.1)
 - `watch` (config.yaml) — the filesystem watcher's {enabled, dirs,
   interval (min gap), notify (event-driven)}; no DB state (seen/done
   stamps are in-memory, see §5).
+- `chat_sessions` / `chat_messages` — saved chatbots: a session is
+  confined to a scope (`scope_kind` document|tag|category|collection|
+  library, `scope_value` the id/name; '' for library), and its messages
+  cascade on delete. New tables (idempotent CREATE), like
+  notes/collections.
 
 ## 3. Schema rules (non-negotiable)
 
@@ -240,6 +245,20 @@ Fast paths by kind (`internal/classify` + `produceSummary` in ingest):
   (OpenAI-compatible AND Anthropic; Ollama-native ignores tools; ≤4
   rounds; honors HTTPS_PROXY; http(s) only, metadata hosts blocked).
   `{"tool":url}` SSE events; answers render light markdown in the UI.
+- chats: SAVED, scoped chatbots (`internal/api/chat.go` +
+  `internal/db` chat tables). A session is confined to one document, tag,
+  category subtree, collection, or the whole library. `internal/ask` is
+  provider-only now: `Stream(sys, msgs, tools, run)` takes generic
+  `ToolDef`/`Runner` (the API supplies scope-aware tools). Chat tools:
+  `search_library`, `get_document`, `open_document` (returns a UI
+  `Action` — the client opens the Preview page live), `regenerate_metadata`
+  (starts a normal `regenerate` job in the background), plus `fetch_url`.
+  SSE frames: `{"d"}`, `{"tool":name,"args"}`, `{"action":{...}}`,
+  `{"e"}`, `{"done"}`. REST: `GET/POST /api/chats`,
+  `GET/PATCH/DELETE /api/chats/{id}`, `POST /api/chats/{id}/messages`
+  (SSE). UI: a Chats manager + [Chat] pages, entry points on the Summary
+  page, [Tag]/[Collection] pages, shelf headers, and "New library chat";
+  deep link `?chat=ID`. `vellum chat list|show|new|rename|delete`.
 - settings: `GET/PUT /api/config` — live-applied + persisted to
   config.yaml; "Settings…" dialog in the top bar. (Starting/stopping the
   bundled llama-servers is launcher territory: rerun `./vellum.sh serve`.)
@@ -431,15 +450,24 @@ Docker: `pack/Dockerfile` + `docker-entrypoint.sh`; Hub is proxy-blocked
   (`fs.inotify.max_user_watches`), and there is no periodic safety scan
   while `notify` is on. Turn `notify` off for such trees (the polling
   fallback re-walks every interval).
+- Chats: library scope lists at most 80 documents in the system prompt
+  (the model is told to use search_library for the rest), and scope tool
+  actions are enforced in Go (a model cannot open/regenerate a document
+  outside its scope). `regenerate_metadata` is a BACKGROUND job (it needs
+  the pipeline backend and can take minutes); it does not block the chat.
+  Tool support requires an OpenAI-compatible or Anthropic provider — the
+  Ollama-native adapter ignores tools, so search/open/regenerate do nothing
+  there. Chat provider config is the same plaintext `ask:` block.
 
 ## 10. Where things state-wise
 
-- HEAD: v0.25.0 (`56a9d32`), all tests green (the LLM e2e included,
-  ephemeral CPU servers). Since 0.24.0: the watcher is event-driven by
-  default (recursive inotify; `watch.interval` is a MINIMUM gap between
-  scans) with a polling fallback (`notify:false`); the Watch dialog gained
-  controls, per-folder stats and a folder browser; and the UI
-  auto-refreshes when a background watch/ingest/process job finishes.
+- HEAD: v0.26.0 (`1498145`), all tests green. Since 0.25.0: SAVED scoped
+  chatbots — persisted sessions confined to a document/tag/category/
+  collection/library, with scope-aware tools (search, get, OPEN a
+  document's page in the UI, regenerate metadata) and a Chats manager.
+  `internal/ask` is provider-only (generic tools); the API supplies them.
+- v0.25.0: event-driven watcher (inotify + min-gap debounce, polling
+  fallback), richer Watch dialog, UI auto-refresh after background jobs.
 - v0.24.0: a filesystem watcher — while `serve` runs it auto-runs
   ingest → kind → category → metadata → tags → summary (summary LAST) on
   new/changed files under `watch.dirs`, through `ingest.Enrich`.
@@ -463,9 +491,9 @@ Docker: `pack/Dockerfile` + `docker-entrypoint.sh`; Hub is proxy-blocked
   pages; .item-list styling with hover affordance.
 - v0.17: COLLECTIONS; CSS-order page moves; bottom status bar.
 - v0.16: auto-filing learns from user corrections; flash-free updates.
-- Pack stage `pack/stage/vellum-56a9d32-linux-amd64/` (user's live
-  library inside) updated to the 0.25.0 binary; distributable tarball
-  `pack/vellum-56a9d32-linux-x86_64.tar.gz` (clean of the DB — verified
+- Pack stage `pack/stage/vellum-1498145-linux-amd64/` (user's live
+  library inside) updated to the 0.26.0 binary; distributable tarball
+  `pack/vellum-1498145-linux-x86_64.tar.gz` (clean of the DB — verified
   with tar -tzf | grep -c library.db = 0). NOTE: the user runs their OWN
   serve(s) and restarts them freely — an old one (PID 701, port 8097) is
   long-running; a newer one from the stage may appear (its exe shows
