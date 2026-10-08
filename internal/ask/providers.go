@@ -27,9 +27,9 @@ type wireMessage struct {
 	Content string `json:"content"`
 }
 
-// ---- tool plumbing (fetch_url / WebFetch) --------------------------------
+// ---- tool plumbing --------------------------------------------------------
 
-// fetchTool advertises the fetch_url function to tool-capable providers.
+// oaiTool is the OpenAI wire shape for a tool definition.
 type oaiTool struct {
 	Type     string `json:"type"`
 	Function struct {
@@ -39,41 +39,30 @@ type oaiTool struct {
 	} `json:"function"`
 }
 
-func fetchToolDef() oaiTool {
-	var t oaiTool
-	t.Type = "function"
-	t.Function.Name = "fetch_url"
-	t.Function.Description = "Fetch an http(s) URL and return its readable " +
-		"text. Use it to consult pages the user links to or that documents " +
-		"reference before answering."
-	t.Function.Parameters = map[string]any{
-		"type": "object",
-		"properties": map[string]any{
-			"url": map[string]any{"type": "string", "description": "absolute http(s) URL"},
-		},
-		"required": []string{"url"},
+func toOAITools(tools []ToolDef) []oaiTool {
+	out := make([]oaiTool, 0, len(tools))
+	for _, t := range tools {
+		var o oaiTool
+		o.Type = "function"
+		o.Function.Name = t.Name
+		o.Function.Description = t.Description
+		o.Function.Parameters = t.Parameters
+		out = append(out, o)
 	}
-	return t
+	return out
 }
 
-// runTool executes a requested tool call, returns the text to feed back to
-// the model, and reports activity (via out) for the UI.
-func (c Config) runTool(name, args string, out chan<- Delta) string {
-	if name != "fetch_url" {
-		return "error: unknown tool " + name
+// execTool announces the call to the UI, runs it, and emits any UI action.
+func execTool(out chan<- Delta, run Runner, id, name, args string) string {
+	out <- Delta{Tool: name, ToolArgs: args}
+	res := run(ToolCall{ID: id, Name: name, Args: args})
+	if res.Action != nil {
+		out <- Delta{Action: res.Action}
 	}
-	var a struct {
-		URL string `json:"url"`
+	if res.Content == "" {
+		return "(no result)"
 	}
-	if err := json.Unmarshal([]byte(args), &a); err != nil || a.URL == "" {
-		return "error: fetch_url requires a url argument"
-	}
-	out <- Delta{Tool: a.URL}
-	text, err := webFetch(a.URL)
-	if err != nil {
-		return "error fetching " + a.URL + ": " + err.Error()
-	}
-	return text
+	return res.Content
 }
 
 func (c Config) client() *http.Client {
@@ -151,7 +140,7 @@ type openaiStreamChunk struct {
 // request); it stops a model that keeps fetching forever.
 const maxToolRounds = 4
 
-func (c Config) streamOpenAI(sys string, msgs []Message) (<-chan Delta, error) {
+func (c Config) streamOpenAI(sys string, msgs []Message, tools []ToolDef, run Runner) (<-chan Delta, error) {
 	conv := []oaiMessage{{Role: "system", Content: sys}}
 	for _, m := range msgs {
 		conv = append(conv, oaiMessage{Role: m.Role, Content: m.Content})
@@ -160,7 +149,7 @@ func (c Config) streamOpenAI(sys string, msgs []Message) (<-chan Delta, error) {
 	go func() {
 		defer close(out)
 		for round := 0; round < maxToolRounds; round++ {
-			text, calls, err := c.openaiRound(out, conv)
+			text, calls, err := c.openaiRound(out, conv, tools)
 			if err != nil {
 				out <- Delta{Error: err.Error()}
 				return
@@ -171,7 +160,7 @@ func (c Config) streamOpenAI(sys string, msgs []Message) (<-chan Delta, error) {
 			// feed the assistant's tool calls + our results back in
 			conv = append(conv, oaiMessage{Role: "assistant", Content: text, ToolCalls: calls})
 			for _, tc := range calls {
-				result := c.runTool(tc.Function.Name, tc.Function.Arguments, out)
+				result := execTool(out, run, tc.ID, tc.Function.Name, tc.Function.Arguments)
 				conv = append(conv, oaiMessage{
 					Role: "tool", ToolCallID: tc.ID, Name: tc.Function.Name, Content: result})
 			}
@@ -183,12 +172,12 @@ func (c Config) streamOpenAI(sys string, msgs []Message) (<-chan Delta, error) {
 
 // openaiRound runs one streaming completion, forwarding text deltas to out
 // and returning the assistant text plus any tool calls it requested.
-func (c Config) openaiRound(out chan<- Delta, conv []oaiMessage) (string, []oaiToolCall, error) {
+func (c Config) openaiRound(out chan<- Delta, conv []oaiMessage, tools []ToolDef) (string, []oaiToolCall, error) {
 	reqBody := openaiStreamReq{
 		Model: c.Model, Messages: conv, Stream: true, MaxTokens: 4096,
 	}
-	if c.Tools {
-		reqBody.Tools = []oaiTool{fetchToolDef()}
+	if len(tools) > 0 {
+		reqBody.Tools = toOAITools(tools)
 		reqBody.ToolChoice = "auto"
 	}
 	payload, _ := json.Marshal(reqBody)
@@ -302,13 +291,13 @@ type anthropicTool struct {
 	InputSchema map[string]any `json:"input_schema"`
 }
 
-func anthropicFetchTool() anthropicTool {
-	f := fetchToolDef()
-	return anthropicTool{
-		Name:        f.Function.Name,
-		Description: f.Function.Description,
-		InputSchema: f.Function.Parameters,
+func toAnthropicTools(tools []ToolDef) []anthropicTool {
+	out := make([]anthropicTool, 0, len(tools))
+	for _, t := range tools {
+		out = append(out, anthropicTool{
+			Name: t.Name, Description: t.Description, InputSchema: t.Parameters})
 	}
+	return out
 }
 
 // anthropicCall is a tool_use accumulated from the stream.
@@ -316,7 +305,7 @@ type anthropicCall struct {
 	id, name, args string
 }
 
-func (c Config) streamAnthropic(sys string, msgs []Message) (<-chan Delta, error) {
+func (c Config) streamAnthropic(sys string, msgs []Message, tools []ToolDef, run Runner) (<-chan Delta, error) {
 	conv := []anthropicMsg{}
 	for _, m := range msgs {
 		role := m.Role
@@ -329,7 +318,7 @@ func (c Config) streamAnthropic(sys string, msgs []Message) (<-chan Delta, error
 	go func() {
 		defer close(out)
 		for round := 0; round < maxToolRounds; round++ {
-			text, calls, err := c.anthropicRound(out, sys, conv)
+			text, calls, err := c.anthropicRound(out, sys, conv, tools)
 			if err != nil {
 				out <- Delta{Error: err.Error()}
 				return
@@ -351,7 +340,7 @@ func (c Config) streamAnthropic(sys string, msgs []Message) (<-chan Delta, error
 			// user turn: the tool results
 			results := []anthropicBlock{}
 			for _, tc := range calls {
-				result := c.runTool(tc.name, tc.args, out)
+				result := execTool(out, run, tc.id, tc.name, tc.args)
 				results = append(results, anthropicBlock{
 					Type: "tool_result", ToolUseID: tc.id, Content: result})
 			}
@@ -371,13 +360,13 @@ func orEmptyObject(s string) string {
 
 // anthropicRound runs one streaming /v1/messages call, forwarding text
 // deltas to out and returning the assistant text + any tool_use blocks.
-func (c Config) anthropicRound(out chan<- Delta, sys string, conv []anthropicMsg) (string, []anthropicCall, error) {
+func (c Config) anthropicRound(out chan<- Delta, sys string, conv []anthropicMsg, tools []ToolDef) (string, []anthropicCall, error) {
 	reqBody := anthropicReq{
 		Model: c.Model, System: sys, Messages: conv,
 		MaxTokens: 4096, Stream: true,
 	}
-	if c.Tools {
-		reqBody.Tools = []anthropicTool{anthropicFetchTool()}
+	if len(tools) > 0 {
+		reqBody.Tools = toAnthropicTools(tools)
 	}
 	payload, _ := json.Marshal(reqBody)
 	req, err := http.NewRequest("POST", endpoint(c.baseURL(), "v1", "/messages"),

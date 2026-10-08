@@ -15,9 +15,9 @@ type Config struct {
 	Model    string `yaml:"model"`
 	APIKey   string `yaml:"api_key"`
 	BaseURL  string `yaml:"base_url"` // override; per-provider default
-	// Tools lets the chat model call tools — currently a fetch_url
-	// (WebFetch) tool so it can consult external links. Supported on
-	// OpenAI-compatible providers and Anthropic.
+	// Tools lets the chat model call tools — a fetch_url (WebFetch) tool,
+	// and (in the API's chat layer) library search / open / regenerate
+	// tools. Supported on OpenAI-compatible providers and Anthropic.
 	Tools bool `yaml:"tools"`
 }
 
@@ -27,12 +27,40 @@ type Message struct {
 	Content string `json:"content"`
 }
 
-// Delta is one streamed chunk; Error (nonzero) terminates the stream and
-// Tool (nonzero) reports a tool the model invoked (for a UI hint).
+// ToolDef describes one callable tool the chat model may use.
+type ToolDef struct {
+	Name        string         `json:"name"`
+	Description string         `json:"description"`
+	Parameters  map[string]any `json:"parameters"` // JSON Schema object
+}
+
+// ToolCall is a tool invocation requested by the model (Args is the raw JSON
+// object string).
+type ToolCall struct {
+	ID   string
+	Name string
+	Args string
+}
+
+// ToolResult is a tool's output (fed back to the model) plus an optional UI
+// action the client should perform (e.g. open a document's Preview page).
+type ToolResult struct {
+	Content string
+	Action  map[string]any
+}
+
+// Runner executes one tool call.
+type Runner func(ToolCall) ToolResult
+
+// Delta is one streamed chunk; Error (nonzero) terminates the stream. Tool /
+// ToolArgs report a tool the model invoked (for a UI hint); Action asks the
+// client to do something (e.g. open a page).
 type Delta struct {
-	Text  string
-	Tool  string
-	Error string
+	Text     string         `json:"text,omitempty"`
+	Tool     string         `json:"tool,omitempty"`
+	ToolArgs string         `json:"tool_args,omitempty"`
+	Action   map[string]any `json:"action,omitempty"`
+	Error    string         `json:"error,omitempty"`
 }
 
 // ErrDisabled marks a missing provider configuration.
@@ -70,28 +98,32 @@ func (c Config) baseURL() string {
 }
 
 // Stream dispatches on the provider and returns the normalized delta
-// channel (closed at completion or on a terminal error).
-func (c Config) Stream(sys string, msgs []Message) (<-chan Delta, error) {
+// channel (closed at completion or on a terminal error). tools/run enable
+// the tool-calling loop (ignored by the Ollama-native adapter, which has no
+// tools); pass nil, nil for a plain answer.
+func (c Config) Stream(sys string, msgs []Message, tools []ToolDef, run Runner) (<-chan Delta, error) {
+	if len(tools) == 0 || run == nil {
+		tools, run = nil, nil
+	}
 	switch c.Provider {
 	case "openai":
-		return c.streamOpenAI(sys, msgs)
+		return c.streamOpenAI(sys, msgs, tools, run)
 	case "anthropic":
-		return c.streamAnthropic(sys, msgs)
+		return c.streamAnthropic(sys, msgs, tools, run)
 	case "ollama":
 		return c.streamOllama(sys, msgs)
 	}
 	return nil, ErrDisabled
 }
 
-// Test runs a tiny streaming exchange to verify the configuration end
-// to end (used by the UI's connection check).
+// Test runs a tiny streaming exchange to verify the configuration end to
+// end (used by the UI's connection check).
 func (c Config) Test() error {
 	if !c.Enabled() {
 		return ErrDisabled
 	}
-	c.Tools = false // a plain exchange — tools would count as "no output"
 	deltas, err := c.Stream("You are a connection test.",
-		[]Message{{Role: "user", Content: "Reply with exactly: OK"}})
+		[]Message{{Role: "user", Content: "Reply with exactly: OK"}}, nil, nil)
 	if err != nil {
 		return err
 	}

@@ -47,6 +47,8 @@ Commands:
                         user-managed groups of documents (research projects)
   note list|add|show|delete
                         freeform scratchpad notes (ideas while reading)
+  chat list|show|new|rename|delete
+                        saved chatbot sessions (scoped conversations)
   export [PATH]        write a consistent snapshot of the library (backup)
   import PATH          replace the library with a backup (old kept aside)
   vocab list|add|remove|review|promote
@@ -64,7 +66,7 @@ file (FTS5). Models served locally by llama.cpp llama-server.
 `
 
 // versionString is reported by --version, /api/status and `vellum agent`.
-const versionString = "0.25.0"
+const versionString = "0.26.0"
 
 // documentColumns is the explicit projection used everywhere (never SELECT *,
 // so the scan order is fixed even if the schema gains columns).
@@ -164,6 +166,8 @@ func main() {
 		cmdCollection(cfg, args[1:])
 	case "note":
 		cmdNote(cfg, args[1:])
+	case "chat":
+		cmdChat(cfg, args[1:])
 	case "export":
 		cmdExport(cfg, args[1:])
 	case "import":

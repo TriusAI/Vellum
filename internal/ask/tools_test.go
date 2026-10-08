@@ -24,7 +24,7 @@ func TestWebFetch(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	text, err := webFetch(srv.URL)
+	text, err := WebFetch(srv.URL)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -35,7 +35,7 @@ func TestWebFetch(t *testing.T) {
 		t.Fatalf("script/style leaked into text: %q", text)
 	}
 	// scheme guard
-	if _, err := webFetch("file:///etc/passwd"); err == nil {
+	if _, err := WebFetch("file:///etc/passwd"); err == nil {
 		t.Fatal("non-http scheme must be refused")
 	}
 }
@@ -87,7 +87,9 @@ func TestAnthropicToolLoop(t *testing.T) {
 	defer srv.Close()
 
 	cfg := Config{Provider: "anthropic", Model: "test", BaseURL: srv.URL, Tools: true}
-	deltas, err := cfg.Stream("sys", []Message{{Role: "user", Content: "what does the link say?"}})
+	deltas, err := cfg.Stream("sys",
+		[]Message{{Role: "user", Content: "what does the link say?"}},
+		[]ToolDef{FetchToolDef()}, RunFetch)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -145,7 +147,9 @@ func TestOpenAIToolLoop(t *testing.T) {
 	defer srv.Close()
 
 	cfg := Config{Provider: "openai", Model: "test", BaseURL: srv.URL, Tools: true}
-	deltas, err := cfg.Stream("sys", []Message{{Role: "user", Content: "what does the link say?"}})
+	deltas, err := cfg.Stream("sys",
+		[]Message{{Role: "user", Content: "what does the link say?"}},
+		[]ToolDef{FetchToolDef()}, RunFetch)
 	if err != nil {
 		t.Fatal(err)
 	}

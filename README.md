@@ -116,16 +116,19 @@ vellum vocab promote marine-biology "Study of ocean life"   # adopt a suggested 
 vellum vocab add my-new-tag "what it covers"
 
 # 5. browse: local web UI. The main frame is a horizontal strip of
-#    pages: "All Documents" (the shelf tree, with per-shelf rename) plus
-#    one page per document view — [Summary], [Preview], [Text], [Ask].
-#    "Collections…" opens a Collections page for user-made research
+#    pages: "All Documents" (the shelf tree, with per-shelf rename and a
+#    chat button) plus one page per document view — [Summary], [Preview],
+#    [Text]. "Collections…" opens a Collections page for user-made research
 #    groups, each opening as its own [Collection] page; "Tags…" opens a
 #    tag cloud (each tag → a [Tag] page); "Notes…" is a scratchpad
-#    management page (each note → a single-textarea [Note] page).
+#    management page (each note → a single-textarea [Note] page);
+#    "Chats…" lists saved chatbot sessions (each → a [Chat] page, scoped
+#    to a document/tag/shelf/collection or the whole library).
 #    Settings → Theme switches palettes (light/dark/sepia/contrast) and
 #    lets you override individual colors.
 #    Pages are URL-addressable deep links (?doc=42&view=preview&page=7,
-#    ?tag=…, ?collection=…, ?note=…, ?q=…); the 🔗 button copies one.
+#    ?tag=…, ?collection=…, ?note=…, ?chat=…, ?q=…); the 🔗 button copies
+#    one.
 #    Pages can be re-ordered, drag-resized and expanded; search results
 #    show the matching snippet with a jump to the page; pending/error
 #    documents are marked in the list; long jobs get a cancel button in
@@ -264,18 +267,41 @@ talks to any of:
   `embed: {provider: ollama, "model": ...}`): tags stay grammar-bound
   via Ollama's structured outputs (same schema, same guarantee).
 
-## Ask an LLM (chat about an document)
-The detail pane has an "Ask an LLM" tab: a streaming chat served by an
-EXTERNAL provider of your choice — `ask: {provider: none|openai|
-anthropic|ollama, model, api_key, base_url, tools}` in config.yaml (openai =
-any OpenAI-compatible endpoint via `base_url`; editable + testable in
-the UI too). The chat sees that document's metadata, summary, and
-opening text. Tagging remains constrained by the pipeline backend
-regardless. Answers are formatted (light markdown: code, bold/italic,
-lists, links). With `ask.tools: true` (default), the model may fetch
-external links the question or document references (a small local
-WebFetch tool; OpenAI-compatible providers and Anthropic); each fetch is
-shown while it runs.
+## Chats (saved, scoped)
+
+The chat is a saved conversation, not a throwaway panel. Every session is
+confined to a scope: one **document**, a **tag**, a **category** (shelf)
+subtree, a **collection**, or the whole **library**. Open the manager with
+**Chats…** in the top bar (rename, delete, reopen, start a library chat),
+or start a scoped one from a document's Summary page, a `[Tag]` /
+`[Collection]` page, or a shelf header. Sessions are URL-addressable
+(`?chat=42`).
+
+The chat model is an EXTERNAL provider you configure — `ask: {provider:
+none|openai|anthropic|ollama, model, api_key, base_url, tools}` (editable
+and testable in the chat panel). On tool-capable providers
+(OpenAI-compatible and Anthropic) the model can:
+
+- **search the library** (`search_library`) inside the scope and read a
+  document (`get_document`);
+- **open a document for you** (`open_document`): after confirming the
+  match, the document's **Preview** page opens live in the UI;
+- **regenerate metadata** (`regenerate_metadata`): start a background job
+  that rebuilds a document's summary / tags / category / metadata / kind
+  (uses the pipeline backend, appears in Jobs);
+- fetch external links it references (`fetch_url`, with `ask.tools`).
+
+The Ollama-native adapter has no tool support, so library actions need an
+OpenAI-compatible or Anthropic provider. Tagging in the pipeline stays
+grammar-constrained regardless of the chat provider.
+
+```bash
+vellum chat list
+vellum chat show 3
+vellum chat new --library            # or --document ID / --tag T / --category C / --collection ID
+vellum chat rename 3 "thesis reading"
+vellum chat delete 3
+```
 
 ## Configuration
 

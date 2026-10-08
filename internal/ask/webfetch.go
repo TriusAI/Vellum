@@ -1,6 +1,7 @@
 package ask
 
 import (
+	"encoding/json"
 	"fmt"
 	"html"
 	"io"
@@ -31,9 +32,43 @@ var (
 	fetchLine   = regexp.MustCompile(` *\n *`)
 )
 
-// webFetch downloads an http(s) URL and returns readable text. Link-local
-// metadata addresses and non-http(s) schemes are refused.
-func webFetch(raw string) (string, error) {
+// FetchToolDef is the fetch_url tool definition.
+func FetchToolDef() ToolDef {
+	return ToolDef{
+		Name: "fetch_url",
+		Description: "Fetch an http(s) URL and return its readable text. " +
+			"Use it to consult pages the user links to or that documents " +
+			"reference before answering.",
+		Parameters: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"url": map[string]any{"type": "string", "description": "absolute http(s) URL"},
+			},
+			"required": []string{"url"},
+		},
+	}
+}
+
+// RunFetch is the Runner for the fetch_url tool.
+func RunFetch(call ToolCall) ToolResult {
+	if call.Name != "fetch_url" {
+		return ToolResult{Content: "error: unknown tool " + call.Name}
+	}
+	var a struct {
+		URL string `json:"url"`
+	}
+	if err := json.Unmarshal([]byte(call.Args), &a); err != nil || a.URL == "" {
+		return ToolResult{Content: "error: fetch_url requires a url argument"}
+	}
+	text, err := WebFetch(a.URL)
+	if err != nil {
+		return ToolResult{Content: "error fetching " + a.URL + ": " + err.Error()}
+	}
+	return ToolResult{Content: text}
+}
+
+// WebFetch downloads an http(s) URL and returns readable text.
+func WebFetch(raw string) (string, error) {
 	u, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil {
 		return "", fmt.Errorf("bad url: %w", err)

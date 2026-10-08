@@ -69,19 +69,20 @@ const PAGE_KINDS = {
   tag:         { label: "Tag" },
   notes:       { label: null },
   note:        { label: "Note" },
+  chats:       { label: null },
+  chat:        { label: "Chat" },
   summary:     { label: "Summary" },
   preview:     { label: "Preview" },
   text:        { label: "Text" },
-  ask:         { label: "Ask" },
 };
 
 let pages = [];        // ordered: the strip order IS the array order
 let activePage = null; // last-interacted page (Esc closes it)
 
-// library, collections, tags and notes are singletons (no per-item id).
+// library, collections, tags, notes and chats are singletons (no per-item id).
 const SINGLETON_PAGES = {
   library: "library", collections: "collections",
-  tags: "tags", notes: "notes",
+  tags: "tags", notes: "notes", chats: "chats",
 };
 const isSingleton = (kind) => kind in SINGLETON_PAGES;
 const pageKey = (kind, docId) =>
@@ -133,6 +134,37 @@ function openTagPage(name) {
 // openNotePage opens the scratchpad for a note id.
 const openNotePage = (id) => openPage("note", id);
 
+// openChatPage opens (or focuses) a saved chat session page.
+function openChatPage(id) {
+  const key = "chat:" + id;
+  let page = pages.find((p) => p.key === key);
+  if (!page) {
+    page = { key, kind: "chat", docId: id, data: null, token: 0,
+      width: 460, expanded: false };
+    pages.push(page);
+    buildPageChrome(page);
+    $("#pages").append(page.el);
+    syncPageOrder();
+  }
+  markActive(page);
+  page.el.scrollIntoView({ block: "nearest", inline: "nearest" });
+  refreshPage(page);
+  return page;
+}
+
+// openScopeChat finds (or creates) a session for a scope and opens it.
+async function openScopeChat(kind, value) {
+  try {
+    const sess = await api("/api/chats", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ scope_kind: kind, scope_value: value || "", reuse: true }),
+    });
+    return openChatPage(sess.id);
+  } catch (e) { notice("chat: " + e.message); }
+}
+
+const openDocChat = (docId) => openScopeChat("document", String(docId));
+
 /* ------------------------------------------------------- deep links (URL) */
 
 // The active page is mirrored into the URL as query parameters, so any view
@@ -158,16 +190,17 @@ function pageQuery(page) {
     case "collections": q.set("view", "collections"); break;
     case "tags":        q.set("view", "tags"); break;
     case "notes":       q.set("view", "notes"); break;
+    case "chats":       q.set("view", "chats"); break;
     case "collection":  q.set("collection", page.docId); break;
     case "tag":         q.set("tag", page.tag); break;
     case "note":        q.set("note", page.docId); break;
+    case "chat":        q.set("chat", page.docId); break;
     case "summary":     q.set("doc", page.docId); break;
     case "preview":
       q.set("doc", page.docId); q.set("view", "preview");
       if (page.pageNo) q.set("page", page.pageNo);
       break;
     case "text": q.set("doc", page.docId); q.set("view", "text"); break;
-    case "ask":  q.set("doc", page.docId); q.set("view", "ask"); break;
   }
   return q.toString();
 }
@@ -228,6 +261,12 @@ function updatePageTitle(page) {
   if (page.kind === "collections") { page.titleEl.textContent = "Collections"; return; }
   if (page.kind === "tags") { page.titleEl.textContent = "Tags"; return; }
   if (page.kind === "notes") { page.titleEl.textContent = "Notes"; return; }
+  if (page.kind === "chats") { page.titleEl.textContent = "Chats"; return; }
+  if (page.kind === "chat") {
+    const s = page.data?.session;
+    page.titleEl.textContent = "[Chat] " + ((s && s.title) || ("#" + page.docId));
+    return;
+  }
   if (page.kind === "tag") { page.titleEl.textContent = "[Tag] " + page.tag; return; }
   if (page.kind === "note") {
     page.titleEl.textContent = "[Note] " + noteTitle(page.data);
@@ -304,9 +343,10 @@ function closePage(page) {
 }
 
 // DOC_PAGE_KINDS are the per-document views (their page.docId is a
-// document id). Collection pages reuse docId for the collection id, so
-// anything keyed by document id must filter on kind.
-const DOC_PAGE_KINDS = { summary: 1, preview: 1, text: 1, ask: 1 };
+// document id). Collection pages reuse docId for the collection id, and chat
+// pages reuse it for the session id, so anything keyed by document id must
+// filter on kind.
+const DOC_PAGE_KINDS = { summary: 1, preview: 1, text: 1 };
 const isDocPage = (p) => p.kind in DOC_PAGE_KINDS;
 
 function closeDocPages(docId) {
@@ -330,20 +370,21 @@ async function refreshPage(page) {
   if (!page.data)
     page.content.replaceChildren(el("div", { class: "hint" }, "loading…"));
   try {
-    // the Ask page's provider config lives server-side (Settings writes it
-    // too) — reload it here so the panel is never stale
-    if (page.kind === "ask") await loadAskConfig();
+    // the chat page's provider editor comes from the ask config
+    if (page.kind === "chat") await loadAskConfig();
     const data = page.kind === "collections" ? await api("/api/collections")
       : page.kind === "collection" ? await api(`/api/collections/${page.docId}`)
       : page.kind === "tags" ? await api("/api/tags")
       : page.kind === "tag" ? await api("/api/tags/" + encodeURIComponent(page.tag))
       : page.kind === "notes" ? await api("/api/notes")
       : page.kind === "note" ? await api(`/api/notes/${page.docId}`)
+      : page.kind === "chats" ? await api("/api/chats")
+      : page.kind === "chat" ? await api(`/api/chats/${page.docId}`)
       : await api(`/api/documents/${page.docId}`);
     if (token !== page.token) return; // a newer refresh won
-    // the Ask page's content depends on askConfig, not just the document,
-    // so it is never short-circuited by an unchanged document
-    const unchanged = page.kind !== "ask" &&
+    // the chat page also depends on askConfig, so it re-renders even when
+    // the stored messages did not change
+    const unchanged = page.kind !== "chat" &&
       page.data && JSON.stringify(data) === JSON.stringify(page.data);
     page.data = data;
     updatePageTitle(page);
@@ -363,10 +404,10 @@ function refreshDocPages(docId) {
     if (isDocPage(p) && p.docId === docId) refreshPage(p);
 }
 
-// refreshAskPages re-renders open Ask pages (after the provider config
-// changed in Settings) — each reloads the config and re-evaluates Send.
-function refreshAskPages() {
-  for (const p of pages) if (p.kind === "ask") refreshPage(p);
+// refreshChatPages re-renders open chat pages (after the provider config
+// changed in Settings).
+function refreshChatPages() {
+  for (const p of pages) if (p.kind === "chat") refreshPage(p);
 }
 
 function refreshAllDocPages() {
@@ -389,10 +430,11 @@ function renderPageContent(page) {
     case "tag":         page.content.replaceChildren(tagContent(page)); break;
     case "notes":       page.content.replaceChildren(notesContent(page)); break;
     case "note":        page.content.replaceChildren(noteContent(page)); break;
+    case "chats":       page.content.replaceChildren(chatsContent(page)); break;
+    case "chat":        page.content.replaceChildren(chatContent(page)); break;
     case "summary": page.content.replaceChildren(summaryContent(page)); break;
     case "preview": page.content.replaceChildren(previewContent(page)); break;
     case "text":    page.content.replaceChildren(textContent(page)); break;
-    case "ask":     page.content.replaceChildren(askPanel(page)); break;
   }
 }
 
@@ -529,6 +571,11 @@ function renderTree(container, docs, opts = {}) {
       title: "rename this shelf (the whole subtree moves with it)",
       onclick: (ev) => { ev.stopPropagation(); ev.preventDefault(); opts.onCategoryRename(path); },
     }, "✎"));
+    if (!plain) sum.append(el("button", {
+      class: "mini plain",
+      title: "chat about this shelf",
+      onclick: (ev) => { ev.stopPropagation(); ev.preventDefault(); openScopeChat("category", path); },
+    }, "💬"));
     const det = el("details", { class: "group" + (plain ? " group-plain" : ""), open: true },
       sum, ul);
     det.dataset.path = path;
@@ -647,6 +694,7 @@ function collectionContent(page) {
   const wrap = el("div");
   if (c.description) wrap.append(el("p", { class: "hint" }, esc(c.description)));
   wrap.append(el("div", { class: "row" },
+    el("button", { class: "small", onclick: () => openScopeChat("collection", String(page.docId)) }, "Chat"),
     el("button", { class: "small", onclick: () => openAddDocsPicker(page) }, "Add documents…"),
     el("button", { class: "small plain", onclick: () => {
       window.location.href = `/api/collections/${page.docId}/export`;
@@ -808,6 +856,8 @@ function tagContent(page) {
   const wrap = el("div");
   if (data.description) wrap.append(el("p", { class: "hint" }, esc(data.description)));
   wrap.append(el("div", { class: "row" },
+    el("button", { class: "small", onclick: () => openScopeChat("tag", page.tag) },
+      "Chat about this tag"),
     el("span", { class: "hint" }, `${docs.length} document(s)`)));
   if (!docs.length) {
     wrap.append(el("p", { class: "hint" }, "No documents carry this tag."));
@@ -1046,7 +1096,6 @@ async function processIds(ids) {
 /* ask panel: chat with an external LLM about this document */
 
 let askConfig = null;
-const askHistory = {};
 
 // renderInline renders a line's inline markdown (code, bold, italic,
 // links, bare URLs) into DOM nodes — no innerHTML, so model output can
@@ -1123,22 +1172,22 @@ function renderMarkdown(text) {
 }
 
 // loadAskConfig (re)reads the ask provider config. The server is the
-// source of truth (Settings and the Ask page both write it), so the Ask
-// page reloads it on every render instead of trusting a stale cache.
+// source of truth (Settings and chat pages both write it), so chat pages
+// reload it on every render instead of trusting a stale cache.
 async function loadAskConfig() {
   try { askConfig = await api("/api/ask/config"); }
   catch (e) { askConfig = { enabled: false, provider: "none" }; }
   return askConfig;
 }
 
-function askPanel(page) {
-  const id = page.docId;
-  const wrap = el("div", { class: "ask-panel" });
+// askConfigBox is the shared provider editor (collapsible) shown in chat
+// pages. Saving re-reads the config and re-renders open chat pages.
+function askConfigBox(page) {
   if (!askConfig) askConfig = { enabled: false, provider: "none" };
   const cfgBox = el("details", { class: "ask-cfg" },
     el("summary", {},
-      "LLM: " + (askConfig.enabled ? `${askConfig.provider} / ${askConfig.model || "(model)"}` 
-      : "not configured — configure to use"))); 
+      "LLM: " + (askConfig.enabled ? `${askConfig.provider} / ${askConfig.model || "(model)"}`
+      : "not configured — configure to chat")));
   const sel = el("select", {},
     ...["none", "openai", "anthropic", "ollama"].map((p) =>
       el("option", { value: p }, p === "openai" ? "openai (or compatible endpoint)" : p)));
@@ -1178,9 +1227,8 @@ function askPanel(page) {
               ...(inKey.value ? { api_key: inKey.value } : {}),
               base_url: inBase.value, tools: inTools.checked }),
           });
-          // re-render: reloads the config and re-evaluates Send's disabled
-          // state (saving previously left Send disabled)
-          refreshPage(page);
+          await loadAskConfig();
+          refreshChatPages();
         } catch (e) { cfgMsg.textContent = "save failed: " + e.message; }
       },
       style: "margin-left: .4rem",
@@ -1192,25 +1240,146 @@ function askPanel(page) {
     el("label", {}, "api key"), inKey,
     el("label", {}, "base url (openai-compatible override)"), inBase,
     el("label", { class: "ask-check" }, inTools,
-      " tools: let the model fetch external links (WebFetch)"),
+      " tools: library search / open + WebFetch"),
     cfgRow));
-  wrap.append(cfgBox);
+  return cfgBox;
+}
 
-  // transcript (session-local: the chat is not stored) — restored from
-  // askHistory when the page re-renders, so switching pages does not
-  // blank the conversation
-  const log = el("div", { class: "ask-log" });
-  const hist = askHistory[id] || [];
-  for (let i = 0; i < hist.length; i += 2) {
-    const turn = el("div", { class: "ask-turn" },
-      el("div", { class: "q" }, esc(hist[i].content)));
-    if (hist[i + 1]) turn.append(el("div", { class: "a" }, renderMarkdown(hist[i + 1].content)));
+const CHAT_SCOPE_LABELS = {
+  library: "library", document: "document", tag: "tag",
+  category: "shelf", collection: "collection",
+};
+
+// chatsContent is the sessions manager: every saved chatbot, newest first.
+function chatsContent(page) {
+  const chats = page.data || [];
+  const wrap = el("div");
+  wrap.append(el("div", { class: "row" },
+    el("button", { onclick: () => openScopeChat("library", "") }, "New library chat"),
+    el("span", { class: "hint" },
+      "saved chat sessions, scoped to a document, tag, shelf, collection, or the whole library")));
+  if (!chats.length) {
+    wrap.append(el("p", { class: "hint" },
+      "No chats yet. Start one here, or from a document / tag / shelf / collection."));
+    return wrap;
+  }
+  const ul = el("ul", { class: "cat-items" });
+  for (const c of chats) {
+    const row = el("li", { class: "item hit", onclick: () => openChatPage(c.id) },
+      el("span", { class: "item-title" }, esc(c.title || ("Chat #" + c.id))),
+      el("div", { class: "chips" },
+        el("span", { class: "chip sug", title: c.scope_kind + " " + c.scope_value },
+          CHAT_SCOPE_LABELS[c.scope_kind] || c.scope_kind),
+        el("span", { class: "chip" }, `${c.messages || 0} msg`),
+        c.updated_at ? el("span", { class: "chip" }, "updated " + c.updated_at.slice(0, 16).replace("T", " ")) : null,
+        el("button", { class: "mini plain", title: "rename",
+          onclick: (ev) => { ev.stopPropagation(); renameChat(c); } }, "✎"),
+        el("button", { class: "mini plain", title: "delete",
+          onclick: (ev) => { ev.stopPropagation(); deleteChatSession(c); } }, "✕")));
+    ul.append(row);
+  }
+  const box = el("div", { class: "item-list" });
+  box.append(el("details", { class: "group", open: true },
+    el("summary", {}, "all chats", el("span", { class: "count" }, String(chats.length))), ul));
+  wrap.append(box);
+  return wrap;
+}
+
+function refreshChatsRoot() {
+  for (const p of pages) if (p.kind === "chats") refreshPage(p);
+}
+
+function renameChat(c) {
+  const name = prompt("Rename this chat:", c.title || "");
+  if (name === null) return;
+  api(`/api/chats/${c.id}`, {
+    method: "PATCH", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ title: name }),
+  }).then(() => {
+    refreshChatsRoot();
+    for (const p of pages)
+      if (p.kind === "chat" && p.docId === c.id && p.data) {
+        p.data.session.title = name;
+        updatePageTitle(p);
+      }
+  }).catch((e) => notice("chat: " + e.message));
+}
+
+function deleteChatSession(c) {
+  if (!confirm(`Delete "${c.title || ("Chat #" + c.id)}" and its messages?`)) return;
+  api(`/api/chats/${c.id}`, { method: "DELETE" }).then(() => {
+    for (const p of [...pages])
+      if (p.kind === "chat" && p.docId === c.id) closePage(p);
+    refreshChatsRoot();
+    notice("Chat deleted.", NOTICE_MID);
+  }).catch((e) => notice("chat: " + e.message));
+}
+
+// chatToolChips renders the tools a saved assistant turn used.
+function chatToolChips(toolLog) {
+  let tools = [];
+  try { tools = JSON.parse(toolLog || "[]"); } catch (_) { tools = []; }
+  if (!tools.length) return null;
+  const chips = el("div", { class: "chips chat-tools" });
+  for (const t of tools)
+    chips.append(el("span", { class: "chip tool", title: t.args || "" }, "🔧 " + t.name));
+  return chips;
+}
+
+// chatAction performs a UI action the model requested through a tool
+// (e.g. open a document's page after it confirmed the match).
+function chatAction(a) {
+  if (!a || a.kind !== "open") return;
+  const id = Number(a.doc_id) || 0;
+  if (!id) return;
+  const view = a.view || "preview";
+  if (view === "summary") openPage("summary", id);
+  else if (view === "text") openPage("text", id);
+  else openPage("preview", id, { page: Number(a.page) || 0 });
+  notice("Opened " + (a.title ? `“${a.title}”` : ("#" + id)) + " (" + view + ")", NOTICE_MID);
+}
+
+// chatContent is a saved, scoped conversation.
+function chatContent(page) {
+  const data = page.data || {};
+  const sess = data.session || { id: page.docId, title: "", scope_kind: "library" };
+  const wrap = el("div", { class: "chat-panel" });
+
+  const newSameScope = async () => {
+    try {
+      const s = await api("/api/chats", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ scope_kind: sess.scope_kind, scope_value: sess.scope_value }),
+      });
+      openChatPage(s.id);
+    } catch (e) { notice("chat: " + e.message); }
+  };
+  wrap.append(el("div", { class: "row chat-head" },
+    el("span", { class: "hint" }, "scope: " + (data.scope_label || sess.scope_kind)),
+    el("span", { style: "flex:1" }),
+    el("button", { class: "small plain", title: "start a new chat with the same scope", onclick: newSameScope }, "New"),
+    el("button", { class: "small plain", onclick: () => openPage("chats") }, "Chats…")));
+  wrap.append(askConfigBox(page));
+
+  const log = el("div", { class: "ask-log chat-log" });
+  for (const m of data.messages || []) {
+    const turn = el("div", { class: "ask-turn" });
+    if (m.role === "user") {
+      turn.append(el("div", { class: "q" }, esc(m.content)));
+    } else {
+      const answer = el("div", { class: "a" });
+      const chips = chatToolChips(m.tool_log);
+      if (chips) answer.append(chips);
+      answer.append(renderMarkdown(m.content || ""));
+      turn.append(answer);
+    }
     log.append(turn);
   }
-  const input = el("textarea", { rows: 2, placeholder: "ask about this document…" });
+  const scrollDown = () => { log.scrollTop = log.scrollHeight; };
+
+  const input = el("textarea", { rows: 2, placeholder: "ask… (Enter to send, Shift+Enter for a newline)" });
   let busy = false;
   const sendBtn = el("button", { onclick: send, disabled: !askConfig?.enabled }, "Send");
-  // while a reply streams, Send shows a clearly disabled (gray) state
   const setBusy = (b) => {
     busy = b;
     sendBtn.disabled = b || !askConfig?.enabled;
@@ -1222,27 +1391,24 @@ function askPanel(page) {
     if (!q || busy) return;
     input.value = "";
     setBusy(true);
-    const turn = el("div", { class: "ask-turn" }, el("div", { class: "q" }, esc(q)),
-      el("div", { class: "a" }));
+    const turn = el("div", { class: "ask-turn" },
+      el("div", { class: "q" }, esc(q)));
+    const answer = el("div", { class: "a" });
+    const chips = el("div", { class: "chips chat-tools" });
+    answer.append(chips);
+    turn.append(answer);
     log.append(turn);
-    const answer = turn.querySelector(".a");
+    scrollDown();
     try {
-      const res = await fetch(`/api/documents/${id}/ask`, {
+      const res = await fetch(`/api/chats/${sess.id}/messages`, {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ messages: [...askHistory[id] || [],
-          { role: "user", content: q }] }),
+        body: JSON.stringify({ content: q }),
       });
       if (!res.ok || !res.body) {
-        // the server puts the real reason in {"error": "..."} (an upstream
-        // provider failure, a missing config, …) — show it, not "Bad Request"
         let msg = res.statusText;
-        try {
-          const j = await res.json();
-          if (j && j.error) msg = j.error;
-        } catch (_) { /* non-JSON body */ }
+        try { const j = await res.json(); if (j && j.error) msg = j.error; } catch (_) {}
         throw new Error(msg);
       }
-      askHistory[id] = [...(askHistory[id] || []), { role: "user", content: q }];
       let acc = "";
       const reader = res.body.getReader();
       const dec = new TextDecoder();
@@ -1254,30 +1420,43 @@ function askPanel(page) {
         for (let nl; (nl = buf.indexOf("\n\n")) >= 0; buf = buf.slice(nl + 2)) {
           const frame = buf.slice(0, nl);
           if (!frame.startsWith("data:")) continue;
-          const payload = JSON.parse(frame.slice(5).trim());
+          let payload;
+          try { payload = JSON.parse(frame.slice(5).trim()); } catch (_) { continue; }
           if (payload.e) { acc += (acc ? "\n" : "") + "⚠ " + payload.e; }
-          else if (payload.tool) notice("Fetching " + payload.tool + "…", NOTICE_MID);
-          else if (payload.d) acc += payload.d;
+          else if (payload.tool) {
+            chips.append(el("span", { class: "chip tool", title: payload.args || "" },
+              "🔧 " + payload.tool));
+            notice("Running " + payload.tool + "…", NOTICE_MID);
+          } else if (payload.action) {
+            chatAction(payload.action);
+          } else if (payload.d) {
+            acc += payload.d;
+          }
         }
-        answer.replaceChildren(renderMarkdown(acc || "…"));
+        answer.replaceChildren(chips, renderMarkdown(acc || "…"));
+        scrollDown();
       }
-      answer.replaceChildren(renderMarkdown(acc || "(empty answer)"));
-      askHistory[id].push({ role: "assistant", content: acc });
+      answer.replaceChildren(chips, renderMarkdown(acc || "(empty answer)"));
+      scrollDown();
+      // refresh the title / list (the server auto-titles a fresh session)
+      try {
+        const fresh = await api(`/api/chats/${sess.id}`);
+        page.data = fresh;
+        updatePageTitle(page);
+      } catch (_) {}
+      refreshChatsRoot();
     } catch (e) {
-      answer.textContent = "error: " + e.message;
+      answer.replaceChildren(chips, el("span", { class: "hint" }, "error: " + e.message));
     }
     setBusy(false);
   }
   input.addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey && !busy) { e.preventDefault(); send(); }
   });
-  wrap.append(log, el("div", { class: "row" }, input, sendBtn,
-    hist.length ? el("button", { class: "plain", onclick: () => {
-      delete askHistory[id];
-      refreshPage(page);
-    } }, "clear chat") : null));
+  wrap.append(log, el("div", { class: "row" }, input, sendBtn));
   wrap.append(el("p", { class: "hint" },
-    "The model sees the metadata, summary, and opening text of this document. This chat is session-local."));
+    "Saved sessions. On tool-capable providers the model can search the library, " +
+    "open a document for you, and regenerate metadata."));
   return wrap;
 }
 
@@ -1406,7 +1585,7 @@ function summaryContent(page) {
     el("span", { class: "hint" }, "open page:"),
     el("button", { class: "small", onclick: () => openPage("preview", id) }, "Preview"),
     el("button", { class: "small", onclick: () => openPage("text", id) }, "Text"),
-    el("button", { class: "small", onclick: () => openPage("ask", id) }, "Ask an LLM")));
+    el("button", { class: "small", onclick: () => openDocChat(id) }, "Chat")));
 
   const cover = hasCover(d.path) ? el("img", {
     class: "cover", src: `/api/documents/${id}/cover`,
@@ -2155,6 +2334,7 @@ $("#btn-collections").onclick = () => openPage("collections");
 $("#btn-all-docs").onclick = () => openPage("library");
 $("#btn-tags").onclick = () => openPage("tags");
 $("#btn-notes").onclick = () => openPage("notes");
+$("#btn-chats").onclick = () => openPage("chats");
 
 /* ------------------------------------------------------------------ vocab */
 
@@ -2254,7 +2434,7 @@ function openFromURL() {
       const pageNo = Number(p.get("page")) || 0;
       if (view === "preview" || pageNo) openPage("preview", id, { page: pageNo });
       else if (view === "text") openPage("text", id);
-      else if (view === "ask") openPage("ask", id);
+      else if (view === "ask") { openDocChat(id); return "page"; }
       else openPage("summary", id);
       return "page";
     }
@@ -2262,10 +2442,12 @@ function openFromURL() {
   if (p.get("tag")) { openTagPage(p.get("tag")); return "page"; }
   if (p.get("collection")) { const id = Number(p.get("collection")); if (id > 0) { openPage("collection", id); return "page"; } }
   if (p.get("note")) { const id = Number(p.get("note")); if (id > 0) { openPage("note", id); return "page"; } }
+  if (p.get("chat")) { const id = Number(p.get("chat")); if (id > 0) { openChatPage(id); return "page"; } }
   const view = p.get("view");
   if (view === "tags") { openPage("tags"); return "page"; }
   if (view === "notes") { openPage("notes"); return "page"; }
   if (view === "collections") { openPage("collections"); return "page"; }
+  if (view === "chats") { openPage("chats"); return "page"; }
   return "";
 }
 
@@ -2273,7 +2455,7 @@ function openFromURL() {
   try {
     const target = openFromURL();
     if (!target) openPage("library");
-    // the ask provider config is loaded lazily when an Ask page renders
+    // the ask provider config is loaded lazily when a chat page renders
     // (refreshPage → loadAskConfig); no boot-time cache to go stale.
     // apply the saved theme (presentation comes from config.yaml)
     try { const cc = await api("/api/config"); applyTheme(cc.theme); } catch (e) { /* default */ }
@@ -2514,8 +2696,8 @@ $("#settings-save").onclick = async () => {
       body: JSON.stringify(payload),
     });
     applyTheme(payload.theme);
-    askConfig = null; // re-read on the next Ask render
-    refreshAskPages(); // Settings and the Ask page share this config
+    askConfig = null; // re-read on the next chat render
+    refreshChatPages(); // Settings and chat pages share this config
     $("#settings-msg").textContent = "saved + applied ✓";
     await refresh();
   } catch (e) { $("#settings-msg").textContent = "save failed: " + e.message; }

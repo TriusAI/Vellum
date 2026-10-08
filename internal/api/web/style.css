@@ -384,3 +384,11 @@ button.mini { font-size: .72rem; padding: 0 .45rem; }
   word-break: break-all; max-height: 2.6em; overflow: hidden; }
 #watch-fs-list { height: 12rem; overflow-y: auto; border: 1px solid var(--line); }
 #watch-fs-list p { margin: 0; }
+
+/* chat pages + sessions manager */
+.chat-panel textarea { width: 100%; resize: vertical; }
+.chat-panel .chat-log { max-height: 55vh; overflow-y: auto;
+  padding-right: .2rem; border-bottom: 1px solid var(--line); margin-bottom: .5rem; }
+.chat-head { gap: .4rem; }
+.chips.chat-tools { margin: 0 0 .35rem; }
+.chip.tool { background: var(--chip-sug); cursor: default; }

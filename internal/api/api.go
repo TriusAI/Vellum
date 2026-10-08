@@ -284,6 +284,12 @@ func (s *Server) Mux() http.Handler {
 	mux.HandleFunc("GET /api/notes/{id}", s.getNote)
 	mux.HandleFunc("PATCH /api/notes/{id}", s.patchNote)
 	mux.HandleFunc("DELETE /api/notes/{id}", s.deleteNote)
+	mux.HandleFunc("GET /api/chats", s.listChats)
+	mux.HandleFunc("POST /api/chats", s.createChat)
+	mux.HandleFunc("GET /api/chats/{id}", s.getChat)
+	mux.HandleFunc("PATCH /api/chats/{id}", s.patchChat)
+	mux.HandleFunc("DELETE /api/chats/{id}", s.deleteChat)
+	mux.HandleFunc("POST /api/chats/{id}/messages", s.postChatMessage)
 
 	sub, _ := fs.Sub(webFS, "web")
 	mux.Handle("/", http.FileServer(http.FS(sub)))
@@ -2017,12 +2023,16 @@ func (s *Server) postAsk(w http.ResponseWriter, r *http.Request) {
 		out = ask.Config{Provider: body.Provider, Model: body.Model,
 			APIKey: body.APIKey, BaseURL: body.BaseURL, Tools: s.cfg.Ask.Tools}
 	}
-	// only tool-capable providers implement the fetch loop
+	// only tool-capable providers implement the tool loop
+	var tools []ask.ToolDef
+	var runner ask.Runner
 	if out.Tools && (out.Provider == "openai" || out.Provider == "anthropic") {
+		tools = []ask.ToolDef{ask.FetchToolDef()}
+		runner = ask.RunFetch
 		sys += "\nYou may call the fetch_url tool to read http(s) links the " +
 			"user or the document references before answering."
 	}
-	deltas, err := out.Stream(sys, body.Messages)
+	deltas, err := out.Stream(sys, body.Messages, tools, runner)
 	if err != nil {
 		// surface the provider's own error (e.g. "connection refused",
 		// "401 Unauthorized", a 400 JSON body) — the UI shows this text

@@ -186,6 +186,42 @@ documents/pending documents it holds, plus the active "mode"
 (events|poll|off). Scans run through the same FIFO job queue, so they
 appear in the Jobs API/UI and can be cancelled like any other job.
 
+## Saved chats (scoped chatbots)
+Chat conversations are SAVED. Each session is confined to a scope: one
+document, a tag, a category (shelf) subtree, a collection, or the whole
+library. The web UI has a Chats manager ("Chats…" in the top bar) and a
+[Chat] page per session; start one from a document's Summary page
+(Chat), from a [Tag]/[Collection] page, from a shelf header (the chat
+button), or "New library chat". Sessions can be renamed and deleted, and
+opened as deep links (?chat=ID).
+On tool-capable providers (openai-compatible and Anthropic) the model may
+call:
+  search_library(query, mode, limit)   find documents inside the scope
+  get_document(doc_id)                 read one document
+  open_document(doc_id, view, page)    OPEN a document's page in the UI
+                                       (the client performs it live — the
+                                       model calls this once it has
+                                       confirmed the match, e.g. after a
+                                       search, and the Preview page opens)
+  regenerate_metadata(doc_id, fields)  start a background job rebuilding
+                                       summary/tags/category/meta/kind
+                                       (needs the pipeline backend)
+  fetch_url(url)                       the WebFetch tool (ask.tools on)
+Tool calls and the resulting UI actions stream to the client as SSE
+events. The Ollama-native adapter has no tool support, so library actions
+(search/open/regenerate) need an openai-compatible or Anthropic provider.
+    vellum chat list|show|new|rename|delete
+    GET    /api/chats                # [{id,title,scope_kind,scope_value,
+                                     #   messages,updated_at}]
+    POST   /api/chats                # {scope_kind,scope_value,title,reuse}
+                                     #  -> session (reuse=true finds one)
+    GET    /api/chats/{id}           # {session,messages,scope_label}
+    PATCH  /api/chats/{id}           # {title}
+    DELETE /api/chats/{id}
+    POST   /api/chats/{id}/messages  # {content} -> SSE
+                                     #  {"d":text}|{"tool":name,"args":..}|
+                                     #  {"action":{...}}|{"e":err}|{"done":"1"}
+
 ## Jobs: queue + cancellation
 process / regenerate / reextract / ingest run through ONE FIFO queue;
 results arrive strictly in request order. Every job appears in the
@@ -412,6 +448,12 @@ Editing vocab.yaml by hand is also fine (name: description, YAML map).
     GET  /api/notes/{id}            # one note
     PATCH /api/notes/{id}           # {"body":..}, bumps updated_at
     DELETE /api/notes/{id}
+    GET  /api/chats                 # saved chatbot sessions
+    POST /api/chats                 # {scope_kind,scope_value,title,reuse}
+    GET  /api/chats/{id}            # {session,messages,scope_label}
+    PATCH /api/chats/{id}           # {"title":..}
+    DELETE /api/chats/{id}
+    POST /api/chats/{id}/messages   # {"content":..} -> SSE stream
 Errors: {"error":"..."} with 4xx/5xx status codes.
 
 ## Gotchas

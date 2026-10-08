@@ -90,6 +90,30 @@ CREATE TABLE IF NOT EXISTS notes(
   updated_at TEXT DEFAULT (datetime('now'))
 );
 
+-- Saved chatbots. A session is confined to a SCOPE: one document, one tag,
+-- one category (subtree), one collection, or the whole library. scope_value
+-- holds the doc id / tag / category / collection id as text ('' for
+-- library). Messages cascade with their session. New tables — additive, no
+-- migrate() row needed (like collections/notes).
+CREATE TABLE IF NOT EXISTS chat_sessions(
+  id INTEGER PRIMARY KEY,
+  title TEXT NOT NULL DEFAULT '',
+  scope_kind TEXT NOT NULL DEFAULT 'library',
+  scope_value TEXT NOT NULL DEFAULT '',
+  created_at TEXT DEFAULT (datetime('now')),
+  updated_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS chat_messages(
+  id INTEGER PRIMARY KEY,
+  session_id INTEGER NOT NULL REFERENCES chat_sessions(id) ON DELETE CASCADE,
+  role TEXT NOT NULL,
+  content TEXT NOT NULL DEFAULT '',
+  tool_log TEXT NOT NULL DEFAULT '',
+  created_at TEXT DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS chat_messages_session ON chat_messages(session_id, id);
+
 CREATE VIRTUAL TABLE IF NOT EXISTS fts USING fts5(
   text, content='chunks', content_rowid='id'
 );
@@ -511,4 +535,151 @@ func UpdateNote(conn *sql.DB, id int64, body string) (Note, error) {
 func DeleteNote(conn *sql.DB, id int64) error {
 	_, err := conn.Exec("DELETE FROM notes WHERE id=?", id)
 	return err
+}
+
+// ---------------------------------------------------------------- chat
+
+// ChatSession is one saved chatbot conversation, scoped to a document, tag,
+// category, collection, or the whole library.
+type ChatSession struct {
+	ID         int64  `json:"id"`
+	Title      string `json:"title"`
+	ScopeKind  string `json:"scope_kind"`  // library|document|tag|category|collection
+	ScopeValue string `json:"scope_value"` // doc id / tag / category / collection id
+	CreatedAt  string `json:"created_at"`
+	UpdatedAt  string `json:"updated_at"`
+	Messages   int    `json:"messages"`
+}
+
+// ChatMessage is one saved turn. Role is "user" or "assistant"; ToolLog is a
+// JSON array (may be empty) recording the tools the assistant used.
+type ChatMessage struct {
+	ID        int64  `json:"id"`
+	SessionID int64  `json:"session_id"`
+	Role      string `json:"role"`
+	Content   string `json:"content"`
+	ToolLog   string `json:"tool_log,omitempty"`
+	CreatedAt string `json:"created_at"`
+}
+
+// ListChatSessions lists sessions, most recently updated first.
+func ListChatSessions(conn *sql.DB) ([]ChatSession, error) {
+	rows, err := conn.Query(`
+		SELECT s.id, s.title, s.scope_kind, s.scope_value, s.created_at, s.updated_at,
+		       (SELECT COUNT(*) FROM chat_messages m WHERE m.session_id = s.id)
+		FROM chat_sessions s
+		ORDER BY s.updated_at DESC, s.id DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []ChatSession{}
+	for rows.Next() {
+		var s ChatSession
+		if err := rows.Scan(&s.ID, &s.Title, &s.ScopeKind, &s.ScopeValue,
+			&s.CreatedAt, &s.UpdatedAt, &s.Messages); err != nil {
+			return nil, err
+		}
+		out = append(out, s)
+	}
+	return out, rows.Err()
+}
+
+// CreateChatSession inserts a session and returns it.
+func CreateChatSession(conn *sql.DB, title, scopeKind, scopeValue string) (ChatSession, error) {
+	res, err := conn.Exec(
+		"INSERT INTO chat_sessions(title, scope_kind, scope_value) VALUES(?,?,?)",
+		title, scopeKind, scopeValue)
+	if err != nil {
+		return ChatSession{}, err
+	}
+	id, _ := res.LastInsertId()
+	return GetChatSession(conn, id)
+}
+
+// GetChatSession reads one session (with its message count).
+func GetChatSession(conn *sql.DB, id int64) (ChatSession, error) {
+	var s ChatSession
+	err := conn.QueryRow(`
+		SELECT s.id, s.title, s.scope_kind, s.scope_value, s.created_at, s.updated_at,
+		       (SELECT COUNT(*) FROM chat_messages m WHERE m.session_id = s.id)
+		FROM chat_sessions s WHERE s.id=?`, id).
+		Scan(&s.ID, &s.Title, &s.ScopeKind, &s.ScopeValue,
+			&s.CreatedAt, &s.UpdatedAt, &s.Messages)
+	return s, err
+}
+
+// RenameChatSession sets a session's title.
+func RenameChatSession(conn *sql.DB, id int64, title string) (ChatSession, error) {
+	res, err := conn.Exec(
+		"UPDATE chat_sessions SET title=?, updated_at=datetime('now') WHERE id=?",
+		title, id)
+	if err != nil {
+		return ChatSession{}, err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ChatSession{}, sql.ErrNoRows
+	}
+	return GetChatSession(conn, id)
+}
+
+// DeleteChatSession removes a session (its messages cascade).
+func DeleteChatSession(conn *sql.DB, id int64) error {
+	_, err := conn.Exec("DELETE FROM chat_sessions WHERE id=?", id)
+	return err
+}
+
+// FindChatSession returns the most recent session for a scope, or
+// sql.ErrNoRows when none exists.
+func FindChatSession(conn *sql.DB, scopeKind, scopeValue string) (ChatSession, error) {
+	var s ChatSession
+	err := conn.QueryRow(`
+		SELECT s.id, s.title, s.scope_kind, s.scope_value, s.created_at, s.updated_at,
+		       (SELECT COUNT(*) FROM chat_messages m WHERE m.session_id = s.id)
+		FROM chat_sessions s
+		WHERE s.scope_kind=? AND s.scope_value=?
+		ORDER BY s.updated_at DESC, s.id DESC LIMIT 1`,
+		scopeKind, scopeValue).
+		Scan(&s.ID, &s.Title, &s.ScopeKind, &s.ScopeValue,
+			&s.CreatedAt, &s.UpdatedAt, &s.Messages)
+	return s, err
+}
+
+// ListChatMessages returns a session's turns in order.
+func ListChatMessages(conn *sql.DB, sessionID int64) ([]ChatMessage, error) {
+	rows, err := conn.Query(`
+		SELECT id, session_id, role, content, tool_log, created_at
+		FROM chat_messages WHERE session_id=? ORDER BY id`, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []ChatMessage{}
+	for rows.Next() {
+		var m ChatMessage
+		if err := rows.Scan(&m.ID, &m.SessionID, &m.Role, &m.Content,
+			&m.ToolLog, &m.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
+// AddChatMessage appends a turn and bumps the session's updated_at.
+func AddChatMessage(conn *sql.DB, sessionID int64, role, content, toolLog string) (ChatMessage, error) {
+	res, err := conn.Exec(
+		"INSERT INTO chat_messages(session_id, role, content, tool_log) VALUES(?,?,?,?)",
+		sessionID, role, content, toolLog)
+	if err != nil {
+		return ChatMessage{}, err
+	}
+	id, _ := res.LastInsertId()
+	conn.Exec("UPDATE chat_sessions SET updated_at=datetime('now') WHERE id=?", sessionID)
+	var m ChatMessage
+	err = conn.QueryRow(`
+		SELECT id, session_id, role, content, tool_log, created_at
+		FROM chat_messages WHERE id=?`, id).
+		Scan(&m.ID, &m.SessionID, &m.Role, &m.Content, &m.ToolLog, &m.CreatedAt)
+	return m, err
 }
