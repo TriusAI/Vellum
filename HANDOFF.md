@@ -73,7 +73,8 @@ vellum serve  ────  HTTP :8090 (127.0.0.1)
 - `theme` (config.yaml) — {preset, colors} for the web UI only; carried
   by GET/PUT /api/config and applied as CSS variables.
 - `watch` (config.yaml) — the filesystem watcher's {enabled, dirs,
-  interval}; no DB state (seen/done stamps are in-memory, see §5).
+  interval (min gap), notify (event-driven)}; no DB state (seen/done
+  stamps are in-memory, see §5).
 
 ## 3. Schema rules (non-negotiable)
 
@@ -210,19 +211,26 @@ Fast paths by kind (`internal/classify` + `produceSummary` in ingest):
 - jobs: every slow op is a Job; FIFO queue; per-job cancel (queued =
   instant, running = cooperative + HTTP abort); `GET /api/jobs`,
   `POST /api/jobs/{id}/cancel`, a Jobs dialog in the UI top bar.
-- filesystem watcher: while `serve` runs, a background loop scans
-  `watch.dirs` every `watch.interval` seconds and runs `ingest.Enrich`
-  on new/changed files in the fixed order ingest → kind → category →
-  metadata → tags → summary (summary LAST; see `EnrichStages`). A file
-  must hold the same size+mtime across two scans before pickup (manual
-  "Scan now" skips the wait). Each scan is a normal job (cancellable),
-  caps enrichment at 8 docs/scan, and leaves enrichment pending when
-  the vocab/backend is unavailable. `ingest.PendingUnderDirs` finds the
-  pending docs under the watched folders. Managed by `vellum watch
-  add|remove|clear|on|off|interval|run` and `GET/PUT /api/watch` +
-  `POST /api/watch/scan`; UI "Watch…" dialog. In-memory seen/done
-  stamps only — a restart re-hashes once and sha256 dedup makes it a
-  no-op.
+- filesystem watcher: while `serve` runs, a background loop watches
+  `watch.dirs` and runs `ingest.Enrich` on new/changed files in the fixed
+  order ingest → kind → category → metadata → tags → summary (summary
+  LAST; see `EnrichStages`). Event-driven by default (`watch.notify`):
+  `internal/api/inotify_linux.go` (recursive inotify; non-Linux stub)
+  signals changes and `watch.interval` is a MINIMUM gap between scans (a
+  debounce floor — a burst coalesces into one scan); `notify: false` or
+  no inotify falls back to polling every interval, where a file must
+  additionally hold the same size+mtime across two scans before pickup.
+  Settings changes rebuild the watcher and scan once at once; each scan
+  is a normal job (cancellable), caps enrichment at 8 docs/scan, and
+  leaves enrichment pending when the vocab/backend is unavailable.
+  `ingest.PendingUnderDirs` finds pending docs under the watched folders;
+  `GET /api/watch` reports per-folder exists/doc/pending counts and the
+  active mode (events|poll|off). Managed by `vellum watch
+  add|remove|clear|on|off|interval|notify|run` and `GET/PUT /api/watch` +
+  `POST /api/watch/scan`; UI "Watch…" dialog with a folder browser. The
+  UI auto-refreshes when a background watch/ingest/process job finishes
+  (app.js `libraryChangedByJobs`). In-memory seen/done stamps only — a
+  restart re-hashes once and sha256 dedup makes it a no-op.
 - ask: per-document streaming chat via an EXTERNAL provider (config
   `ask: provider|model|api_key|base_url|tools`; openai-compatible/
   anthropic/ollama adapters in `internal/ask`); UI tab with Test/Save;
@@ -418,15 +426,23 @@ Docker: `pack/Dockerfile` + `docker-entrypoint.sh`; Hub is proxy-blocked
   file from a watched folder does not remove it from the library (use
   `vellum remove`). Enrichment is capped at 8 documents per scan so jobs
   stay responsive and cancellable; a backlog drains over several scans.
+  Event-driven watching is recursive but per-directory: a very large
+  tree can exhaust the kernel's inotify watches
+  (`fs.inotify.max_user_watches`), and there is no periodic safety scan
+  while `notify` is on. Turn `notify` off for such trees (the polling
+  fallback re-walks every interval).
 
 ## 10. Where things state-wise
 
-- HEAD: v0.24.0 (`b20fe7d`), all tests green. Since 0.24.0: a
-  filesystem watcher — while `serve` runs it auto-runs ingest → kind →
-  category → metadata → tags → summary (summary LAST) on new/changed
-  files under `watch.dirs`, through `ingest.Enrich`. Manage with
-  `vellum watch ...` or the UI "Watch…" dialog; API `GET/PUT /api/watch`
-  + `POST /api/watch/scan`.
+- HEAD: v0.25.0 (`56a9d32`), all tests green (the LLM e2e included,
+  ephemeral CPU servers). Since 0.24.0: the watcher is event-driven by
+  default (recursive inotify; `watch.interval` is a MINIMUM gap between
+  scans) with a polling fallback (`notify:false`); the Watch dialog gained
+  controls, per-folder stats and a folder browser; and the UI
+  auto-refreshes when a background watch/ingest/process job finishes.
+- v0.24.0: a filesystem watcher — while `serve` runs it auto-runs
+  ingest → kind → category → metadata → tags → summary (summary LAST) on
+  new/changed files under `watch.dirs`, through `ingest.Enrich`.
 - v0.23.0: ask WebFetch tool on ANTHROPIC too (tool_use/tool_result
   loop; mock-tested), not just OpenAI-compatible providers.
 - v0.22.0: fixed the el() boolean-attr bug (disabled:false disabled the
@@ -447,14 +463,21 @@ Docker: `pack/Dockerfile` + `docker-entrypoint.sh`; Hub is proxy-blocked
   pages; .item-list styling with hover affordance.
 - v0.17: COLLECTIONS; CSS-order page moves; bottom status bar.
 - v0.16: auto-filing learns from user corrections; flash-free updates.
-- Pack stage `pack/stage/vellum-b20fe7d-linux-amd64/` (user's live
-  library inside) updated to the 0.24.0 binary; distributable tarball
-  `pack/vellum-b20fe7d-linux-x86_64.tar.gz` (clean of the DB — verified
+- Pack stage `pack/stage/vellum-56a9d32-linux-amd64/` (user's live
+  library inside) updated to the 0.25.0 binary; distributable tarball
+  `pack/vellum-56a9d32-linux-x86_64.tar.gz` (clean of the DB — verified
   with tar -tzf | grep -c library.db = 0). NOTE: the user runs their OWN
   serve(s) and restarts them freely — an old one (PID 701, port 8097) is
   long-running; a newer one from the stage may appear (its exe shows
   "(deleted)" after the version-dir rename). Do NOT kill them; each
   restart picks up the current stage binary.
+- For the LLM e2e, the GGUF models live in the stage's `models/` dir (not
+  /tmp): `QWEN_GGUF=$PWD/pack/stage/<ver>/models/qwen3-1.7b.gguf`,
+  `NOMIC_GGUF=.../nomic-embed-text-v1.5.gguf`,
+  `LLAMA_SERVER_BIN=.../llm/cpu/llama-server`. Passing a missing path makes
+  the server exit at once, but the test only notices after its 300s
+  startup wait (a zombie still answers kill(0)) — check the log if a run
+  seems stuck.
 - The user runs `./vellum.sh serve` (their own llama-servers on 8081/8082
   are LONG-RUNNING — do not kill them; kill only ephemeral test ones).
 - `AGENTS.md` (repo root) carries the agent-focused subset of this
