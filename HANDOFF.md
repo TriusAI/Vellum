@@ -242,9 +242,9 @@ Fast paths by kind (`internal/classify` + `produceSummary` in ingest):
   tags stay grammar-bound regardless of what the chat uses. With
   `ask.tools` (default on) the model may call a `fetch_url` (WebFetch)
   tool — `internal/ask/webfetch.go` + the tool loops in providers.go
-  (OpenAI-compatible AND Anthropic; Ollama-native ignores tools; ≤4
-  rounds; honors HTTPS_PROXY; http(s) only, metadata hosts blocked).
-  `{"tool":url}` SSE events; answers render light markdown in the UI.
+  (OpenAI-compatible, Anthropic AND native Ollama /api/chat; ≤4 rounds;
+  honors HTTPS_PROXY; http(s) only, metadata hosts blocked).
+  `{"tool":name,"args"}` SSE events; answers render light markdown in the UI.
 - chats: SAVED, scoped chatbots (`internal/api/chat.go` +
   `internal/db` chat tables). A session is confined to one document, tag,
   category subtree, collection, or the whole library. `internal/ask` is
@@ -455,17 +455,18 @@ Docker: `pack/Dockerfile` + `docker-entrypoint.sh`; Hub is proxy-blocked
   actions are enforced in Go (a model cannot open/regenerate a document
   outside its scope). `regenerate_metadata` is a BACKGROUND job (it needs
   the pipeline backend and can take minutes); it does not block the chat.
-  Tool support requires an OpenAI-compatible or Anthropic provider — the
-  Ollama-native adapter ignores tools, so search/open/regenerate do nothing
-  there. Chat provider config is the same plaintext `ask:` block.
+  Tool calling works on OpenAI-compatible, Anthropic and native Ollama
+  providers. Chat provider config is the same plaintext `ask:` block.
 
 ## 10. Where things state-wise
 
-- HEAD: v0.26.0 (`1498145`), all tests green. Since 0.25.0: SAVED scoped
-  chatbots — persisted sessions confined to a document/tag/category/
-  collection/library, with scope-aware tools (search, get, OPEN a
-  document's page in the UI, regenerate metadata) and a Chats manager.
-  `internal/ask` is provider-only (generic tools); the API supplies them.
+- HEAD: v0.27.0 (`c8f87f0`), all tests green. Since 0.26.0: the native
+  Ollama provider runs the tool loop too (previously only OpenAI-compatible
+  and Anthropic did), so "search my library" works with an `ollama` chat
+  provider.
+- v0.26.0: SAVED scoped chatbots (persisted sessions confined to a
+  document/tag/category/collection/library; scope-aware search/get/open/
+  regenerate tools; a Chats manager). `internal/ask` is provider-only.
 - v0.25.0: event-driven watcher (inotify + min-gap debounce, polling
   fallback), richer Watch dialog, UI auto-refresh after background jobs.
 - v0.24.0: a filesystem watcher — while `serve` runs it auto-runs
@@ -491,9 +492,9 @@ Docker: `pack/Dockerfile` + `docker-entrypoint.sh`; Hub is proxy-blocked
   pages; .item-list styling with hover affordance.
 - v0.17: COLLECTIONS; CSS-order page moves; bottom status bar.
 - v0.16: auto-filing learns from user corrections; flash-free updates.
-- Pack stage `pack/stage/vellum-1498145-linux-amd64/` (user's live
-  library inside) updated to the 0.26.0 binary; distributable tarball
-  `pack/vellum-1498145-linux-x86_64.tar.gz` (clean of the DB — verified
+- Pack stage `pack/stage/vellum-c8f87f0-linux-amd64/` (user's live
+  library inside) updated to the 0.27.0 binary; distributable tarball
+  `pack/vellum-c8f87f0-linux-x86_64.tar.gz` (clean of the DB — verified
   with tar -tzf | grep -c library.db = 0). NOTE: the user runs their OWN
   serve(s) and restarts them freely — an old one (PID 701, port 8097) is
   long-running; a newer one from the stage may appear (its exe shows
