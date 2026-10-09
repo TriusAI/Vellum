@@ -1,0 +1,205 @@
+#!/usr/bin/openrc-run
+# OpenRC service for Vellum (Artix/Gentoo/Alpine).
+#
+# Install:
+#   install -m 0755 pack/openrc/vellum      /etc/init.d/vellum
+#   install -m 0644 pack/openrc/vellum.conf /etc/conf.d/vellum
+#   rc-update add vellum default && rc-service vellum start
+#
+# This runs the *portable pack*: it starts the two bundled llama.cpp servers
+# (chat on 8081, embeddings on 8082) unless the config selects an external
+# backend, waits for their /health, then supervises `vellum serve`. The
+# servers it started are stopped again from their pidfiles on `stop`.
+#
+# Everything (paths, ports, user) is overridable in /etc/conf.d/vellum.
+
+name="vellum"
+description="Vellum -- local-first library manager (web UI + JSON API)"
+
+# ---- settings (override in /etc/conf.d/vellum) -----------------------------
+: "${VELLUM_HOME:=/opt/vellum}"
+: "${VELLUM_USER:=vellum}"
+: "${VELLUM_GROUP:=${VELLUM_USER}}"
+: "${VELLUM_LISTEN:=127.0.0.1:8090}"
+: "${VELLUM_LLM_PORT:=8081}"
+: "${VELLUM_EMBED_PORT:=8082}"
+: "${VELLUM_LLM_GGUF:=qwen3-4b.gguf}"
+: "${VELLUM_EMBED_GGUF:=nomic-embed-text-v1.5.gguf}"
+: "${VELLUM_BACKEND:=auto}"          # auto | cpu | vulkan   (chat model only)
+
+: "${VELLUM_CONFIG:=${VELLUM_HOME}/config.yaml}"
+: "${VELLUM_PIDDIR:=/run/${RC_SVCNAME}}"
+: "${VELLUM_LOGDIR:=/var/log/${RC_SVCNAME}}"
+
+command="${VELLUM_HOME}/vellum"
+command_args="--config ${VELLUM_CONFIG} serve --listen ${VELLUM_LISTEN}"
+supervisor="supervise-daemon"
+command_user="${VELLUM_USER}:${VELLUM_GROUP}"
+directory="${VELLUM_HOME}"
+pidfile="${VELLUM_PIDDIR}/${RC_SVCNAME}.pid"
+output_log="${VELLUM_LOGDIR}/serve.log"
+error_log="${VELLUM_LOGDIR}/serve.log"
+respawn_delay="10"
+respawn_max="5"                      # give up after 5 restarts within the period
+respawn_period="60"
+
+llm_pid="${VELLUM_PIDDIR}/llm.pid"
+embed_pid="${VELLUM_PIDDIR}/embed.pid"
+llm_log="${VELLUM_LOGDIR}/llm-server.log"
+embed_log="${VELLUM_LOGDIR}/embed-server.log"
+
+# The binary needs the pack's bundled shared libraries; the tesseract/mutool
+# child processes inherit this too. TESSDATA_PREFIX is also applied from the
+# config, but exporting it here keeps CLI-less first runs correct.
+export LD_LIBRARY_PATH="${VELLUM_HOME}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+export TESSDATA_PREFIX="${VELLUM_HOME}/tessdata"
+
+depend() {
+    need localmount
+    use logger
+}
+
+# ------------------------------------------------------------------ helpers
+
+_health() { # $1 port
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsS -o /dev/null "http://127.0.0.1:$1/health" 2>/dev/null
+    else
+        wget -q -T 2 -O /dev/null "http://127.0.0.1:$1/health" 2>/dev/null
+    fi
+}
+
+_wait_health() { # $1 port  $2 seconds  $3 pidfile  $4 label
+    local n=0 pid=""
+    [ -f "$3" ] && pid="$(cat "$3" 2>/dev/null)"
+    while ! _health "$1"; do
+        if [ -n "$pid" ] && ! kill -0 "$pid" 2>/dev/null; then
+            eerror "vellum: $4 exited before becoming ready"
+            return 1
+        fi
+        n=$((n + 1))
+        if [ "$n" -ge "$2" ]; then
+            eerror "vellum: $4 did not become ready in ${2}s"
+            return 1
+        fi
+        sleep 1
+    done
+    return 0
+}
+
+_backend() {
+    case "$VELLUM_BACKEND" in
+        cpu|vulkan) echo "$VELLUM_BACKEND"; return ;;
+    esac
+    if [ -e /dev/dri ]; then echo vulkan; else echo cpu; fi
+}
+
+# _wanted asks the binary whether the config wants a bundled or external
+# backend for a channel — the same contract the pack's vellum.sh uses.
+_wanted() { # $1 chat|embed  ->  yes|no
+    local out chat embed
+    out="$("$command" --config "$VELLUM_CONFIG" backends 2>/dev/null)" \
+        || out="chat=bundled embed=bundled"
+    case "$out" in *chat=external*) chat=no ;; *) chat=yes ;; esac
+    case "$out" in *embed=external*) embed=no ;; *) embed=yes ;; esac
+    if [ "$1" = chat ]; then echo "$chat"; else echo "$embed"; fi
+}
+
+_start_chat() {
+    local be="$(_backend)" bin
+    bin="${VELLUM_HOME}/llm/${be}/llama-server"
+    [ -x "$bin" ] || { be=cpu; bin="${VELLUM_HOME}/llm/cpu/llama-server"; }
+
+    ebegin "starting vellum chat server ($be) on :${VELLUM_LLM_PORT}"
+    start-stop-daemon --start --background --make-pidfile \
+        --pidfile "$llm_pid" --user "$VELLUM_USER" --group "$VELLUM_GROUP" \
+        --chdir "$VELLUM_HOME" --stdout "$llm_log" --stderr "$llm_log" \
+        --exec "$bin" -- \
+        -m "${VELLUM_HOME}/models/${VELLUM_LLM_GGUF}" \
+        --host 127.0.0.1 --port "$VELLUM_LLM_PORT" -np 1 \
+        -c 8192 --jinja \
+        --chat-template-file "${VELLUM_HOME}/templates/qwen3-nothink.jinja"
+    if [ $? -ne 0 ]; then eend 1; return 1; fi
+    _wait_health "$VELLUM_LLM_PORT" 180 "$llm_pid" "chat server" || { eend 1; return 1; }
+    eend 0
+}
+
+_start_embed() {
+    ebegin "starting vellum embedding server on :${VELLUM_EMBED_PORT}"
+    start-stop-daemon --start --background --make-pidfile \
+        --pidfile "$embed_pid" --user "$VELLUM_USER" --group "$VELLUM_GROUP" \
+        --chdir "$VELLUM_HOME" --stdout "$embed_log" --stderr "$embed_log" \
+        --exec "${VELLUM_HOME}/llm/cpu/llama-server" -- \
+        -m "${VELLUM_HOME}/models/${VELLUM_EMBED_GGUF}" \
+        --host 127.0.0.1 --port "$VELLUM_EMBED_PORT" -np 1 \
+        --embeddings --ubatch-size 2048
+    if [ $? -ne 0 ]; then eend 1; return 1; fi
+    _wait_health "$VELLUM_EMBED_PORT" 120 "$embed_pid" "embedding server" || { eend 1; return 1; }
+    eend 0
+}
+
+_stop_server() { # $1 pidfile  $2 label
+    [ -f "$1" ] || return 0
+    ebegin "stopping vellum $2"
+    start-stop-daemon --stop --pidfile "$1" --retry TERM/10/KILL/5
+    eend $?
+    rm -f "$1"
+}
+
+# -------------------------------------------------------------- start/stop
+
+start_pre() {
+    checkpath -d -m 0755 "${VELLUM_PIDDIR}"
+    checkpath -d -m 0750 -o "${VELLUM_USER}:${VELLUM_GROUP}" "${VELLUM_LOGDIR}"
+    checkpath -f -m 0640 -o "${VELLUM_USER}:${VELLUM_GROUP}" "${output_log}"
+    [ "$error_log" != "$output_log" ] && \
+        checkpath -f -m 0640 -o "${VELLUM_USER}:${VELLUM_GROUP}" "${error_log}"
+
+    if [ ! -f "$VELLUM_CONFIG" ]; then
+        eerror "vellum: no config at ${VELLUM_CONFIG} (set VELLUM_HOME in /etc/conf.d/vellum)"
+        return 1
+    fi
+    if [ ! -x "$command" ]; then
+        eerror "vellum: no executable at ${command}"
+        return 1
+    fi
+
+    # start the bundled llama.cpp servers first, unless the config points the
+    # pipeline at an external backend (llm.backend=ollama, embed.provider=…,
+    # or llm/embed external=true)
+    if [ "$(_wanted chat)" = yes ] && ! _health "$VELLUM_LLM_PORT"; then
+        _start_chat || return 1
+    fi
+    if [ "$(_wanted embed)" = yes ] && ! _health "$VELLUM_EMBED_PORT"; then
+        _start_embed || return 1
+    fi
+    return 0
+}
+
+stop_post() {
+    _stop_server "$embed_pid" "embedding server"
+    _stop_server "$llm_pid" "chat server"
+}
+
+status() {
+    local rc=0 pid
+    pid="$(cat "$pidfile" 2>/dev/null)"
+    if [ -z "$pid" ]; then
+        einfo "vellum: stopped"
+        return 3
+    fi
+    einfo "vellum serve: pid ${pid}"
+    if _health "$VELLUM_LLM_PORT"; then
+        einfo "chat server (:${VELLUM_LLM_PORT}): up"
+    else
+        ewarn "chat server (:${VELLUM_LLM_PORT}): down"
+        rc=1
+    fi
+    if _health "$VELLUM_EMBED_PORT"; then
+        einfo "embedding server (:${VELLUM_EMBED_PORT}): up"
+    else
+        ewarn "embedding server (:${VELLUM_EMBED_PORT}): down"
+        rc=1
+    fi
+    return $rc
+}

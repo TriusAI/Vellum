@@ -1,0 +1,40 @@
+# /etc/systemd/system/vellum.service
+#
+# Vellum — local-first library manager (web UI + JSON API) running the
+# portable pack from /opt/vellum, with its bundled llama.cpp servers.
+#
+# Install (see pack/README.md):
+#   install -m 0644 vellum.service /etc/systemd/system/vellum.service
+#   systemctl daemon-reload
+#   systemctl enable --now vellum.service
+#
+# This is the all-in-one unit: it runs the pack's own vellum.sh launcher,
+# which starts the chat (:8081) and embedding (:8082) servers unless
+# config.yaml selects an external backend, waits for their /health, then
+# execs `vellum serve`. The servers live in this unit's cgroup, so systemd
+# stops them together with the main process. vellum.sh needs `curl`.
+#
+# If you would rather not reload the models every time the UI restarts, use
+# the split units in pack/README.md instead.
+
+[Unit]
+Description=Vellum library manager (web UI + JSON API)
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=vellum
+Group=vellum
+WorkingDirectory=/opt/vellum
+
+Environment=VELLUM_CONFIG=/opt/vellum/config.yaml
+ExecStart=/opt/vellum/vellum.sh serve --listen 127.0.0.1:8090
+
+Restart=on-failure
+RestartSec=5
+# first start loads the GGUFs from disk; give it room
+TimeoutStartSec=300
+
+[Install]
+WantedBy=multi-user.target
