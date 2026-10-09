@@ -683,3 +683,16 @@ func AddChatMessage(conn *sql.DB, sessionID int64, role, content, toolLog string
 		Scan(&m.ID, &m.SessionID, &m.Role, &m.Content, &m.ToolLog, &m.CreatedAt)
 	return m, err
 }
+
+// DeleteChatMessagesFrom removes a message and every later message in the
+// same session (chat "revert": no forking). Returns how many were deleted.
+func DeleteChatMessagesFrom(conn *sql.DB, sessionID, fromID int64) (int64, error) {
+	res, err := conn.Exec(
+		"DELETE FROM chat_messages WHERE session_id=? AND id>=?", sessionID, fromID)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	conn.Exec("UPDATE chat_sessions SET updated_at=datetime('now') WHERE id=?", sessionID)
+	return n, nil
+}

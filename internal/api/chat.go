@@ -783,33 +783,81 @@ func (s *Server) postChatMessage(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(200)
 
 	var text strings.Builder
-	toolLog := []map[string]any{}
+	events := []map[string]any{}
 	for d := range deltas {
 		if d.Error != "" {
 			sseSend(w, map[string]any{"e": d.Error})
 			break
 		}
-		if d.Tool != "" {
-			toolLog = append(toolLog, map[string]any{"name": d.Tool, "args": d.ToolArgs})
-			sseSend(w, map[string]any{"tool": d.Tool, "args": d.ToolArgs})
-			continue
-		}
 		if d.Action != nil {
 			sseSend(w, map[string]any{"action": d.Action})
 			continue
 		}
+		if d.Tool != "" {
+			events = append(events, map[string]any{"t": "tool", "name": d.Tool, "args": d.ToolArgs})
+			sseSend(w, map[string]any{"tool": d.Tool, "args": d.ToolArgs})
+			continue
+		}
 		if d.Text != "" {
 			text.WriteString(d.Text)
+			// merge consecutive text deltas into the running text segment so
+			// the stored event list interleaves text/tool in stream order
+			if n := len(events); n > 0 && events[n-1]["t"] == "text" {
+				events[n-1]["text"] = events[n-1]["text"].(string) + d.Text
+			} else {
+				events = append(events, map[string]any{"t": "text", "text": d.Text})
+			}
 			sseSend(w, map[string]any{"d": d.Text})
 		}
 	}
 	logJSON := ""
-	if len(toolLog) > 0 {
-		if b, err := json.Marshal(toolLog); err == nil {
+	if len(events) > 0 {
+		if b, err := json.Marshal(events); err == nil {
 			logJSON = string(b)
 		}
 	}
 	db.AddChatMessage(s.conn, id, "assistant", text.String(), logJSON)
 	sseSend(w, map[string]any{"done": "1"})
 	flush.Flush()
+}
+
+// revertChat drops one message and everything after it (no forking) and
+// returns the reverted message so the client can put it back in the editor.
+func (s *Server) revertChat(w http.ResponseWriter, r *http.Request) {
+	id, err := pathID(r)
+	if err != nil {
+		writeErr(w, 400, "bad id")
+		return
+	}
+	var body struct {
+		MessageID int64 `json:"message_id"`
+	}
+	if err := decodeBody(r, &body); err != nil {
+		writeErr(w, 400, "bad JSON body: "+err.Error())
+		return
+	}
+	if body.MessageID <= 0 {
+		writeErr(w, 400, "message_id required")
+		return
+	}
+	var role, content string
+	err = s.conn.QueryRow(
+		"SELECT role, content FROM chat_messages WHERE id=? AND session_id=?",
+		body.MessageID, id).Scan(&role, &content)
+	if err == sql.ErrNoRows {
+		writeErr(w, 404, "no such message in this chat")
+		return
+	}
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	n, err := db.DeleteChatMessagesFrom(s.conn, id, body.MessageID)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]any{
+		"reverted": content, "role": role, "deleted": n,
+	})
 }

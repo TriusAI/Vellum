@@ -29,9 +29,11 @@ async function api(path, opts) {
   return body;
 }
 
-const esc = (s) =>
-  String(s ?? "").replace(/[&<>"']/g, (c) =>
-    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+// esc is a named pass-through for user/model text. The DOM helpers (el)
+// attach strings as TEXT NODES and the UI never uses innerHTML, so text is
+// already injected verbatim and safe — HTML-escaping here would show literal
+// entities ("&#39;") instead of the character.
+const esc = (s) => String(s ?? "");
 
 // notice shows a transient message. The dismiss period is per-message:
 // quick confirmations (a new collection) shouldn't sit over the page
@@ -1315,15 +1317,47 @@ function deleteChatSession(c) {
   }).catch((e) => notice("chat: " + e.message));
 }
 
-// chatToolChips renders the tools a saved assistant turn used.
-function chatToolChips(toolLog) {
-  let tools = [];
-  try { tools = JSON.parse(toolLog || "[]"); } catch (_) { tools = []; }
-  if (!tools.length) return null;
-  const chips = el("div", { class: "chips chat-tools" });
-  for (const t of tools)
-    chips.append(el("span", { class: "chip tool", title: t.args || "" }, "🔧 " + t.name));
-  return chips;
+// chatEvents returns an assistant message's ordered segments. New rows store
+// [{t:"text",text}|{t:"tool",name,args}]; older rows stored only a tool list
+// (rendered first, then the text).
+function chatEvents(m) {
+  let raw = [];
+  try { raw = JSON.parse(m.tool_log || "[]"); } catch (_) { raw = []; }
+  const out = [];
+  for (const e of raw) {
+    if (!e) continue;
+    if (e.t === "text") out.push({ text: e.text || "" });
+    else if (e.t === "tool") out.push({ tool: e.name || "tool", args: e.args || "" });
+    else if (e.name) out.push({ tool: e.name, args: e.args || "" }); // legacy
+  }
+  if (!out.some((s) => s.text !== undefined) && m.content) {
+    out.push({ text: m.content }); // plain answer / legacy tool-only row
+  }
+  return out;
+}
+
+// appendChatSegment adds one segment to an assistant view; it returns the
+// running text element (nil after a tool chip) so a text stream can extend
+// the current paragraph. Text and tools keep their streaming order.
+function appendChatSegment(box, seg) {
+  if (seg.tool !== undefined) {
+    box.append(el("div", { class: "chips chat-tools" },
+      el("span", { class: "chip tool", title: seg.args || "" }, "🔧 " + seg.tool)));
+    return null;
+  }
+  const d = el("div", { class: "chat-seg" });
+  d.append(renderMarkdown(seg.text || ""));
+  box.append(d);
+  return d;
+}
+
+// assistantView renders an assistant message, interleaving text and tools.
+function assistantView(m) {
+  const box = el("div", { class: "a" });
+  for (const seg of chatEvents(m)) appendChatSegment(box, seg);
+  if (!box.childNodes.length)
+    appendChatSegment(box, { text: "(no answer — the model returned nothing)" });
+  return box;
 }
 
 // chatAction performs a UI action the model requested through a tool
@@ -1337,6 +1371,33 @@ function chatAction(a) {
   else if (view === "text") openPage("text", id);
   else openPage("preview", id, { page: Number(a.page) || 0 });
   notice("Opened " + (a.title ? `“${a.title}”` : ("#" + id)) + " (" + view + ")", NOTICE_MID);
+}
+
+// rerenderChat re-renders a chat page from server data and scrolls to the
+// bottom.
+async function rerenderChat(page) {
+  page.data = await api(`/api/chats/${page.docId}`);
+  updatePageTitle(page);
+  renderPageContent(page);
+  const lg = page.content.querySelector(".chat-log");
+  if (lg) lg.scrollTop = lg.scrollHeight;
+}
+
+// revertMessage deletes one message and everything after it (no forking) and
+// puts the reverted text back in the editor.
+async function revertMessage(page, m) {
+  if (!confirm("Revert to this message? It and every later message will be deleted.")) return;
+  try {
+    const r = await api(`/api/chats/${page.docId}/revert`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ message_id: m.id }),
+    });
+    await rerenderChat(page);
+    const ta = page.content.querySelector("textarea");
+    if (ta) { ta.value = r.reverted || ""; ta.focus(); }
+    refreshChatsRoot();
+    notice(`Reverted — ${r.deleted} message(s) removed.`, NOTICE_MID);
+  } catch (e) { notice("revert: " + e.message); }
 }
 
 // chatContent is a saved, scoped conversation.
@@ -1361,23 +1422,24 @@ function chatContent(page) {
     el("button", { class: "small plain", onclick: () => openPage("chats") }, "Chats…")));
   wrap.append(askConfigBox(page));
 
+  const input = el("textarea", { rows: 2, placeholder: "ask… (Enter to send, Shift+Enter for a newline)" });
   const log = el("div", { class: "ask-log chat-log" });
   for (const m of data.messages || []) {
     const turn = el("div", { class: "ask-turn" });
     if (m.role === "user") {
-      turn.append(el("div", { class: "q" }, esc(m.content)));
+      turn.append(el("div", { class: "q" }, m.content,
+        el("button", {
+          class: "mini plain chat-revert",
+          title: "revert: put this message back in the box and drop it + everything after",
+          onclick: (ev) => { ev.stopPropagation(); revertMessage(page, m); },
+        }, "↩")));
     } else {
-      const answer = el("div", { class: "a" });
-      const chips = chatToolChips(m.tool_log);
-      if (chips) answer.append(chips);
-      answer.append(renderMarkdown(m.content || ""));
-      turn.append(answer);
+      turn.append(assistantView(m));
     }
     log.append(turn);
   }
   const scrollDown = () => { log.scrollTop = log.scrollHeight; };
 
-  const input = el("textarea", { rows: 2, placeholder: "ask… (Enter to send, Shift+Enter for a newline)" });
   let busy = false;
   const sendBtn = el("button", { onclick: send, disabled: !askConfig?.enabled }, "Send");
   const setBusy = (b) => {
@@ -1392,13 +1454,23 @@ function chatContent(page) {
     input.value = "";
     setBusy(true);
     const turn = el("div", { class: "ask-turn" },
-      el("div", { class: "q" }, esc(q)));
+      el("div", { class: "q" }, q));
     const answer = el("div", { class: "a" });
-    const chips = el("div", { class: "chips chat-tools" });
-    answer.append(chips);
     turn.append(answer);
     log.append(turn);
     scrollDown();
+    // streaming appenders keep text and tool chips in arrival order
+    let seg = null, segText = "";
+    const addText = (chunk) => {
+      if (!seg) { seg = el("div", { class: "chat-seg" }); answer.append(seg); }
+      segText += chunk;
+      seg.replaceChildren(renderMarkdown(segText));
+    };
+    const addTool = (name, args) => {
+      seg = null; segText = "";
+      answer.append(el("div", { class: "chips chat-tools" },
+        el("span", { class: "chip tool", title: args || "" }, "🔧 " + name)));
+    };
     try {
       const res = await fetch(`/api/chats/${sess.id}/messages`, {
         method: "POST", headers: { "Content-Type": "application/json" },
@@ -1409,7 +1481,6 @@ function chatContent(page) {
         try { const j = await res.json(); if (j && j.error) msg = j.error; } catch (_) {}
         throw new Error(msg);
       }
-      let acc = "";
       const reader = res.body.getReader();
       const dec = new TextDecoder();
       let buf = "";
@@ -1422,31 +1493,20 @@ function chatContent(page) {
           if (!frame.startsWith("data:")) continue;
           let payload;
           try { payload = JSON.parse(frame.slice(5).trim()); } catch (_) { continue; }
-          if (payload.e) { acc += (acc ? "\n" : "") + "⚠ " + payload.e; }
-          else if (payload.tool) {
-            chips.append(el("span", { class: "chip tool", title: payload.args || "" },
-              "🔧 " + payload.tool));
-            notice("Running " + payload.tool + "…", NOTICE_MID);
-          } else if (payload.action) {
-            chatAction(payload.action);
-          } else if (payload.d) {
-            acc += payload.d;
-          }
+          if (payload.e) { seg = null; segText = ""; answer.append(el("p", { class: "hint" }, "⚠ " + payload.e)); }
+          else if (payload.tool) { addTool(payload.tool, payload.args); notice("Running " + payload.tool + "…", NOTICE_MID); }
+          else if (payload.action) { chatAction(payload.action); }
+          else if (payload.d) { addText(payload.d); }
         }
-        answer.replaceChildren(chips, renderMarkdown(acc || "…"));
         scrollDown();
       }
-      answer.replaceChildren(chips, renderMarkdown(acc || "(no answer — the model returned nothing)"));
+      if (!answer.childNodes.length) addText("(no answer — the model returned nothing)");
       scrollDown();
-      // refresh the title / list (the server auto-titles a fresh session)
-      try {
-        const fresh = await api(`/api/chats/${sess.id}`);
-        page.data = fresh;
-        updatePageTitle(page);
-      } catch (_) {}
+      // re-render from the saved turn: canonical interleaving + revert buttons
+      try { await rerenderChat(page); } catch (_) { updatePageTitle(page); }
       refreshChatsRoot();
     } catch (e) {
-      answer.replaceChildren(chips, el("span", { class: "hint" }, "error: " + e.message));
+      answer.append(el("p", { class: "hint" }, "error: " + e.message));
     }
     setBusy(false);
   }
@@ -1456,7 +1516,8 @@ function chatContent(page) {
   wrap.append(log, el("div", { class: "row" }, input, sendBtn));
   wrap.append(el("p", { class: "hint" },
     "Saved sessions. On tool-capable providers the model can search the library, " +
-    "open a document for you, and regenerate metadata."));
+    "open a document for you, and regenerate metadata. ↩ reverts a message and " +
+    "everything after it."));
   return wrap;
 }
 

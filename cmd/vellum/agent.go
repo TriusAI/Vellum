@@ -221,6 +221,11 @@ the native Ollama API.
     POST   /api/chats/{id}/messages  # {content} -> SSE
                                      #  {"d":text}|{"tool":name,"args":..}|
                                      #  {"action":{...}}|{"e":err}|{"done":"1"}
+                                     # text/tool frames arrive in order and
+                                     # are stored that way (interleaved)
+    POST   /api/chats/{id}/revert    # {message_id} -> delete it + all later
+                                     #  messages (no forking); returns the
+                                     #  reverted text {"reverted":...,"deleted":N}
 
 ## Jobs: queue + cancellation
 process / regenerate / reextract / ingest run through ONE FIFO queue;
@@ -450,6 +455,7 @@ Editing vocab.yaml by hand is also fine (name: description, YAML map).
     PATCH /api/chats/{id}           # {"title":..}
     DELETE /api/chats/{id}
     POST /api/chats/{id}/messages   # {"content":..} -> SSE stream
+    POST /api/chats/{id}/revert     # {"message_id":..} drop it + all after
 Errors: {"error":"..."} with 4xx/5xx status codes.
 
 ## Gotchas

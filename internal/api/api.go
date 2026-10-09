@@ -290,6 +290,7 @@ func (s *Server) Mux() http.Handler {
 	mux.HandleFunc("PATCH /api/chats/{id}", s.patchChat)
 	mux.HandleFunc("DELETE /api/chats/{id}", s.deleteChat)
 	mux.HandleFunc("POST /api/chats/{id}/messages", s.postChatMessage)
+	mux.HandleFunc("POST /api/chats/{id}/revert", s.revertChat)
 
 	sub, _ := fs.Sub(webFS, "web")
 	mux.Handle("/", http.FileServer(http.FS(sub)))

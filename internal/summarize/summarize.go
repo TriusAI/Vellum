@@ -53,6 +53,15 @@ document substantively addresses the topic, not if it merely mentions it):
 {descriptions}
 Rules:
 - Choose the most relevant tags, usually 2-6, at most {max_tags}.
+- Be SPECIFIC. Prefer tags naming the actual subject matter — methods,
+  techniques, architectures, subfields, problem areas (e.g.
+  "reinforcement-learning", "quantization", "convolutional-networks",
+  "latent-space", "world-models") over broad umbrella terms. A tag that
+  only restates the document's category (or one of its parts) adds no
+  information — do NOT choose it; the category already says that.
+- When the allowed list lacks the specific terms the document needs, put
+  those specific terms in tags_other (they become vocabulary suggestions)
+  instead of falling back to generic umbrella tags.
 - The vocabulary grows over time: if the document's central topic is NOT
   well covered by the allowed list, PROPOSE up to two new tags in
   tags_other — short, lowercase, hyphenated English labels (e.g.
@@ -513,8 +522,22 @@ func TagDocumentWithCategories(ctx context.Context, cfg *config.Config, v *vocab
 		}
 		res.Category = cat
 	}
+	// assigned tags: vocabulary-only, and drop any that merely restate the
+	// document's category (a component of its path) — the shelf already
+	// conveys that, so the tag adds no information. If that would leave no
+	// tags at all, keep the original selection (an umbrella tag beats none).
+	var raw []string
 	for _, t := range strSlice(out["tags"]) {
-		if vocabSet[t] && len(res.Tags) < cfg.Summarize.MaxTags {
+		if vocabSet[t] {
+			raw = append(raw, t)
+		}
+	}
+	kept := filterCategoryTags(raw, res.Category)
+	if len(kept) == 0 {
+		kept = raw
+	}
+	for _, t := range kept {
+		if len(res.Tags) < cfg.Summarize.MaxTags {
 			res.Tags = append(res.Tags, t)
 		}
 	}
@@ -533,6 +556,29 @@ func TagDocumentWithCategories(ctx context.Context, cfg *config.Config, v *vocab
 		}
 	}
 	return res, nil
+}
+
+// filterCategoryTags drops tags that are the document's category or one of
+// its path components ("computer-science/machine-learning" drops tags
+// "computer-science" and "machine-learning") — they only repeat the shelf.
+func filterCategoryTags(tags []string, category string) []string {
+	if strings.TrimSpace(category) == "" {
+		return tags
+	}
+	parts := map[string]bool{}
+	for _, p := range strings.Split(category, "/") {
+		if p = strings.ToLower(strings.TrimSpace(p)); p != "" {
+			parts[p] = true
+		}
+	}
+	out := make([]string, 0, len(tags))
+	for _, t := range tags {
+		if parts[strings.ToLower(t)] {
+			continue
+		}
+		out = append(out, t)
+	}
+	return out
 }
 
 // str coerces JSON any -> string.

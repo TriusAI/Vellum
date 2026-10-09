@@ -392,3 +392,9 @@ button.mini { font-size: .72rem; padding: 0 .45rem; }
 .chat-head { gap: .4rem; }
 .chips.chat-tools { margin: 0 0 .35rem; }
 .chip.tool { background: var(--chip-sug); cursor: default; }
+
+/* chat: interleaved text/tool segments + revert */
+.chat-seg { margin: 0 0 .45rem; }
+.chat-seg:last-child { margin-bottom: 0; }
+.ask-turn .q .chat-revert { float: right; margin: -.1rem -.2rem 0 .4rem; opacity: .45; }
+.ask-turn .q .chat-revert:hover { opacity: 1; }

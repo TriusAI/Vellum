@@ -30,6 +30,7 @@ func mockOpenAI(t *testing.T) *httptest.Server {
 		body, _ := io.ReadAll(r.Body)
 		w.Header().Set("Content-Type", "text/event-stream")
 		if !strings.Contains(string(body), `"role":"tool"`) {
+			fmt.Fprint(w, `data: {"choices":[{"delta":{"content":"Let me look. "}}]}`+"\n\n")
 			fmt.Fprint(w, `data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"open_document","arguments":"{\"doc_id\":1,\"view\":\"preview\"}"}}]}}]}`+"\n\n")
 			fmt.Fprint(w, "data: [DONE]\n\n")
 			return
@@ -142,11 +143,35 @@ func TestChatAPI(t *testing.T) {
 	if got.Messages[0]["role"] != "user" || got.Messages[1]["role"] != "assistant" {
 		t.Fatalf("roles wrong: %v", got.Messages)
 	}
-	if !strings.Contains(got.Messages[1]["content"].(string), "Here it is.") {
-		t.Fatalf("assistant text not saved: %v", got.Messages[1])
+	if got.Messages[1]["content"].(string) != "Let me look. Here it is." {
+		t.Fatalf("assistant text not saved correctly: %q", got.Messages[1]["content"])
 	}
-	if tl, _ := got.Messages[1]["tool_log"].(string); !strings.Contains(tl, "open_document") {
-		t.Fatalf("tool log not saved: %v", got.Messages[1]["tool_log"])
+	// tool_log preserves the streaming order: text, tool, text
+	var evs []map[string]any
+	if err := json.Unmarshal([]byte(got.Messages[1]["tool_log"].(string)), &evs); err != nil {
+		t.Fatalf("tool_log not JSON: %v", got.Messages[1]["tool_log"])
+	}
+	if len(evs) != 3 || evs[0]["t"] != "text" || evs[1]["t"] != "tool" || evs[2]["t"] != "text" {
+		t.Fatalf("tool_log not interleaved in order: %v", evs)
+	}
+	if evs[1]["name"] != "open_document" {
+		t.Fatalf("tool name wrong: %v", evs[1])
+	}
+
+	// revert the user message: it and the assistant reply go, and the text
+	// comes back for the editor
+	var rev map[string]any
+	request("POST", fmt.Sprintf("/api/chats/%d/revert", id),
+		fmt.Sprintf(`{"message_id":%d}`, int64(got.Messages[0]["id"].(float64))), &rev, 200)
+	if rev["reverted"] != "open the paper" {
+		t.Fatalf("revert text wrong: %v", rev)
+	}
+	if n, _ := rev["deleted"].(float64); n != 2 {
+		t.Fatalf("revert deleted = %v, want 2", rev["deleted"])
+	}
+	request("GET", fmt.Sprintf("/api/chats/%d", id), "", &got, 200)
+	if len(got.Messages) != 0 {
+		t.Fatalf("revert did not clear the transcript: %v", got.Messages)
 	}
 
 	// list + rename + delete

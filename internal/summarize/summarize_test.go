@@ -55,6 +55,25 @@ func TestExamplesBlock(t *testing.T) {
 	}
 }
 
+func TestFilterCategoryTags(t *testing.T) {
+	got := filterCategoryTags(
+		[]string{"computer-science", "machine-learning", "quantization", "latent-space"},
+		"computer-science/machine-learning")
+	want := []string{"quantization", "latent-space"}
+	if len(got) != len(want) {
+		t.Fatalf("filterCategoryTags = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("filterCategoryTags = %v, want %v", got, want)
+		}
+	}
+	// no category: nothing is dropped
+	if got := filterCategoryTags([]string{"a"}, ""); len(got) != 1 {
+		t.Fatalf("empty category must keep tags, got %v", got)
+	}
+}
+
 func TestTokenize(t *testing.T) {
 	got := tokenize("The, Metatheory! of Session-Types (2026)")
 	want := []string{"the", "metatheory", "of", "session", "types", "2026"}

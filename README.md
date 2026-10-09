@@ -292,8 +292,11 @@ and testable in the chat panel). On tool-capable providers
 - fetch external links it references (`fetch_url`, with `ask.tools`).
 
 Tool calling works on OpenAI-compatible providers, Anthropic, and Ollama's
-native API. Tagging in the pipeline stays grammar-constrained regardless
-of the chat provider.
+native API. Text and tool calls are shown in the order they stream, and a
+↩ button on any of your messages **reverts** it: the message and everything
+after it are deleted and the text returns to the editor (no branching).
+Tagging in the pipeline stays grammar-constrained regardless of the chat
+provider.
 
 ```bash
 vellum chat list
@@ -338,7 +341,11 @@ The SQLite schema is identical to the retired Python prototype's, so a
 - **Vocabulary growth**: the tagging prompt invites the model to propose
   new tags (`tags_other`, surfaced by the Vocabulary dialog and
   `vellum vocab review`); promote the keepers and the vocabulary grows
-  with your library instead of staying stagnant.
+  with your library instead of staying stagnant. The prompt asks for
+  SPECIFIC tags (methods, techniques, subfields) rather than broad umbrellas,
+  and tags that merely restate the document's category (e.g. a
+  `computer-science/machine-learning` paper tagged `computer-science`) are
+  dropped — promote the specific suggestions the model proposes instead.
 - **Server lifecycle**: llama.cpp serves one model per process, so the
   launcher runs two small llama-servers (chat :8081, embeddings :8082) and
   reuses them if they're already up.
