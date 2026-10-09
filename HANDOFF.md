@@ -284,8 +284,22 @@ learnable suggestion loop).
   vault indexes the notes and ignores .obsidian/ etc.
 - deep links: the UI mirrors the active page into the URL
   (`?doc=`, `&view=preview&page=`, `?tag=`, `?collection=`, `?note=`,
-  `?view=tags|notes|collections`, `?q=&semantic=1`); `pageQuery`/`syncURL`/
-  `openFromURL` in app.js, a 🔗 copy-link button per page.
+  `?chat=`, `?view=tags|notes|collections|chats|stats`, `?q=&semantic=1`);
+  `pageQuery`/`syncURL`/`openFromURL` in app.js, a 🔗 copy-link button per page.
+- UI chrome (app.js only): a ☰ pages sidebar (jump/reorder/close; ordering
+  syncs the strip), strip drag-reorder, a Ctrl/Cmd-K command palette
+  (pages/docs/tags + commands), a stacking toast area (#toasts) with the
+  progress bar kept separate (#notice), bulk document selection with
+  Process/Regenerate/Add-to-collection/Remove (`selectionBar`,
+  `POST /api/documents/remove|regenerate`), filter chips, per-row hover
+  actions, a dirty-state Save on the Summary page, a searchable category
+  filter, a Stats page (`GET /api/stats`) with an Embed button
+  (`POST /api/embed` + `embedded/chunks` in /api/status), focus-visible
+  styles and a theme preset `auto` that follows the OS.
+- chat polish: stop an in-flight answer (AbortController + Esc; the server
+  watches r.Context and keeps the partial reply), scroll-lock with a "new"
+  pill, per-answer copy, clickable `#id` document refs (`linkifyDocRefs`),
+  inline rename, Markdown export, and `POST /api/chats/{id}/clear`.
 - backends: bundled llama.cpp | your own llama.cpp
   (`llm.external: true`) | Ollama (`llm.backend: ollama`; tags remain
   grammar-bound through Ollama's `"format"`). `vellum backends` prints
@@ -474,11 +488,15 @@ Docker: `pack/Dockerfile` + `docker-entrypoint.sh`; Hub is proxy-blocked
 
 ## 10. Where things state-wise
 
-- HEAD: v0.28.0 (`ec8ddbb`), all tests green. Since 0.27.0: chat revert
-  (delete a message + everything after, text back to the editor),
-  interleaved text/tool rendering (stored in stream order), more specific
-  tags (prompt + `filterCategoryTags`), and a fix for the esc()
-  double-escaping that showed `&#39;` for quotes.
+- HEAD: v0.29.0 (`ff025ec`), all tests green. Since 0.28.0: a UI/UX pass —
+  a ☰ pages sidebar (jump/reorder/close), a Ctrl/Cmd-K command palette,
+  bulk document actions, filter chips, per-row actions, a Stats page and
+  an Embed button, a stacking toast area, chat stop/scroll-lock/copy/
+  linkified #refs/rename/export/clear, dirty-state Save, and an "auto"
+  theme that follows the OS.
+- v0.28.0: chat revert; interleaved text/tool rendering; more specific
+  tags (prompt + `filterCategoryTags`); fixed the esc() double-escaping
+  that showed `&#39;`.
 - v0.27.0: native Ollama tool calling (previously only OpenAI-compatible
   and Anthropic ran the tool loop).
 - v0.26.0: SAVED scoped chatbots (persisted sessions confined to a
@@ -509,9 +527,9 @@ Docker: `pack/Dockerfile` + `docker-entrypoint.sh`; Hub is proxy-blocked
   pages; .item-list styling with hover affordance.
 - v0.17: COLLECTIONS; CSS-order page moves; bottom status bar.
 - v0.16: auto-filing learns from user corrections; flash-free updates.
-- Pack stage `pack/stage/vellum-ec8ddbb-linux-amd64/` (user's live
-  library inside) updated to the 0.28.0 binary; distributable tarball
-  `pack/vellum-ec8ddbb-linux-x86_64.tar.gz` (clean of the DB — verified
+- Pack stage `pack/stage/vellum-ff025ec-linux-amd64/` (user's live
+  library inside) updated to the 0.29.0 binary; distributable tarball
+  `pack/vellum-ff025ec-linux-x86_64.tar.gz` (clean of the DB — verified
   with tar -tzf | grep -c library.db = 0). NOTE: the user runs their OWN
   serve(s) and restarts them freely — an old one (PID 701, port 8097) is
   long-running; a newer one from the stage may appear (its exe shows
