@@ -43,8 +43,22 @@ const NOTICE_JOB = 6000;     // job outcomes: readable
 const NOTICE_QUICK = 1200;  // confirmations that would just get in the way
 const NOTICE_MID = 2000;    // membership edits etc.
 
-function notice(msg, ms = 3000) { setNotice(msg ? [document.createTextNode(msg)] : [], ms); }
+// notice shows a transient toast. Discrete messages STACK in #toasts
+// (errors stick around longer); progress updates reuse the single #notice bar.
+function notice(msg, ms = 3000) {
+  if (!msg) return;
+  const bad = /error|failed|⚠|refus|denied/i.test(msg);
+  const box = el("div", { class: "toast" + (bad ? " bad" : "") });
+  box.append(document.createTextNode(msg));
+  box.append(el("button", { class: "toast-close", title: "dismiss", onclick: () => box.remove() }, "✕"));
+  const host = $("#toasts") || document.body;
+  host.append(box);
+  while (host.children.length > 6) host.firstChild.remove();
+  if (ms > 0) setTimeout(() => box.remove(), bad ? ms * 2 : ms);
+}
 
+// setNotice drives the single sticky progress bar (#notice) used by the
+// progress poller — not the stacked toast area.
 let noticeTimer = null;
 function setNotice(children, ms = 3000) {
   const box = $("#notice");
@@ -73,6 +87,7 @@ const PAGE_KINDS = {
   note:        { label: "Note" },
   chats:       { label: null },
   chat:        { label: "Chat" },
+  stats:       { label: null },
   summary:     { label: "Summary" },
   preview:     { label: "Preview" },
   text:        { label: "Text" },
@@ -81,10 +96,10 @@ const PAGE_KINDS = {
 let pages = [];        // ordered: the strip order IS the array order
 let activePage = null; // last-interacted page (Esc closes it)
 
-// library, collections, tags, notes and chats are singletons (no per-item id).
+// library, collections, tags, notes, chats and stats are singletons.
 const SINGLETON_PAGES = {
   library: "library", collections: "collections",
-  tags: "tags", notes: "notes", chats: "chats",
+  tags: "tags", notes: "notes", chats: "chats", stats: "stats",
 };
 const isSingleton = (kind) => kind in SINGLETON_PAGES;
 const pageKey = (kind, docId) =>
@@ -193,6 +208,7 @@ function pageQuery(page) {
     case "tags":        q.set("view", "tags"); break;
     case "notes":       q.set("view", "notes"); break;
     case "chats":       q.set("view", "chats"); break;
+    case "stats":       q.set("view", "stats"); break;
     case "collection":  q.set("collection", page.docId); break;
     case "tag":         q.set("tag", page.tag); break;
     case "note":        q.set("note", page.docId); break;
@@ -242,6 +258,7 @@ function buildPageChrome(page) {
   }));
   controls.append(mkBtn("✕", "close page", () => closePage(page)));
   const head = el("div", { class: "page-head" }, title, controls);
+  head.addEventListener("mousedown", (ev) => startPageDrag(ev, page));
   const content = el("div", { class: "page-body" });
   if (page.kind === "library") { content.id = "list"; content.classList.add("item-list"); }
   if (page.kind === "collections") content.id = "collections-list";
@@ -264,6 +281,7 @@ function updatePageTitle(page) {
   if (page.kind === "tags") { page.titleEl.textContent = "Tags"; return; }
   if (page.kind === "notes") { page.titleEl.textContent = "Notes"; return; }
   if (page.kind === "chats") { page.titleEl.textContent = "Chats"; return; }
+  if (page.kind === "stats") { page.titleEl.textContent = "Stats"; return; }
   if (page.kind === "chat") {
     const s = page.data?.session;
     page.titleEl.textContent = "[Chat] " + ((s && s.title) || ("#" + page.docId));
@@ -308,6 +326,166 @@ function movePage(page, dir) {
 // follows the array without touching the DOM.
 function syncPageOrder() {
   pages.forEach((p, i) => { p.el.style.order = i; });
+  renderPagesPanel();
+}
+
+// movePageTo moves a page to a target index (the strip order is the array
+// order; CSS `order` follows it without moving DOM nodes).
+function movePageTo(page, index) {
+  const i = pages.indexOf(page);
+  if (i < 0) return;
+  index = Math.max(0, Math.min(pages.length - 1, index));
+  if (i === index) return;
+  pages.splice(i, 1);
+  pages.splice(index, 0, page);
+  syncPageOrder();
+  markActive(page);
+}
+
+function closeOtherPages(keep) {
+  for (const p of [...pages]) if (p !== keep) closePage(p);
+}
+function closeAllPages() {
+  for (const p of [...pages]) closePage(p);
+}
+
+// openPagesPanel toggles the left overlay listing every open page: click to
+// jump, ▲/▼ to reorder (which reorders the actual pages), ✕ to close.
+function openPagesPanel() {
+  const existing = $("#pages-panel");
+  if (existing) { existing.remove(); return; }
+  const panel = el("aside", { id: "pages-panel" });
+  panel.append(el("div", { class: "panel-head" },
+    el("b", {}, "Open pages"),
+    el("span", { style: "flex:1" }),
+    el("button", { class: "mini plain", title: "close every page",
+      onclick: () => closeAllPages() }, "close all"),
+    el("button", { class: "mini plain", title: "hide", onclick: () => panel.remove() }, "✕")));
+  panel.append(el("div", { class: "panel-list", id: "pages-panel-list" }));
+  document.body.append(panel);
+  renderPagesPanel();
+}
+
+function renderPagesPanel() {
+  const list = $("#pages-panel-list");
+  if (!list) return;
+  list.replaceChildren();
+  pages.forEach((p, i) => {
+    const label = p.titleEl ? p.titleEl.textContent : p.key;
+    list.append(el("div", { class: "panel-row" + (p === activePage ? " active" : "") },
+      el("span", {
+        class: "panel-title", title: label,
+        onclick: () => {
+          markActive(p);
+          p.el.scrollIntoView({ block: "nearest", inline: "nearest" });
+          renderPagesPanel();
+        },
+      }, label),
+      el("button", { class: "mini plain", title: "move up", disabled: i === 0,
+        onclick: (ev) => { ev.stopPropagation(); movePageTo(p, i - 1); } }, "▲"),
+      el("button", { class: "mini plain", title: "move down", disabled: i === pages.length - 1,
+        onclick: (ev) => { ev.stopPropagation(); movePageTo(p, i + 1); } }, "▼"),
+      el("button", { class: "mini plain", title: "close", onclick: (ev) => { ev.stopPropagation(); closePage(p); } }, "✕")));
+  });
+  if (!pages.length) list.append(el("p", { class: "hint" }, "no pages open"));
+}
+
+// startPageDrag reorders the strip when its title bar is dragged across a
+// neighbour's midpoint.
+function startPageDrag(ev, page) {
+  if (ev.button !== 0 || ev.target.closest("button")) return;
+  const startX = ev.clientX;
+  let dragging = false;
+  const onMove = (e) => {
+    if (!dragging && Math.abs(e.clientX - startX) < 6) return;
+    dragging = true;
+    page.el.classList.add("dragging");
+    let idx = 0;
+    for (let i = 0; i < pages.length; i++) {
+      const r = pages[i].el.getBoundingClientRect();
+      if (e.clientX > r.left + r.width / 2) idx = i;
+    }
+    movePageTo(page, idx);
+  };
+  const onUp = () => {
+    document.removeEventListener("mousemove", onMove);
+    document.removeEventListener("mouseup", onUp);
+    page.el.classList.remove("dragging");
+  };
+  document.addEventListener("mousemove", onMove);
+  document.addEventListener("mouseup", onUp);
+}
+
+/* --------------------------------------------------------- command palette */
+
+// paletteItems builds the searchable command list (open pages, actions,
+// documents, tags) at open time so it reflects the current state.
+function paletteItems() {
+  const items = [];
+  for (const p of pages)
+    items.push({
+      label: "go to: " + (p.titleEl ? p.titleEl.textContent : p.key),
+      run: () => { markActive(p); p.el.scrollIntoView({ block: "nearest", inline: "nearest" }); },
+    });
+  const cmds = [
+    ["Open All Documents", () => openPage("library")],
+    ["Open Chats", () => openPage("chats")],
+    ["Open Stats", () => openPage("stats")],
+    ["Open Tags", () => openPage("tags")],
+    ["Open Collections", () => openPage("collections")],
+    ["Open Notes", () => openPage("notes")],
+    ["New library chat", () => openScopeChat("library", "")],
+    ["Ingest files or folders…", () => $("#btn-ingest").click()],
+    ["Watch folders…", () => $("#btn-watch").click()],
+    ["Process pending documents", () => processIds([])],
+    ["Embed chunks for semantic search", () => embedNow()],
+    ["Vocabulary…", () => $("#btn-vocab").click()],
+    ["Settings…", () => $("#btn-settings").click()],
+    ["Export library backup", () => { location.href = "/api/library/export"; }],
+  ];
+  for (const [label, run] of cmds) items.push({ label, run });
+  for (const d of allDocs.slice(0, 500))
+    items.push({ label: "doc: " + (d.title || d.path.split("/").pop()),
+      run: () => openPage("summary", d.id) });
+  for (const t of vocabNames) items.push({ label: "tag: #" + t, run: () => openTagPage(t) });
+  return items;
+}
+
+function openPalette() {
+  const prev = $("#palette");
+  if (prev) { prev.remove(); return; }
+  const box = el("div", { id: "palette" });
+  const input = el("input", { type: "text", placeholder: "jump to a page, document, tag, or run a command…" });
+  const list = el("div", { class: "palette-list" });
+  box.append(input, list);
+  box.addEventListener("mousedown", (e) => { if (e.target === box) box.remove(); });
+  document.body.append(box);
+  const all = paletteItems();
+  let shown = [];
+  let sel = 0;
+  const render = () => {
+    list.replaceChildren();
+    shown.forEach((it, i) => list.append(el("div", {
+      class: "palette-item" + (i === sel ? " sel" : ""),
+      onclick: () => { box.remove(); it.run(); },
+    }, it.label)));
+    if (!shown.length) list.append(el("p", { class: "hint" }, "no matches"));
+  };
+  const filter = () => {
+    const q = input.value.trim().toLowerCase();
+    shown = (q ? all.filter((it) => it.label.toLowerCase().includes(q)) : all).slice(0, 40);
+    sel = 0;
+    render();
+  };
+  input.addEventListener("input", filter);
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "ArrowDown") { sel = Math.min(sel + 1, shown.length - 1); render(); e.preventDefault(); }
+    else if (e.key === "ArrowUp") { sel = Math.max(sel - 1, 0); render(); e.preventDefault(); }
+    else if (e.key === "Enter") { if (shown[sel]) { box.remove(); shown[sel].run(); } e.preventDefault(); }
+    else if (e.key === "Escape") { box.remove(); e.stopPropagation(); }
+  });
+  filter();
+  input.focus();
 }
 
 function toggleExpand(page) {
@@ -381,6 +559,7 @@ async function refreshPage(page) {
       : page.kind === "notes" ? await api("/api/notes")
       : page.kind === "note" ? await api(`/api/notes/${page.docId}`)
       : page.kind === "chats" ? await api("/api/chats")
+      : page.kind === "stats" ? await api("/api/stats")
       : page.kind === "chat" ? await api(`/api/chats/${page.docId}`)
       : await api(`/api/documents/${page.docId}`);
     if (token !== page.token) return; // a newer refresh won
@@ -433,6 +612,7 @@ function renderPageContent(page) {
     case "notes":       page.content.replaceChildren(notesContent(page)); break;
     case "note":        page.content.replaceChildren(noteContent(page)); break;
     case "chats":       page.content.replaceChildren(chatsContent(page)); break;
+    case "stats":       page.content.replaceChildren(statsContent(page)); break;
     case "chat":        page.content.replaceChildren(chatContent(page)); break;
     case "summary": page.content.replaceChildren(summaryContent(page)); break;
     case "preview": page.content.replaceChildren(previewContent(page)); break;
@@ -472,19 +652,19 @@ async function loadDocs() {
 
 async function loadCategories() {
   const cats = await api("/api/categories");
-  const sel = $("#f-category");
-  const cur = sel.value;
-  sel.replaceChildren(el("option", { value: "" }, "any category"));
-  for (const c of cats)
-    sel.append(el("option", { value: c.category },
-      `${c.category} (${c.documents})`));
-  sel.value = cur;
+  // #f-category is a searchable <input list=...>; only the datalist is filled
   const dl = $("#category-list");
-  if (dl) { dl.replaceChildren(); for (const c of cats) dl.append(el("option", { value: c.category })); }
+  if (dl) {
+    dl.replaceChildren();
+    for (const c of cats) dl.append(el("option", { value: c.category }));
+  }
 }
 
 for (const id of ["#f-kind", "#f-category"])
   $(id).addEventListener("change", () => { if (!$("#q").value.trim()) loadDocs(); });
+$("#f-category").addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !$("#q").value.trim()) { e.preventDefault(); loadDocs(); }
+});
 $("#f-tags").addEventListener("keydown", (e) => {
   if (e.key === "Enter" && !$("#q").value.trim()) loadDocs();
 });
@@ -499,8 +679,131 @@ function clearFilters() {
 async function refresh() {
   const status = await api("/api/status");
   $("#pending-n").textContent = status.pending ? `(${status.pending})` : "";
+  const emb = $("#embed-status");
+  if (emb) emb.textContent = status.chunks ? `${status.embedded}/${status.chunks} embedded` : "";
+  const eb = $("#btn-embed");
+  if (eb) {
+    const full = status.chunks > 0 && status.embedded >= status.chunks;
+    eb.disabled = !status.embed_up || full;
+    eb.title = !status.embed_up ? "no embedding server running"
+      : full ? "all chunks embedded" : "embed chunks that have no vector (semantic search)";
+  }
   refreshJobs(); // keeps the Jobs badge live even when the dialog is shut
   return status;
+}
+
+// ------------------------------------------------------ selection / bulk
+
+let selectMode = false;
+const selectedDocs = new Set();
+let lastSelectedDoc = null;
+
+function toggleSelectMode() {
+  selectMode = !selectMode;
+  if (!selectMode) { selectedDocs.clear(); lastSelectedDoc = null; }
+  if (libraryPage()) refreshPage(libraryPage());
+}
+
+function toggleDocSelected(d, shift) {
+  if (shift && lastSelectedDoc != null) {
+    const ids = allDocs.map((x) => x.id);
+    const a = ids.indexOf(lastSelectedDoc), b = ids.indexOf(d.id);
+    if (a >= 0 && b >= 0) {
+      const [lo, hi] = a < b ? [a, b] : [b, a];
+      for (let i = lo; i <= hi; i++) selectedDocs.add(ids[i]);
+    }
+  } else if (selectedDocs.has(d.id)) {
+    selectedDocs.delete(d.id);
+  } else {
+    selectedDocs.add(d.id);
+  }
+  lastSelectedDoc = d.id;
+}
+
+function updateSelectionBar() {
+  const bar = document.querySelector(".select-bar");
+  if (!bar) return;
+  const c = bar.querySelector(".sel-count");
+  if (c) c.textContent = `${selectedDocs.size} selected`;
+  for (const b of bar.querySelectorAll("button[data-needs]"))
+    b.disabled = selectedDocs.size === 0;
+}
+
+function selectionBar() {
+  const need = selectedDocs.size === 0;
+  const bar = el("div", { class: "select-bar row" },
+    el("span", { class: "hint sel-count" }, `${selectedDocs.size} selected`),
+    el("button", { class: "small", "data-needs": "1", disabled: need, onclick: () => processIds([...selectedDocs]) }, "Process"),
+    el("button", { class: "small", "data-needs": "1", disabled: need, onclick: () => bulkRegenerate([...selectedDocs]) }, "Regenerate"),
+    el("button", { class: "small", "data-needs": "1", disabled: need, onclick: () => bulkAddToCollection([...selectedDocs]) }, "Add to collection…"),
+    el("button", { class: "small", "data-needs": "1", disabled: need, onclick: () => bulkRemove([...selectedDocs]) }, "Remove"),
+    el("button", { class: "small plain", onclick: () => { selectedDocs.clear(); refreshPage(libraryPage()); } }, "clear"));
+  return bar;
+}
+
+async function bulkRegenerate(ids) {
+  try {
+    notice(`Regenerating ${ids.length} document(s)…`);
+    await api("/api/documents/regenerate", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ids, fields: ["meta", "summary", "tags", "category"] }),
+    });
+    await refresh();
+    notice(`Queued regeneration for ${ids.length} document(s) — see Jobs.`);
+  } catch (e) { notice("regenerate: " + e.message); }
+}
+
+async function bulkRemove(ids) {
+  if (!confirm(`Remove ${ids.length} document(s) from the library?\n(The files stay on disk.)`)) return;
+  try {
+    const r = await api("/api/documents/remove", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ids }),
+    });
+    notice(`Removed ${(r.removed || []).length} document(s) — the files stay on disk.`);
+    selectedDocs.clear();
+    selectMode = false;
+    await loadDocs();
+    await loadCategories();
+    await refresh();
+    refreshCollectionPages();
+  } catch (e) { notice("remove: " + e.message); }
+}
+
+async function bulkAddToCollection(ids) {
+  try {
+    const cols = await api("/api/collections");
+    if (!cols.length) { notice("no collections yet — create one in Collections…"); return; }
+    const pick = prompt(`Add ${ids.length} document(s) to which collection?\n` +
+      cols.map((c) => "• " + c.name).join("\n"), cols[0].name);
+    if (!pick) return;
+    const col = cols.find((c) => c.name.toLowerCase() === pick.trim().toLowerCase());
+    if (!col) { notice("no collection named " + pick); return; }
+    await api(`/api/collections/${col.id}/documents`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ids }),
+    });
+    notice(`Added ${ids.length} document(s) to “${col.name}”.`);
+    refreshCollectionPages();
+  } catch (e) { notice("collection: " + e.message); }
+}
+
+// activeFilterChips renders the active search filters as removable chips.
+function activeFilterChips() {
+  const chips = el("div", { class: "chips filter-chips" });
+  const add = (label, clear) => chips.append(el("span", { class: "chip" }, label,
+    el("button", { title: "remove this filter", onclick: clear }, "✕")));
+  if ($("#f-kind").value) add("kind: " + $("#f-kind").value, () => { $("#f-kind").value = ""; loadDocs(); });
+  if ($("#f-category").value) add("category: " + $("#f-category").value, () => { $("#f-category").value = ""; loadDocs(); });
+  for (const t of $("#f-tags").value.split(",").map((s) => s.trim()).filter(Boolean))
+    add("tag: " + t, () => {
+      $("#f-tags").value = $("#f-tags").value.split(",").map((s) => s.trim())
+        .filter((x) => x && x.toLowerCase() !== t.toLowerCase()).join(", ");
+      loadDocs();
+    });
+  if (!chips.children.length) return null;
+  chips.append(el("button", { class: "mini plain", title: "clear all filters", onclick: clearFilters }, "clear all"));
+  return chips;
 }
 
 function renderList(docs) {
@@ -511,6 +814,16 @@ function renderList(docs) {
   const scrollTop = list.scrollTop;
   const collapsed = collectCollapsed(list);
   list.replaceChildren();
+
+  const fchips = activeFilterChips();
+  if (fchips) list.append(fchips);
+  list.append(el("div", { class: "row select-toolbar" },
+    selectMode
+      ? el("button", { class: "small plain", onclick: toggleSelectMode }, "done selecting")
+      : el("button", { class: "small plain", title: "select multiple documents for batch actions", onclick: toggleSelectMode }, "select"),
+    selectMode ? el("span", { class: "hint" }, "check documents, then act (shift-click for a range)") : null));
+  if (selectMode) list.append(selectionBar());
+
   if (!docs.length) {
     const p = el("p", { class: "hint" });
     if (hasFilters()) {
@@ -520,9 +833,13 @@ function renderList(docs) {
       p.append("Nothing here yet — use Ingest to index some files or directories.");
     }
     list.append(p);
+    list.scrollTop = scrollTop;
     return;
   }
-  renderTree(list, docs, { collapsed, onCategoryRename: openRenameDialog });
+  renderTree(list, docs, {
+    collapsed, onCategoryRename: openRenameDialog,
+    selectable: selectMode,
+  });
   list.scrollTop = scrollTop;
 }
 
@@ -556,7 +873,7 @@ function renderTree(container, docs, opts = {}) {
   const renderGroup = (node, path, plain) => {
     const ul = el("ul", { class: "cat-items" });
     for (const d of node.docs)
-      ul.append(docRow(d, { inTree: true, onRemove: opts.onRemove }));
+      ul.append(docRow(d, { inTree: true, onRemove: opts.onRemove, selectable: opts.selectable }));
     const kids = [...node.children.entries()].sort((a, b) =>
       a[0].localeCompare(b[0]));
     for (const [child, childNode] of kids) {
@@ -617,6 +934,32 @@ function docRow(d, opts = {}) {
   const row = el("li", { class: "item", onclick: () => openPage("summary", d.id) },
     el("span", { class: "item-title" }, esc(title)),
     chips);
+  if (opts.selectable) {
+    const cb = el("input", { type: "checkbox", class: "doc-check" });
+    cb.checked = selectedDocs.has(d.id);
+    cb.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      if (ev.shiftKey && lastSelectedDoc != null) {
+        toggleDocSelected(d, true);
+        refreshPage(libraryPage()); // re-render so the whole range shows checked
+        return;
+      }
+      if (cb.checked) selectedDocs.add(d.id);
+      else selectedDocs.delete(d.id);
+      lastSelectedDoc = d.id;
+      row.classList.toggle("selected", selectedDocs.has(d.id));
+      updateSelectionBar();
+    });
+    row.prepend(cb);
+    if (selectedDocs.has(d.id)) row.classList.add("selected");
+  }
+  const acts = el("div", { class: "row-actions" });
+  if (isPdf(d.path))
+    acts.append(el("button", { class: "mini plain", title: "open the PDF preview",
+      onclick: (ev) => { ev.stopPropagation(); openPage("preview", d.id); } }, "preview"));
+  acts.append(el("button", { class: "mini plain", title: "chat about this document",
+    onclick: (ev) => { ev.stopPropagation(); openDocChat(d.id); } }, "chat"));
+  row.append(acts);
   if (opts.onRemove) row.append(el("button", {
     class: "mini plain row-remove", title: "remove from this collection",
     onclick: (ev) => { ev.stopPropagation(); opts.onRemove(d); },
@@ -1256,33 +1599,44 @@ const CHAT_SCOPE_LABELS = {
 function chatsContent(page) {
   const chats = page.data || [];
   const wrap = el("div");
+  const search = el("input", { type: "search", placeholder: "filter chats by title or scope…" });
   wrap.append(el("div", { class: "row" },
     el("button", { onclick: () => openScopeChat("library", "") }, "New library chat"),
-    el("span", { class: "hint" },
-      "saved chat sessions, scoped to a document, tag, shelf, collection, or the whole library")));
-  if (!chats.length) {
-    wrap.append(el("p", { class: "hint" },
-      "No chats yet. Start one here, or from a document / tag / shelf / collection."));
-    return wrap;
-  }
-  const ul = el("ul", { class: "cat-items" });
-  for (const c of chats) {
-    const row = el("li", { class: "item hit", onclick: () => openChatPage(c.id) },
-      el("span", { class: "item-title" }, esc(c.title || ("Chat #" + c.id))),
-      el("div", { class: "chips" },
-        el("span", { class: "chip sug", title: c.scope_kind + " " + c.scope_value },
-          CHAT_SCOPE_LABELS[c.scope_kind] || c.scope_kind),
-        el("span", { class: "chip" }, `${c.messages || 0} msg`),
-        c.updated_at ? el("span", { class: "chip" }, "updated " + c.updated_at.slice(0, 16).replace("T", " ")) : null,
-        el("button", { class: "mini plain", title: "rename",
-          onclick: (ev) => { ev.stopPropagation(); renameChat(c); } }, "✎"),
-        el("button", { class: "mini plain", title: "delete",
-          onclick: (ev) => { ev.stopPropagation(); deleteChatSession(c); } }, "✕")));
-    ul.append(row);
-  }
+    search));
+  const hint = el("p", { class: "hint" },
+    "saved chat sessions, scoped to a document, tag, shelf, collection, or the whole library");
+  wrap.append(hint);
   const box = el("div", { class: "item-list" });
-  box.append(el("details", { class: "group", open: true },
-    el("summary", {}, "all chats", el("span", { class: "count" }, String(chats.length))), ul));
+  const render = () => {
+    const q = search.value.trim().toLowerCase();
+    const rows = chats.filter((c) => !q ||
+      (c.title || "").toLowerCase().includes(q) ||
+      (c.scope_kind + " " + c.scope_value).toLowerCase().includes(q));
+    box.replaceChildren();
+    if (!rows.length) {
+      box.append(el("p", { class: "hint" }, chats.length ? "no chats match" :
+        "No chats yet. Start one here, or from a document / tag / shelf / collection."));
+      return;
+    }
+    const ul = el("ul", { class: "cat-items" });
+    for (const c of rows) {
+      ul.append(el("li", { class: "item hit", onclick: () => openChatPage(c.id) },
+        el("span", { class: "item-title" }, esc(c.title || ("Chat #" + c.id))),
+        el("div", { class: "chips" },
+          el("span", { class: "chip sug", title: c.scope_kind + " " + c.scope_value },
+            CHAT_SCOPE_LABELS[c.scope_kind] || c.scope_kind),
+          el("span", { class: "chip" }, `${c.messages || 0} msg`),
+          c.updated_at ? el("span", { class: "chip" }, "updated " + c.updated_at.slice(0, 16).replace("T", " ")) : null,
+          el("button", { class: "mini plain", title: "rename",
+            onclick: (ev) => { ev.stopPropagation(); renameChat(c); } }, "✎"),
+          el("button", { class: "mini plain", title: "delete",
+            onclick: (ev) => { ev.stopPropagation(); deleteChatSession(c); } }, "✕"))));
+    }
+    box.append(el("details", { class: "group", open: true },
+      el("summary", {}, "chats", el("span", { class: "count" }, String(rows.length))), ul));
+  };
+  search.addEventListener("input", render);
+  render();
   wrap.append(box);
   return wrap;
 }
@@ -1400,6 +1754,93 @@ async function revertMessage(page, m) {
   } catch (e) { notice("revert: " + e.message); }
 }
 
+// linkifyDocRefs turns "#123" mentions in an assistant answer into chips that
+// open that document (skipping links, code and pre).
+function linkifyDocRefs(root) {
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+    acceptNode: (n) => {
+      if (!/#\d+/.test(n.nodeValue || "")) return NodeFilter.FILTER_REJECT;
+      const p = n.parentElement;
+      if (p && (p.closest("a") || p.closest("code") || p.closest("pre")))
+        return NodeFilter.FILTER_REJECT;
+      return NodeFilter.FILTER_ACCEPT;
+    },
+  });
+  const nodes = [];
+  while (walker.nextNode()) nodes.push(walker.currentNode);
+  for (const n of nodes) {
+    const text = n.nodeValue;
+    const frag = document.createDocumentFragment();
+    let last = 0, m;
+    const re = /#(\d{1,9})\b/g;
+    while ((m = re.exec(text))) {
+      if (m.index > last) frag.append(document.createTextNode(text.slice(last, m.index)));
+      const id = Number(m[1]);
+      frag.append(el("span", {
+        class: "docref", title: "open document #" + id,
+        onclick: (ev) => { ev.stopPropagation(); openPage("summary", id); },
+      }, "#" + id));
+      last = m.index + m[0].length;
+    }
+    if (last < text.length) frag.append(document.createTextNode(text.slice(last)));
+    n.parentNode.replaceChild(frag, n);
+  }
+}
+
+// copyBar is the per-answer "copy" affordance; getText reads the live text.
+function copyBar(getText) {
+  return el("div", { class: "chips chat-copy" },
+    el("button", {
+      class: "chip", title: "copy this answer",
+      onclick: (ev) => {
+        ev.stopPropagation();
+        const t = getText() || "";
+        if (navigator.clipboard) navigator.clipboard.writeText(t)
+          .then(() => notice("Copied.", NOTICE_QUICK), () => {});
+        else notice("clipboard unavailable");
+      },
+    }, "copy"));
+}
+
+// chatDownload exports a transcript as Markdown.
+function chatDownload(page) {
+  const data = page.data;
+  if (!data) return;
+  const lines = [`# ${(data.session && data.session.title) || "Chat"}`, "",
+    `scope: ${data.scope_label || (data.session && data.session.scope_kind) || ""}`, ""];
+  for (const m of data.messages || []) {
+    if (m.role === "user") {
+      lines.push("## You", "", m.content, "");
+    } else {
+      lines.push("## Assistant", "");
+      for (const seg of chatEvents(m)) {
+        if (seg.text !== undefined) lines.push(seg.text);
+        else lines.push("`tool: " + seg.tool + "`");
+      }
+      lines.push("");
+    }
+  }
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([lines.join("\n")], { type: "text/markdown" }));
+  a.download = `chat-${page.docId}.md`;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+}
+
+async function clearChatMessages(page) {
+  if (!confirm("Delete all messages in this chat? (The session stays.)")) return;
+  try {
+    await api(`/api/chats/${page.docId}/clear`, { method: "POST" });
+    await rerenderChat(page);
+    refreshChatsRoot();
+    notice("Chat cleared.", NOTICE_MID);
+  } catch (e) { notice("clear: " + e.message); }
+}
+
+// activeChatAbort is the in-flight chat stream, so Esc and the Stop button can
+// cancel it.
+let activeChatAbort = null;
+
 // chatContent is a saved, scoped conversation.
 function chatContent(page) {
   const data = page.data || {};
@@ -1415,9 +1856,24 @@ function chatContent(page) {
       openChatPage(s.id);
     } catch (e) { notice("chat: " + e.message); }
   };
+  const rename = () => {
+    const n = prompt("Chat title:", sess.title || "");
+    if (n === null) return;
+    api(`/api/chats/${sess.id}`, {
+      method: "PATCH", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title: n }),
+    }).then((s) => {
+      sess.title = s.title;
+      updatePageTitle(page);
+      refreshChatsRoot();
+    }).catch((e) => notice("chat: " + e.message));
+  };
   wrap.append(el("div", { class: "row chat-head" },
     el("span", { class: "hint" }, "scope: " + (data.scope_label || sess.scope_kind)),
     el("span", { style: "flex:1" }),
+    el("button", { class: "small plain", title: "rename this chat", onclick: rename }, "✎"),
+    el("button", { class: "small plain", title: "export this chat as Markdown", onclick: () => chatDownload(page) }, "⤓"),
+    el("button", { class: "small plain", title: "delete all messages (keep the session)", onclick: () => clearChatMessages(page) }, "clear"),
     el("button", { class: "small plain", title: "start a new chat with the same scope", onclick: newSameScope }, "New"),
     el("button", { class: "small plain", onclick: () => openPage("chats") }, "Chats…")));
   wrap.append(askConfigBox(page));
@@ -1434,18 +1890,37 @@ function chatContent(page) {
           onclick: (ev) => { ev.stopPropagation(); revertMessage(page, m); },
         }, "↩")));
     } else {
-      turn.append(assistantView(m));
+      const ans = assistantView(m);
+      linkifyDocRefs(ans);
+      turn.append(ans, copyBar(() => m.content || ""));
     }
     log.append(turn);
   }
-  const scrollDown = () => { log.scrollTop = log.scrollHeight; };
+
+  // scroll lock: only follow the stream when the reader is at the bottom
+  let follow = true;
+  log.addEventListener("scroll", () => {
+    follow = log.scrollTop + log.clientHeight >= log.scrollHeight - 30;
+    newPill.classList.toggle("hidden", follow);
+  });
+  const newPill = el("button", { class: "chat-new hidden", onclick: () => {
+    follow = true;
+    log.scrollTop = log.scrollHeight;
+    newPill.classList.add("hidden");
+  } }, "↓ new messages");
+  const atBottom = () => {
+    if (follow) log.scrollTop = log.scrollHeight;
+    else newPill.classList.remove("hidden");
+  };
 
   let busy = false;
   const sendBtn = el("button", { onclick: send, disabled: !askConfig?.enabled }, "Send");
+  const stopBtn = el("button", { class: "plain hidden", title: "stop generating (Esc)", onclick: () => activeChatAbort?.abort() }, "Stop");
   const setBusy = (b) => {
     busy = b;
     sendBtn.disabled = b || !askConfig?.enabled;
     sendBtn.textContent = b ? "Sending…" : "Send";
+    stopBtn.classList.toggle("hidden", !b);
     input.disabled = b;
   };
   async function send() {
@@ -1458,23 +1933,28 @@ function chatContent(page) {
     const answer = el("div", { class: "a" });
     turn.append(answer);
     log.append(turn);
-    scrollDown();
-    // streaming appenders keep text and tool chips in arrival order
-    let seg = null, segText = "";
+    follow = true;
+    atBottom();
+    let seg = null, segText = "", all = "";
     const addText = (chunk) => {
       if (!seg) { seg = el("div", { class: "chat-seg" }); answer.append(seg); }
       segText += chunk;
+      all += chunk;
       seg.replaceChildren(renderMarkdown(segText));
+      linkifyDocRefs(seg);
     };
     const addTool = (name, args) => {
       seg = null; segText = "";
       answer.append(el("div", { class: "chips chat-tools" },
         el("span", { class: "chip tool", title: args || "" }, "🔧 " + name)));
     };
+    const controller = new AbortController();
+    activeChatAbort = controller;
     try {
       const res = await fetch(`/api/chats/${sess.id}/messages`, {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ content: q }),
+        signal: controller.signal,
       });
       if (!res.ok || !res.body) {
         let msg = res.statusText;
@@ -1498,27 +1978,96 @@ function chatContent(page) {
           else if (payload.action) { chatAction(payload.action); }
           else if (payload.d) { addText(payload.d); }
         }
-        scrollDown();
+        atBottom();
       }
       if (!answer.childNodes.length) addText("(no answer — the model returned nothing)");
-      scrollDown();
+      turn.append(copyBar(() => all));
+      atBottom();
       // re-render from the saved turn: canonical interleaving + revert buttons
       try { await rerenderChat(page); } catch (_) { updatePageTitle(page); }
       refreshChatsRoot();
     } catch (e) {
-      answer.append(el("p", { class: "hint" }, "error: " + e.message));
+      if (e.name === "AbortError") {
+        answer.append(el("p", { class: "hint" }, "stopped."));
+        turn.append(copyBar(() => all));
+      } else {
+        answer.append(el("p", { class: "hint" }, "error: " + e.message));
+      }
+    } finally {
+      if (activeChatAbort === controller) activeChatAbort = null;
     }
     setBusy(false);
   }
   input.addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey && !busy) { e.preventDefault(); send(); }
   });
-  wrap.append(log, el("div", { class: "row" }, input, sendBtn));
+  wrap.append(log, newPill, el("div", { class: "row" }, input, sendBtn, stopBtn));
   wrap.append(el("p", { class: "hint" },
     "Saved sessions. On tool-capable providers the model can search the library, " +
     "open a document for you, and regenerate metadata. ↩ reverts a message and " +
-    "everything after it."));
+    "everything after it; Esc stops a running answer."));
   return wrap;
+}
+
+/* ------------------------------------------------------------------ stats */
+
+function statsContent(page) {
+  const s = page.data || {};
+  const card = (label, value, hint) => el("div", { class: "stat-card" },
+    el("div", { class: "stat-n" }, String(value)),
+    el("div", { class: "stat-l" }, label),
+    hint ? el("div", { class: "hint" }, hint) : null);
+  const grid = el("div", { class: "stat-grid" });
+  grid.append(
+    card("documents", s.documents ?? 0),
+    card("processed", s.done ?? 0),
+    card("pending", s.pending ?? 0, s.pending ? "need processing" : null),
+    card("errors", s.errors ?? 0),
+    card("chunks", s.chunks ?? 0),
+    card("embedded", `${s.embedded ?? 0} / ${s.chunks ?? 0}`,
+      (s.embedded ?? 0) < (s.chunks ?? 0) ? "semantic search incomplete" : "semantic ready"),
+    card("vocabulary", s.vocab_tags ?? 0, "tags"),
+    card("collections", s.collections ?? 0),
+    card("notes", s.notes ?? 0),
+    card("chats", s.chats ?? 0));
+  const wrap = el("div", { class: "stats-page" }, grid);
+  wrap.append(el("div", { class: "row" },
+    el("button", { onclick: () => embedNow() }, "Embed missing chunks"),
+    el("button", { class: "plain", onclick: () => processIds([]) }, "Process pending"),
+    el("button", { class: "plain", onclick: () => refreshPage(page) }, "Refresh")));
+  const breakdown = (title, rows) => {
+    const box = el("div", { class: "stat-breakdown" });
+    box.append(el("h3", {}, title));
+    if (!rows || !rows.length) {
+      box.append(el("p", { class: "hint" }, "none"));
+      return box;
+    }
+    const max = Math.max(1, ...rows.map((r) => r.count));
+    for (const r of rows) {
+      box.append(el("div", { class: "stat-bar-row" },
+        el("span", { class: "stat-bar-label", title: r.key }, r.key),
+        el("span", { class: "stat-bar", style: `width:${(100 * r.count / max).toFixed(1)}%` }),
+        el("span", { class: "stat-bar-n" }, String(r.count))));
+    }
+    return box;
+  };
+  wrap.append(el("div", { class: "stat-cols" },
+    breakdown("by kind", s.kinds),
+    breakdown("by category", s.categories),
+    breakdown("top tags", s.tags)));
+  return wrap;
+}
+
+// embedNow embeds every chunk that lacks a vector (a job; the status bar and
+// Stats page refresh when it finishes).
+async function embedNow() {
+  try {
+    notice("Embedding chunks…");
+    const res = await api("/api/embed", { method: "POST" });
+    notice(`Embedded ${res.embedded} chunk(s).`);
+    await refresh();
+    for (const p of pages) if (p.kind === "stats") refreshPage(p);
+  } catch (e) { notice("embed: " + e.message); }
 }
 
 /* chunk-row builder (the Text page: full collapsible rows) */
@@ -1718,24 +2267,26 @@ function summaryContent(page) {
   body.append(regenRow);
 
   const saveRow = el("div", { class: "row" });
-  saveRow.append(el("button", {
-    onclick: async () => {
-      await api(`/api/documents/${id}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          title: inTitle.value, authors: inAuthors.value,
-          year: inYear.value, summary: inSummary.value,
-          kind: inKind.value, category: inCategory.value,
-        }),
-      });
-      notice("Saved.");
-      await loadDocs();
-      await loadCategories();
-      refreshDocPages(id);
-      refreshCollectionPages(); // a category change regroups open collection pages
-    },
-  }, "Save metadata"));
+  const saveBtn = el("button", { disabled: true, title: "save the edited metadata", onclick: async () => {
+    await api(`/api/documents/${id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        title: inTitle.value, authors: inAuthors.value,
+        year: inYear.value, summary: inSummary.value,
+        kind: inKind.value, category: inCategory.value,
+      }),
+    });
+    notice("Saved.");
+    saveBtn.disabled = true;
+    await loadDocs();
+    await loadCategories();
+    refreshDocPages(id);
+    refreshCollectionPages(); // a category change regroups open collection pages
+  } }, "Save metadata");
+  for (const inp of [inTitle, inAuthors, inYear, inKind, inCategory, inSummary])
+    inp.addEventListener("input", () => { saveBtn.disabled = false; });
+  saveRow.append(saveBtn);
   saveRow.append(el("button", { class: "plain", onclick: () => processIds([id]) },
     "Re-run summarize + tag"));
   saveRow.append(el("button", { class: "plain", onclick: async () => {
@@ -2396,6 +2947,9 @@ $("#btn-all-docs").onclick = () => openPage("library");
 $("#btn-tags").onclick = () => openPage("tags");
 $("#btn-notes").onclick = () => openPage("notes");
 $("#btn-chats").onclick = () => openPage("chats");
+$("#btn-stats").onclick = () => openPage("stats");
+$("#btn-pages").onclick = () => openPagesPanel();
+$("#btn-embed").onclick = () => embedNow();
 
 /* ------------------------------------------------------------------ vocab */
 
@@ -2509,6 +3063,7 @@ function openFromURL() {
   if (view === "notes") { openPage("notes"); return "page"; }
   if (view === "collections") { openPage("collections"); return "page"; }
   if (view === "chats") { openPage("chats"); return "page"; }
+  if (view === "stats") { openPage("stats"); return "page"; }
   return "";
 }
 
@@ -2545,18 +3100,36 @@ const THEME_PRESETS = {
   contrast: { bg: "#ffffff", fg: "#000000", muted: "#3a3a3a", accent: "#0033cc", card: "#ffffff", line: "#000000", chip: "#eaeaea" },
 };
 const THEME_VARS = ["bg", "fg", "muted", "accent", "card", "line", "chip"];
+const THEME_NAMES = ["auto", ...Object.keys(THEME_PRESETS)];
+
+// resolvedTheme maps a preset name to its palette; "auto" follows the OS.
+function resolvedTheme(name) {
+  if (name === "auto" && window.matchMedia)
+    return matchMedia("(prefers-color-scheme: dark)").matches ? THEME_PRESETS.dark : THEME_PRESETS.light;
+  return THEME_PRESETS[name] || THEME_PRESETS.light;
+}
+
+let currentTheme = { preset: "light" };
 
 // applyTheme sets the CSS variables for a {preset, colors} theme. Colors
 // override the preset per variable; an empty value removes the override
 // so the stylesheet default applies.
 function applyTheme(theme) {
-  const preset = THEME_PRESETS[theme?.preset] || THEME_PRESETS.light;
-  const colors = Object.assign({}, preset, theme?.colors || {});
+  currentTheme = theme || {};
+  const preset = resolvedTheme(currentTheme.preset);
+  const colors = Object.assign({}, preset, currentTheme.colors || {});
   const root = document.documentElement.style;
   for (const v of THEME_VARS) {
     if (colors[v]) root.setProperty("--" + v, colors[v]);
     else root.removeProperty("--" + v);
   }
+}
+// follow the OS while the "auto" preset is active
+if (window.matchMedia) {
+  const mq = matchMedia("(prefers-color-scheme: dark)");
+  if (mq.addEventListener) mq.addEventListener("change", () => {
+    if (currentTheme.preset === "auto") applyTheme(currentTheme);
+  });
 }
 
 const settings = {};
@@ -2675,26 +3248,26 @@ async function settingsOpen() {
 // flat sec.key list.
 function themePane(cfg, panes, tabs, side, main, showGroup) {
   const cur = cfg.theme?.colors || {};
-  const presetSel = el("select", {}, ...Object.keys(THEME_PRESETS).map((p) =>
+  const presetSel = el("select", {}, ...THEME_NAMES.map((p) =>
     el("option", { value: p }, p)));
-  presetSel.value = cfg.theme?.preset || "light";
+  presetSel.value = cfg.theme?.preset || "auto";
   settings.themePreset = presetSel;
   settings.themeInputs = {};
   const pane = el("div", { class: "settings-pane hidden" });
   pane.append(el("h3", {}, "Theme"));
   pane.append(el("p", { class: "hint", style: "margin:.1rem 0 .6rem" },
-    "Colors for the web UI. A preset sets the whole palette; a color picker overrides that one variable."));
+    "Colors for the web UI. A preset sets the whole palette; a color picker overrides that one variable. \"auto\" follows the OS light/dark preference."));
   pane.append(el("div", { class: "settings-row" },
     el("label", {}, el("div", { class: "set-name" }, "preset"),
       el("div", { class: "hint" }, "base palette")), presetSel));
   const preview = () => applyTheme({ preset: presetSel.value, colors: readThemeColors() });
   const syncPreset = () => {
-    const p = THEME_PRESETS[presetSel.value] || THEME_PRESETS.light;
+    const p = resolvedTheme(presetSel.value);
     for (const v of THEME_VARS) settings.themeInputs[v].value = p[v];
     preview();
   };
   for (const v of THEME_VARS) {
-    const inp = el("input", { type: "color", value: cur[v] || THEME_PRESETS[presetSel.value][v] });
+    const inp = el("input", { type: "color", value: cur[v] || resolvedTheme(presetSel.value)[v] });
     settings.themeInputs[v] = inp;
     inp.addEventListener("input", preview);
     pane.append(el("div", { class: "settings-row" },
@@ -2748,7 +3321,7 @@ $("#settings-save").onclick = async () => {
     }
   }
   payload.theme = {
-    preset: settings.themePreset?.value || "light",
+    preset: settings.themePreset?.value || "auto",
     colors: readThemeColors(),
   };
   try {
@@ -2837,6 +3410,16 @@ async function runLibraryRefresh() {
   }
 }
 
+let jobsHidden = new Set(); // finished jobs the user cleared from the list
+
+function fmtDur(ms) {
+  if (!isFinite(ms) || ms < 0) return "";
+  const s = Math.round(ms / 1000);
+  if (s < 60) return s + "s";
+  const m = Math.floor(s / 60);
+  return m + "m" + String(s % 60).padStart(2, "0") + "s";
+}
+
 async function refreshJobs() {
   try {
     const data = await api("/api/jobs");
@@ -2849,15 +3432,20 @@ async function refreshJobs() {
     if (!jobsOpen) return;
     const list = $("#jobs-list");
     list.replaceChildren();
-    const ordered = [...jobs].reverse(); // newest first
+    const ordered = [...jobs].reverse().filter((j) => !jobsHidden.has(j.id)); // newest first
     if (!ordered.length) {
-      list.append(el("p", { class: "hint" }, "no jobs yet"));
+      list.append(el("p", { class: "hint" }, "no jobs"));
     }
     for (const j of ordered) {
       const dot = el("span", { class: "job-dot " + j.status });
+      const start = j.started_at || j.created_at;
+      const dur = j.finished_at
+        ? fmtDur(new Date(j.finished_at) - new Date(start))
+        : (j.status === "running" ? fmtDur(Date.now() - new Date(start)) : "");
       const row = el("div", { class: "job-row" }, dot,
         el("div", { class: "job-main" },
-          el("div", {}, `#${j.id} `, el("b", {}, esc(j.label)), ` — `, el("span", { class: "hint" }, j.status)),
+          el("div", {}, `#${j.id} `, el("b", {}, esc(j.label)), ` — `,
+            el("span", { class: "hint" }, j.status + (dur ? " (" + dur + ")" : ""))),
           j.message ? el("div", { class: "hint" }, esc(j.message)) : null));
       if (j.status === "queued" || j.status === "running") {
         row.append(el("button", {
@@ -2923,6 +3511,14 @@ $("#jobs-close").onclick = () => {
   jobsOpen = false;
   refresh();
 };
+$("#jobs-clear").onclick = async () => {
+  try {
+    const data = await api("/api/jobs");
+    for (const j of data.jobs || [])
+      if (j.status !== "queued" && j.status !== "running") jobsHidden.add(j.id);
+  } catch (_) { /* transient */ }
+  refreshJobs();
+};
 
 // one light poller keeps the status bar + Jobs badge live at all times
 // (the dialog shares it — it re-renders while open)
@@ -2930,9 +3526,22 @@ setInterval(refreshJobs, 2000);
 
 /* --------------------------------------------------------------- keyboard */
 
-// Escape closes the active document page (dialogs close natively);
-// "/" focuses the search box from anywhere.
+// Escape stops a running answer, closes the command palette / pages panel,
+// or closes the active page (dialogs close natively); Ctrl/Cmd-K opens the
+// command palette; "/" focuses the search box.
 document.addEventListener("keydown", (e) => {
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
+    e.preventDefault();
+    openPalette();
+    return;
+  }
+  if (e.key === "Escape") {
+    const pal = $("#palette");
+    if (pal) { pal.remove(); return; }
+    const panel = $("#pages-panel");
+    if (panel) { panel.remove(); return; }
+    if (activeChatAbort) { activeChatAbort.abort(); return; }
+  }
   if (document.querySelector("dialog[open]")) return;
   const inField = /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement?.tagName || "");
   if (e.key === "Escape") {

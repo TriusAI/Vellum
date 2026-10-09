@@ -235,6 +235,10 @@ func New(cfg *config.Config, conn *sql.DB) *Server {
 func (s *Server) Mux() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/status", s.status)
+	mux.HandleFunc("GET /api/stats", s.stats)
+	mux.HandleFunc("POST /api/embed", s.embedNow)
+	mux.HandleFunc("POST /api/documents/remove", s.removeDocuments)
+	mux.HandleFunc("POST /api/documents/regenerate", s.regenerateDocuments)
 	mux.HandleFunc("GET /api/progress", s.getProgress)
 	mux.HandleFunc("GET /api/documents", s.documents)
 	mux.HandleFunc("GET /api/categories", s.categories)
@@ -291,6 +295,7 @@ func (s *Server) Mux() http.Handler {
 	mux.HandleFunc("DELETE /api/chats/{id}", s.deleteChat)
 	mux.HandleFunc("POST /api/chats/{id}/messages", s.postChatMessage)
 	mux.HandleFunc("POST /api/chats/{id}/revert", s.revertChat)
+	mux.HandleFunc("POST /api/chats/{id}/clear", s.clearChat)
 
 	sub, _ := fs.Sub(webFS, "web")
 	mux.Handle("/", http.FileServer(http.FS(sub)))
@@ -403,13 +408,14 @@ func (s *Server) tagsByDoc(docID int64) map[int64][]string {
 
 func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 	var counts struct {
-		Documents, Done, Pending, Errors, Chunks int
+		Documents, Done, Pending, Errors, Chunks, Embedded int
 	}
 	s.conn.QueryRow("SELECT COUNT(*) FROM documents").Scan(&counts.Documents)
 	s.conn.QueryRow("SELECT COUNT(*) FROM documents WHERE status='done'").Scan(&counts.Done)
 	s.conn.QueryRow("SELECT COUNT(*) FROM documents WHERE status='ingested'").Scan(&counts.Pending)
 	s.conn.QueryRow("SELECT COUNT(*) FROM documents WHERE status='error'").Scan(&counts.Errors)
 	s.conn.QueryRow("SELECT COUNT(*) FROM chunks").Scan(&counts.Chunks)
+	s.conn.QueryRow("SELECT COUNT(*) FROM chunks WHERE embedding IS NOT NULL").Scan(&counts.Embedded)
 
 	v, err := vocab.Load(s.cfg.VocabPath)
 	vocabSize := 0
@@ -426,6 +432,7 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 		"pending":     counts.Pending,
 		"errors":      counts.Errors,
 		"chunks":      counts.Chunks,
+		"embedded":    counts.Embedded,
 		"vocab_tags":  vocabSize,
 		"llm_up":      llm.Available(s.cfg.Tools.LLMURL),
 		"embed_up":    llm.Available(s.cfg.Tools.EmbedURL),
@@ -1011,8 +1018,7 @@ func (s *Server) deleteDocument(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "bad document id")
 		return
 	}
-	var path string
-	err = s.conn.QueryRow("SELECT path FROM documents WHERE id=?", id).Scan(&path)
+	path, err := s.deleteDoc(id)
 	if err == sql.ErrNoRows {
 		writeErr(w, 404, "no such document")
 		return
@@ -1021,11 +1027,6 @@ func (s *Server) deleteDocument(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, err.Error())
 		return
 	}
-	if _, err := s.conn.Exec("DELETE FROM documents WHERE id=?", id); err != nil {
-		writeErr(w, 500, err.Error())
-		return
-	}
-	os.Remove(filepath.Join(s.cfg.BaseDir, "covers", fmt.Sprintf("cover-%d.png", id)))
 	writeJSON(w, 200, map[string]any{"deleted": id, "path": path})
 }
 

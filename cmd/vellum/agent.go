@@ -456,6 +456,11 @@ Editing vocab.yaml by hand is also fine (name: description, YAML map).
     DELETE /api/chats/{id}
     POST /api/chats/{id}/messages   # {"content":..} -> SSE stream
     POST /api/chats/{id}/revert     # {"message_id":..} drop it + all after
+    POST /api/chats/{id}/clear      # delete all messages (keep the session)
+    GET  /api/stats                 # library overview counts/breakdowns
+    POST /api/embed                 # embed chunks lacking vectors (a job)
+    POST /api/documents/remove      # {"ids":[...]} remove many (files stay)
+    POST /api/documents/regenerate  # {"ids":[...],"fields":[...]} bulk re-gen
 Errors: {"error":"..."} with 4xx/5xx status codes.
 
 ## Gotchas

@@ -306,6 +306,24 @@ vellum chat rename 3 "thesis reading"
 vellum chat delete 3
 ```
 
+## Web UI at a glance
+
+- **☰ Pages** (top-left) opens a sidebar listing every open page: jump to
+  one, reorder with ▲/▼ (this reorders the pages themselves), or close. You
+  can also drag a page's title bar to reorder the strip, and **Ctrl/Cmd-K**
+  opens a command palette (jump to a page/document/tag, or run Ingest,
+  Process, Embed, Settings…).
+- **All Documents** has a **select** mode: tick documents (shift-click for a
+  range) to **Process**, **Regenerate**, **Add to collection**, or **Remove**
+  in bulk. Rows also show hover actions (preview, chat).
+- **Stats** page: counts, breakdowns by kind/category/tag, and embedding
+  coverage; the status bar shows `embedded/total` and an **Embed** button.
+- The theme preset **auto** follows the OS light/dark preference.
+- Transient messages now stack as toasts; the progress bar stays put.
+- **Chat**: stop a running answer (Esc / Stop), answers don't yank your
+  scroll, a copy button per answer, `#123` document references are clickable,
+  and a chat can be renamed/reverted/cleared/exported as Markdown.
+
 ## Configuration
 
 `config.yaml` (found via `--config`, `$VELLUM_CONFIG`, or `./config.yaml`):

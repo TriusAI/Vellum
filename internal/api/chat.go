@@ -784,30 +784,48 @@ func (s *Server) postChatMessage(w http.ResponseWriter, r *http.Request) {
 
 	var text strings.Builder
 	events := []map[string]any{}
-	for d := range deltas {
-		if d.Error != "" {
-			sseSend(w, map[string]any{"e": d.Error})
-			break
-		}
-		if d.Action != nil {
-			sseSend(w, map[string]any{"action": d.Action})
-			continue
-		}
-		if d.Tool != "" {
-			events = append(events, map[string]any{"t": "tool", "name": d.Tool, "args": d.ToolArgs})
-			sseSend(w, map[string]any{"tool": d.Tool, "args": d.ToolArgs})
-			continue
-		}
-		if d.Text != "" {
-			text.WriteString(d.Text)
-			// merge consecutive text deltas into the running text segment so
-			// the stored event list interleaves text/tool in stream order
-			if n := len(events); n > 0 && events[n-1]["t"] == "text" {
-				events[n-1]["text"] = events[n-1]["text"].(string) + d.Text
-			} else {
-				events = append(events, map[string]any{"t": "text", "text": d.Text})
+	stopped := false
+readLoop:
+	for {
+		select {
+		case <-r.Context().Done():
+			// the client stopped (Stop button / closed tab): drain the
+			// provider channel so its goroutine can finish, keep the partial
+			// answer, and don't bother writing more SSE
+			stopped = true
+			go func() {
+				for range deltas {
+				}
+			}()
+			break readLoop
+		case d, ok := <-deltas:
+			if !ok {
+				break readLoop
 			}
-			sseSend(w, map[string]any{"d": d.Text})
+			if d.Error != "" {
+				sseSend(w, map[string]any{"e": d.Error})
+				break readLoop
+			}
+			if d.Action != nil {
+				sseSend(w, map[string]any{"action": d.Action})
+				continue
+			}
+			if d.Tool != "" {
+				events = append(events, map[string]any{"t": "tool", "name": d.Tool, "args": d.ToolArgs})
+				sseSend(w, map[string]any{"tool": d.Tool, "args": d.ToolArgs})
+				continue
+			}
+			if d.Text != "" {
+				text.WriteString(d.Text)
+				// merge consecutive text deltas into the running text segment
+				// so the stored event list interleaves text/tool in stream order
+				if n := len(events); n > 0 && events[n-1]["t"] == "text" {
+					events[n-1]["text"] = events[n-1]["text"].(string) + d.Text
+				} else {
+					events = append(events, map[string]any{"t": "text", "text": d.Text})
+				}
+				sseSend(w, map[string]any{"d": d.Text})
+			}
 		}
 	}
 	logJSON := ""
@@ -817,8 +835,27 @@ func (s *Server) postChatMessage(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	db.AddChatMessage(s.conn, id, "assistant", text.String(), logJSON)
-	sseSend(w, map[string]any{"done": "1"})
-	flush.Flush()
+	if !stopped {
+		sseSend(w, map[string]any{"done": "1"})
+		flush.Flush()
+	}
+}
+
+// clearChat deletes every message in a session but keeps the session.
+func (s *Server) clearChat(w http.ResponseWriter, r *http.Request) {
+	id, err := pathID(r)
+	if err != nil {
+		writeErr(w, 400, "bad id")
+		return
+	}
+	res, err := s.conn.Exec("DELETE FROM chat_messages WHERE session_id=?", id)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	n, _ := res.RowsAffected()
+	s.conn.Exec("UPDATE chat_sessions SET updated_at=datetime('now') WHERE id=?", id)
+	writeJSON(w, 200, map[string]any{"deleted": n})
 }
 
 // revertChat drops one message and everything after it (no forking) and

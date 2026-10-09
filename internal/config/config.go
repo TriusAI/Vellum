@@ -146,10 +146,10 @@ func Default() *Config {
 	c.Tools.Mutool = "mutool"
 	c.Tools.Tesseract = "tesseract"
 	c.Ask.Provider = "none"
-	c.Ask.Tools = true // let the ask model fetch external links by default
-	c.Theme.Preset = "light"
-	c.Watch.Interval = 5  // min seconds between watcher scans (debounce)
-	c.Watch.Notify = true // event-driven (inotify) by default
+	c.Ask.Tools = true      // let the ask model fetch external links by default
+	c.Theme.Preset = "auto" // follow the OS light/dark preference
+	c.Watch.Interval = 5    // min seconds between watcher scans (debounce)
+	c.Watch.Notify = true   // event-driven (inotify) by default
 	c.Tools.LLMURL = "http://127.0.0.1:8081"
 	c.Tools.EmbedURL = "http://127.0.0.1:8082"
 	return c
