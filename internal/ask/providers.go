@@ -1,7 +1,8 @@
 package ask
 
 // Provider-specific streaming: all three adapters normalize their native
-// wire format into a Delta channel.
+// wire format into a Delta channel, and all three support the tool loop
+// (OpenAI-compatible, Anthropic, and the native Ollama /api/chat API).
 //
 //   openai  (and any compatible endpoint: local llama-server, vLLM,
 //           LM Studio, OpenRouter, ...): POST /v1/chat/completions,
@@ -10,7 +11,10 @@ package ask
 //   anthropic: POST /v1/messages, stream:true → SSE with header
 //           x-api-key + anthropic-version; text arrives as
 //           content_block_delta events (delta.text).
-//   ollama: POST /api/chat → NDJSON lines {"message":{"content":..}}.
+//   ollama: POST /api/chat → NDJSON lines {"message":{"content":..}};
+//           tool calls arrive as message.tool_calls (arguments is an
+//           OBJECT, not a string) and results go back as a "tool"
+//           message with tool_name.
 
 import (
 	"bufio"
@@ -21,11 +25,6 @@ import (
 	"net/http"
 	"strings"
 )
-
-type wireMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
-}
 
 // ---- tool plumbing --------------------------------------------------------
 
@@ -457,67 +456,151 @@ scan:
 
 // ---- ollama --------------------------------------------------------------
 
-type ollamaChatReq struct {
-	Model    string        `json:"model"`
-	Messages []wireMessage `json:"messages"`
-	Stream   bool          `json:"stream"`
+type ollamaTool struct {
+	Type     string `json:"type"`
+	Function struct {
+		Name        string         `json:"name"`
+		Description string         `json:"description"`
+		Parameters  map[string]any `json:"parameters"`
+	} `json:"function"`
 }
 
-func (c Config) streamOllama(sys string, msgs []Message) (<-chan Delta, error) {
-	all := []wireMessage{{Role: "system", Content: sys}}
+func toOllamaTools(tools []ToolDef) []ollamaTool {
+	out := make([]ollamaTool, 0, len(tools))
+	for _, t := range tools {
+		var o ollamaTool
+		o.Type = "function"
+		o.Function.Name = t.Name
+		o.Function.Description = t.Description
+		o.Function.Parameters = t.Parameters
+		out = append(out, o)
+	}
+	return out
+}
+
+// ollamaToolCall mirrors the native /api/chat tool call: unlike OpenAI,
+// Arguments is a JSON OBJECT (not a string).
+type ollamaToolCall struct {
+	Function struct {
+		Name      string          `json:"name"`
+		Arguments json.RawMessage `json:"arguments"`
+	} `json:"function"`
+}
+
+type ollamaMessage struct {
+	Role      string           `json:"role"`
+	Content   string           `json:"content"`
+	ToolCalls []ollamaToolCall `json:"tool_calls,omitempty"`
+	ToolName  string           `json:"tool_name,omitempty"`
+}
+
+type ollamaChatReq struct {
+	Model    string          `json:"model"`
+	Messages []ollamaMessage `json:"messages"`
+	Stream   bool            `json:"stream"`
+	Tools    []ollamaTool    `json:"tools,omitempty"`
+}
+
+func (c Config) streamOllama(sys string, msgs []Message, tools []ToolDef, run Runner) (<-chan Delta, error) {
+	conv := []ollamaMessage{{Role: "system", Content: sys}}
 	for _, m := range msgs {
-		all = append(all, wireMessage{Role: m.Role, Content: m.Content})
-	}
-	payload, _ := json.Marshal(ollamaChatReq{
-		Model: c.Model, Messages: all, Stream: true,
-	})
-	req, err := http.NewRequest("POST", endpoint(c.baseURL(), "api", "/chat"),
-		bytes.NewReader(payload))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := c.client().Do(req)
-	if err != nil {
-		return nil, err
-	}
-	if resp.StatusCode != 200 {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		resp.Body.Close()
-		return nil, fmt.Errorf("%s: %s", resp.Status, strings.TrimSpace(string(body)))
+		conv = append(conv, ollamaMessage{Role: m.Role, Content: m.Content})
 	}
 	out := make(chan Delta)
 	go func() {
-		defer resp.Body.Close()
 		defer close(out)
-		sc := bufio.NewScanner(resp.Body)
-		sc.Buffer(make([]byte, 1024), 1024*1024)
-		for sc.Scan() {
-			var chunk struct {
-				Message struct {
-					Content string `json:"content"`
-				} `json:"message"`
-				Error string `json:"error,omitempty"`
-				Done  bool   `json:"done"`
-			}
-			line := strings.TrimSpace(sc.Text())
-			if line == "" {
-				continue
-			}
-			if err := json.Unmarshal([]byte(line), &chunk); err != nil {
-				continue
-			}
-			if chunk.Error != "" {
-				out <- Delta{Error: chunk.Error}
+		for round := 0; round < maxToolRounds; round++ {
+			text, calls, err := c.ollamaRound(out, conv, tools)
+			if err != nil {
+				out <- Delta{Error: err.Error()}
 				return
 			}
-			if chunk.Message.Content != "" {
-				out <- Delta{Text: chunk.Message.Content}
+			if len(calls) == 0 {
+				return // a normal answer
 			}
-			if chunk.Done {
-				return
+			conv = append(conv, ollamaMessage{Role: "assistant", Content: text, ToolCalls: calls})
+			for _, tc := range calls {
+				name := tc.Function.Name
+				result := execTool(out, run, "", name, normalizeOllamaArgs(tc.Function.Arguments))
+				// Ollama's tool result is a "tool" message naming the tool
+				conv = append(conv, ollamaMessage{Role: "tool", Content: result, ToolName: name})
 			}
 		}
+		out <- Delta{Error: "stopped: too many tool rounds"}
 	}()
 	return out, nil
+}
+
+// normalizeOllamaArgs turns the native arguments (usually a JSON object, but
+// a JSON string on some proxies) into the raw object string the tools parse.
+func normalizeOllamaArgs(raw json.RawMessage) string {
+	s := strings.TrimSpace(string(raw))
+	if s == "" || s == "null" {
+		return "{}"
+	}
+	if s[0] == '"' {
+		var unquoted string
+		if json.Unmarshal(raw, &unquoted) == nil {
+			return unquoted
+		}
+	}
+	return s
+}
+
+func (c Config) ollamaRound(out chan<- Delta, conv []ollamaMessage, tools []ToolDef) (string, []ollamaToolCall, error) {
+	req := ollamaChatReq{Model: c.Model, Messages: conv, Stream: true}
+	if len(tools) > 0 {
+		req.Tools = toOllamaTools(tools)
+	}
+	payload, _ := json.Marshal(req)
+	httpReq, err := http.NewRequest("POST", endpoint(c.baseURL(), "api", "/chat"),
+		bytes.NewReader(payload))
+	if err != nil {
+		return "", nil, err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	resp, err := c.client().Do(httpReq)
+	if err != nil {
+		return "", nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return "", nil, fmt.Errorf("%s: %s", resp.Status, strings.TrimSpace(string(body)))
+	}
+	var text strings.Builder
+	var calls []ollamaToolCall
+	sc := bufio.NewScanner(resp.Body)
+	sc.Buffer(make([]byte, 1024), 1024*1024)
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if line == "" {
+			continue
+		}
+		var chunk struct {
+			Message ollamaMessage `json:"message"`
+			Error   string        `json:"error,omitempty"`
+			Done    bool          `json:"done"`
+		}
+		if err := json.Unmarshal([]byte(line), &chunk); err != nil {
+			continue
+		}
+		if chunk.Error != "" {
+			return text.String(), nil, fmt.Errorf("%s", chunk.Error)
+		}
+		if chunk.Message.Content != "" {
+			text.WriteString(chunk.Message.Content)
+			out <- Delta{Text: chunk.Message.Content}
+		}
+		if len(chunk.Message.ToolCalls) > 0 {
+			calls = append(calls, chunk.Message.ToolCalls...)
+		}
+		if chunk.Done {
+			break
+		}
+	}
+	if err := sc.Err(); err != nil {
+		return text.String(), nil, err
+	}
+	return text.String(), calls, nil
 }

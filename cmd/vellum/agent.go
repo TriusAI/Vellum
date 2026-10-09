@@ -208,8 +208,8 @@ call:
                                        (needs the pipeline backend)
   fetch_url(url)                       the WebFetch tool (ask.tools on)
 Tool calls and the resulting UI actions stream to the client as SSE
-events. The Ollama-native adapter has no tool support, so library actions
-(search/open/regenerate) need an openai-compatible or Anthropic provider.
+events. Tool calling works on OpenAI-compatible providers, Anthropic, and
+the native Ollama API.
     vellum chat list|show|new|rename|delete
     GET    /api/chats                # [{id,title,scope_kind,scope_value,
                                      #   messages,updated_at}]
@@ -261,30 +261,26 @@ get none. Prefixes are part of the vector space: changing the embed
 model/provider/URL (or the prefix scheme) invalidates stored vectors and
 they re-embed lazily. vellum embed re-embeds the whole library up front.
 
-## Ask an LLM (about one document)
-A freeform streaming chat per document, powered by an EXTERNAL model
-(config: ask: {provider: none|openai|anthropic|ollama, model, api_key,
-base_url, tools}; openai = any OpenAI-COMPATIBLE endpoint via base_url).
-The chat context = metadata + summary + opening text of that document.
+## Ask an LLM provider (config)
+The chat model is EXTERNAL: ask: {provider: none|openai|anthropic|ollama,
+model, api_key, base_url, tools}; openai = any OpenAI-COMPATIBLE endpoint
+via base_url. Managed/tested from the UI or:
     GET  /api/ask/config            # (key masked: key_set; includes tools)
     PUT  /api/ask/config {provider, model, api_key?, base_url, tools?}
     POST /api/ask/test              # tiny exchange; {} = test current
-    POST /api/documents/{id}/ask    # stream: "data: {...}\n\n" events
-                                    #   {"d": "..."} deltas, {"e": "..."}
-                                    #   error, {"tool":"url"} a fetch,
-                                    #   {"done":"1"} end
-Provider can be overridden per request ({"provider":"ollama",...}).
-This chat does NOT affect tagging (which stays grammar-constrained).
+The saved chats themselves live under /api/chats (see the chats section).
+The older per-document endpoint below still streams about one document,
+but the UI uses saved sessions.
+    POST /api/documents/{id}/ask    # legacy: {"d"}|{"e"}|{"tool"}|{"done"}
 
-WEB FETCH: with ask.tools true (default), the model may call a fetch_url
-tool to read external http(s) links the user or the document references
-(a small local WebFetch: HTML reduced to text, size-capped; non-http(s)
-and link-local metadata hosts refused; honors HTTPS_PROXY). The server
-runs the tool loop (up to 4 rounds) and reports each fetch as a
-{"tool":"url"} event. IMPLEMENTED for OpenAI-compatible providers
-(including Ollama's /v1 endpoint and local llama.cpp) AND Anthropic
-(tool_use/tool_result); Ollama's NATIVE /api/chat ignores tools. Answers
-are rendered with light markdown (code, bold/italic, lists, links) in the UI.
+TOOLS: the tool loop (up to 4 rounds) runs on ALL THREE adapters —
+OpenAI-compatible (including local llama.cpp and Ollama's /v1 endpoint),
+Anthropic (tool_use/tool_result), and NATIVE Ollama /api/chat (tool_calls
+with OBJECT arguments; results sent back as a "tool" message). fetch_url
+(ask.tools, default on) reads external http(s) links the user or a
+document references (HTML reduced to text, size-capped; non-http(s) and
+link-local metadata hosts refused; honors HTTPS_PROXY). Answers render
+light markdown (code, bold/italic, lists, links) in the UI.
 
 ## Fixing garbled text
 When the text (Text tab in the UI) is garbled — a bad OCR pass baked

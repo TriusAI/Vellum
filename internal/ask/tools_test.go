@@ -112,6 +112,67 @@ func TestAnthropicToolLoop(t *testing.T) {
 	}
 }
 
+// TestOllamaToolLoop drives a mock native /api/chat server through a tool
+// call (arguments arrive as a JSON OBJECT, not a string) then a text answer.
+func TestOllamaToolLoop(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/chat" {
+			http.NotFound(w, r)
+			return
+		}
+		body, _ := io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		if !strings.Contains(string(body), `"role":"tool"`) {
+			fmt.Fprint(w, `{"message":{"role":"assistant","content":"","tool_calls":[`+
+				`{"function":{"name":"search_library","arguments":{"query":"quantization"}}}]},"done":false}`+"\n")
+			fmt.Fprint(w, `{"message":{"role":"assistant","content":""},"done":true}`+"\n")
+			return
+		}
+		if !strings.Contains(string(body), "result ok") {
+			fmt.Fprint(w, `{"message":{"content":"result missing"},"done":true}`+"\n")
+			return
+		}
+		fmt.Fprint(w, `{"message":{"role":"assistant","content":"Found a quantization paper."},"done":true}`+"\n")
+	}))
+	defer srv.Close()
+
+	cfg := Config{Provider: "ollama", Model: "test", BaseURL: srv.URL}
+	var gotArgs string
+	run := func(call ToolCall) ToolResult {
+		gotArgs = call.Args
+		if call.Name != "search_library" {
+			t.Errorf("tool name = %q", call.Name)
+		}
+		return ToolResult{Content: "result ok"}
+	}
+	deltas, err := cfg.Stream("sys", []Message{{Role: "user", Content: "find it"}},
+		[]ToolDef{{Name: "search_library", Description: "search",
+			Parameters: map[string]any{"type": "object"}}}, run)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var text strings.Builder
+	toolReported := false
+	for d := range deltas {
+		if d.Error != "" {
+			t.Fatalf("stream error: %s", d.Error)
+		}
+		if d.Tool != "" {
+			toolReported = true
+		}
+		text.WriteString(d.Text)
+	}
+	if !toolReported {
+		t.Fatal("the tool call was not reported")
+	}
+	if gotArgs != `{"query":"quantization"}` {
+		t.Fatalf("tool args wrong: %q", gotArgs)
+	}
+	if got := text.String(); got != "Found a quantization paper." {
+		t.Fatalf("final answer wrong: %q", got)
+	}
+}
+
 // asks for a fetch_url tool call, then answers using the fetched text —
 // exercising the whole loop (request → tool call → fetch → tool result →
 // second request → streamed answer).

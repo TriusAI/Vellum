@@ -1436,7 +1436,7 @@ function chatContent(page) {
         answer.replaceChildren(chips, renderMarkdown(acc || "…"));
         scrollDown();
       }
-      answer.replaceChildren(chips, renderMarkdown(acc || "(empty answer)"));
+      answer.replaceChildren(chips, renderMarkdown(acc || "(no answer — the model returned nothing)"));
       scrollDown();
       // refresh the title / list (the server auto-titles a fresh session)
       try {

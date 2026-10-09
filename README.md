@@ -291,9 +291,9 @@ and testable in the chat panel). On tool-capable providers
   (uses the pipeline backend, appears in Jobs);
 - fetch external links it references (`fetch_url`, with `ask.tools`).
 
-The Ollama-native adapter has no tool support, so library actions need an
-OpenAI-compatible or Anthropic provider. Tagging in the pipeline stays
-grammar-constrained regardless of the chat provider.
+Tool calling works on OpenAI-compatible providers, Anthropic, and Ollama's
+native API. Tagging in the pipeline stays grammar-constrained regardless
+of the chat provider.
 
 ```bash
 vellum chat list

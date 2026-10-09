@@ -16,8 +16,9 @@ type Config struct {
 	APIKey   string `yaml:"api_key"`
 	BaseURL  string `yaml:"base_url"` // override; per-provider default
 	// Tools lets the chat model call tools — a fetch_url (WebFetch) tool,
-	// and (in the API's chat layer) library search / open / regenerate
-	// tools. Supported on OpenAI-compatible providers and Anthropic.
+	// plus (in the API's chat layer) library search / open / regenerate
+	// tools. Tool calling works on OpenAI-compatible providers, Anthropic,
+	// and the native Ollama API.
 	Tools bool `yaml:"tools"`
 }
 
@@ -111,7 +112,7 @@ func (c Config) Stream(sys string, msgs []Message, tools []ToolDef, run Runner) 
 	case "anthropic":
 		return c.streamAnthropic(sys, msgs, tools, run)
 	case "ollama":
-		return c.streamOllama(sys, msgs)
+		return c.streamOllama(sys, msgs, tools, run)
 	}
 	return nil, ErrDisabled
 }
