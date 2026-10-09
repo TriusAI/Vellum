@@ -116,6 +116,15 @@ Fast paths by kind (`internal/classify` + `produceSummary` in ingest):
 - near-empty docs → marked done with no summary; no LLM call.
 - anything else → map-reduce (hierarchical reduce for long documents).
 
+Tagging (`tagPrompt` + `TagDocumentWithCategories` in summarize): the prompt
+asks for SPECIFIC tags (methods, techniques, subfields) and discourages
+broad umbrellas, and `filterCategoryTags` drops any assigned tag that is
+the document's category or a path part of it (a
+`computer-science/machine-learning` paper keeps "quantization"/"cnn", not
+"computer-science") — unless that would leave no tags. When the vocabulary
+lacks the specifics, the prompt pushes them into `tags_other` (the
+learnable suggestion loop).
+
 ### Scan geometry (`internal/ocrimg` — hand-written, dependency-free)
 
 - `DetectSpine`: open-book two-page spreads are split at the gutter
@@ -254,11 +263,16 @@ Fast paths by kind (`internal/classify` + `produceSummary` in ingest):
   `Action` — the client opens the Preview page live), `regenerate_metadata`
   (starts a normal `regenerate` job in the background), plus `fetch_url`.
   SSE frames: `{"d"}`, `{"tool":name,"args"}`, `{"action":{...}}`,
-  `{"e"}`, `{"done"}`. REST: `GET/POST /api/chats`,
+  `{"e"}`, `{"done"}`. Text and tool frames stream in order and the
+  assistant message stores that interleaved order (tool_log = an ordered
+  [{t:text}|{t:tool}] list; `content` stays the concatenated text for
+  provider history). REST: `GET/POST /api/chats`,
   `GET/PATCH/DELETE /api/chats/{id}`, `POST /api/chats/{id}/messages`
-  (SSE). UI: a Chats manager + [Chat] pages, entry points on the Summary
-  page, [Tag]/[Collection] pages, shelf headers, and "New library chat";
-  deep link `?chat=ID`. `vellum chat list|show|new|rename|delete`.
+  (SSE), `POST /api/chats/{id}/revert` (delete a message + all later —
+  no forking; returns the text). UI: a Chats manager + [Chat] pages, entry
+  points on the Summary page, [Tag]/[Collection] pages, shelf headers, and
+  "New library chat"; a ↩ button on each of the user's messages reverts
+  it; deep link `?chat=ID`. `vellum chat list|show|new|rename|delete`.
 - settings: `GET/PUT /api/config` — live-applied + persisted to
   config.yaml; "Settings…" dialog in the top bar. (Starting/stopping the
   bundled llama-servers is launcher territory: rerun `./vellum.sh serve`.)
@@ -460,10 +474,13 @@ Docker: `pack/Dockerfile` + `docker-entrypoint.sh`; Hub is proxy-blocked
 
 ## 10. Where things state-wise
 
-- HEAD: v0.27.0 (`c8f87f0`), all tests green. Since 0.26.0: the native
-  Ollama provider runs the tool loop too (previously only OpenAI-compatible
-  and Anthropic did), so "search my library" works with an `ollama` chat
-  provider.
+- HEAD: v0.28.0 (`ec8ddbb`), all tests green. Since 0.27.0: chat revert
+  (delete a message + everything after, text back to the editor),
+  interleaved text/tool rendering (stored in stream order), more specific
+  tags (prompt + `filterCategoryTags`), and a fix for the esc()
+  double-escaping that showed `&#39;` for quotes.
+- v0.27.0: native Ollama tool calling (previously only OpenAI-compatible
+  and Anthropic ran the tool loop).
 - v0.26.0: SAVED scoped chatbots (persisted sessions confined to a
   document/tag/category/collection/library; scope-aware search/get/open/
   regenerate tools; a Chats manager). `internal/ask` is provider-only.
@@ -492,9 +509,9 @@ Docker: `pack/Dockerfile` + `docker-entrypoint.sh`; Hub is proxy-blocked
   pages; .item-list styling with hover affordance.
 - v0.17: COLLECTIONS; CSS-order page moves; bottom status bar.
 - v0.16: auto-filing learns from user corrections; flash-free updates.
-- Pack stage `pack/stage/vellum-c8f87f0-linux-amd64/` (user's live
-  library inside) updated to the 0.27.0 binary; distributable tarball
-  `pack/vellum-c8f87f0-linux-x86_64.tar.gz` (clean of the DB — verified
+- Pack stage `pack/stage/vellum-ec8ddbb-linux-amd64/` (user's live
+  library inside) updated to the 0.28.0 binary; distributable tarball
+  `pack/vellum-ec8ddbb-linux-x86_64.tar.gz` (clean of the DB — verified
   with tar -tzf | grep -c library.db = 0). NOTE: the user runs their OWN
   serve(s) and restarts them freely — an old one (PID 701, port 8097) is
   long-running; a newer one from the stage may appear (its exe shows
