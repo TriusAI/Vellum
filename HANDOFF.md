@@ -412,6 +412,15 @@ with `-c user.name=vellum -c user.email=vellum@local` (no remote).
 Docker: `pack/Dockerfile` + `docker-entrypoint.sh`; Hub is proxy-blocked
 (see §8); rebuild with `--build-arg REGISTRY_PREFIX=mirror.gcr.io/`.
 
+Service files (repo-side install helpers; NOT inside the distributable
+tarball): `pack/openrc/{vellum,vellum.conf}` for OpenRC (Artix/Gentoo/Alpine)
+and `pack/systemd/vellum.service` for systemd, plus the shared walkthrough in
+`pack/README.md`. The OpenRC unit starts the bundled llama-servers, waits on
+/health, supervises `vellum serve` and stops the servers from pidfiles; the
+systemd unit runs the pack's `vellum.sh` in one unit (servers live in its
+cgroup), with a documented split-unit alternative that keeps the models
+loaded across UI restarts. No binary/stage/tarball change.
+
 ## 8. Environment quirks observed on this machine (2026-10)
 
 - **No sudo.** mutool is built from source under `/tmp/opencode/mupdf-src`
