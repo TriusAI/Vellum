@@ -249,9 +249,9 @@ $ curl -s "http://127.0.0.1:8090/api/fs?path=/home/you"
 {"error":"open /home/you: permission denied"}
 ```
 
-This is what makes the watcher fail to start, and what makes an ingest report
-"done" while indexing nothing. Two ways to fix it (replace `you` with your
-login name):
+This is what makes the watcher fail to start, and what makes an ingest fail
+with `permission denied`. Two ways to fix it (replace `you` with your login
+name):
 
 **Run the service as your own user** — simplest on a single-user machine. Set
 `VELLUM_USER`/`VELLUM_GROUP` in `/etc/conf.d/vellum` (or `User=`/`Group=` in
@@ -323,11 +323,13 @@ Or run entirely as root (OpenRC: `VELLUM_USER="root"` in
   root, so a run like `vellum ingest .` creates a stray `./library.db`
   (`-wal`/`-shm`) there — delete it. Fix by passing `--config`, exporting
   `VELLUM_CONFIG`, or installing the wrapper in step 3.
-- **Ingest reports "done" but the library stays empty** — the source path is
-  not readable by the service user (see
+- **Ingest finds nothing / the library stays empty** — the source path is not
+  readable by the service user (see
   [Ingesting sources under your home](#ingesting-sources-under-your-home-permissions)).
-  Note the job currently *skips unreadable paths silently*, so it can finish
-  with 0 files and no error; confirm with the `curl .../api/fs?path=...` probe.
+  An inaccessible path is reported as `failed` with the OS error — the CLI
+  prints `failed=N`, the UI lists `FAILED: <path>: <error>` — so an empty
+  ingest means the path was unreachable. Confirm with the
+  `curl .../api/fs?path=...` probe above.
 - **A config edit had no effect** — only some settings hot-reload (the Watch
   toggle does). `rc-service vellum restart` (OpenRC) or
   `systemctl restart vellum` (systemd) after editing `config.yaml`.

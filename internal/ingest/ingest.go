@@ -80,7 +80,11 @@ func Ingest(ctx context.Context, cfg *config.Config, conn *sql.DB, paths []strin
 		ctx = context.Background()
 	}
 	st := &Stats{Files: []FileResult{}}
-	files := collectFiles(paths)
+	files, inaccessible := collectFiles(paths)
+	for _, f := range inaccessible {
+		st.Files = append(st.Files, f)
+		st.count("failed")
+	}
 	cancelled := false
 	for i, path := range files {
 		if err := orCtxIn(ctx).Err(); err != nil {
@@ -105,46 +109,56 @@ func Ingest(ctx context.Context, cfg *config.Config, conn *sql.DB, paths []strin
 	return st, nil
 }
 
-func collectFiles(paths []string) []string {
-	var files []string
+// collectFiles walks the requested paths and returns the supported files
+// beneath them. A path that cannot be accessed (missing, permission denied)
+// is returned as a failed FileResult rather than silently skipped, so an
+// ingest that would otherwise "succeed" over zero files surfaces the problem
+// — both the CLI and the web UI render st.Files.
+func collectFiles(paths []string) (files []string, failed []FileResult) {
 	for _, p := range paths {
 		st, err := os.Stat(p)
 		if err != nil {
-			log.Printf("skipping (not found): %s", p)
+			log.Printf("ingest: cannot access %s: %s", p, err)
+			failed = append(failed, FileResult{Path: p, Action: "failed", Error: err.Error()})
 			continue
 		}
-		if st.IsDir() {
-			// Recursive: a directory contributes every supported file
-			// beneath it, at any depth (this is what makes ingesting an
-			// Obsidian vault — or any notes folder — a one-liner).
-			// Hidden entries are skipped: a vault's .obsidian/ (config
-			// + plugins), .trash/, and .git/ are not library material.
-			root := p
-			filepath.WalkDir(p, func(path string, d os.DirEntry, err error) error {
-				if err != nil {
-					return nil
-				}
-				name := d.Name()
-				if d.IsDir() {
-					if path != root && strings.HasPrefix(name, ".") {
-						return filepath.SkipDir
-					}
-					return nil
-				}
-				if strings.HasPrefix(name, ".") {
-					return nil
-				}
-				if extract.Supported(path) {
-					files = append(files, path)
+		if !st.IsDir() {
+			files = append(files, p)
+			continue
+		}
+		// Recursive: a directory contributes every supported file beneath it,
+		// at any depth (this is what makes ingesting an Obsidian vault — or
+		// any notes folder — a one-liner). Hidden entries are skipped: a
+		// vault's .obsidian/ (config + plugins), .trash/, and .git/ are not
+		// library material.
+		root := p
+		filepath.WalkDir(p, func(path string, d os.DirEntry, err error) error {
+			if err != nil {
+				// An unreadable directory (or a file that vanished mid-walk):
+				// record it and keep going so one bad subtree doesn't abort the
+				// run, but the caller still learns about it.
+				log.Printf("ingest: cannot read %s: %s", path, err)
+				failed = append(failed, FileResult{Path: path, Action: "failed", Error: err.Error()})
+				return nil
+			}
+			name := d.Name()
+			if d.IsDir() {
+				if path != root && strings.HasPrefix(name, ".") {
+					return filepath.SkipDir
 				}
 				return nil
-			})
-		} else {
-			files = append(files, p)
-		}
+			}
+			if strings.HasPrefix(name, ".") {
+				return nil
+			}
+			if extract.Supported(path) {
+				files = append(files, path)
+			}
+			return nil
+		})
 	}
 	sort.Strings(files)
-	return files
+	return files, failed
 }
 
 func sha256file(path string) (string, error) {
