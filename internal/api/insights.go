@@ -190,10 +190,14 @@ func (s *Server) embedNow(w http.ResponseWriter, r *http.Request) {
 	}
 	var n int
 	var embedErr error
-	s.runJob("embed", "embed chunks", func(j *Job) error {
-		n, embedErr = search.EmbedPending(s.cfg, s.conn)
+	job := s.runJob("embed", "embed chunks", func(j *Job) error {
+		n, embedErr = search.EmbedPendingCtx(j.ctx, s.cfg, s.conn)
 		return embedErr
 	})
+	if job.Status == "cancelled" {
+		writeJSON(w, 200, map[string]any{"embedded": n, "cancelled": true})
+		return
+	}
 	if embedErr != nil {
 		writeErr(w, 500, embedErr.Error())
 		return

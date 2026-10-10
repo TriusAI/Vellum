@@ -4,6 +4,7 @@
 package search
 
 import (
+	"context"
 	"database/sql"
 	"encoding/binary"
 	"math"
@@ -249,6 +250,20 @@ WHERE c.embedding IS NOT NULL`)
 // 2048 tokens — inputs beyond that are not embeddable, the head carries
 // the topical signal).
 func EmbedPending(cfg *config.Config, conn *sql.DB) (int, error) {
+	return EmbedPendingCtx(context.Background(), cfg, conn)
+}
+
+// EmbedPendingCtx is EmbedPending with cooperative cancellation: it checks
+// ctx between batches and returns the number of chunks embedded so far
+// (already-committed batches are kept, so a later run resumes where this
+// stopped). The job runner maps a cancelled context to a "cancelled" job.
+func EmbedPendingCtx(ctx context.Context, cfg *config.Config, conn *sql.DB) (int, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
 	mname := resolveEmbedModel(cfg)
 	_, docPrefix := embedPrefixes(mname)
 	// identity = provider + server + model (+ the retrieval prefixes,
@@ -295,6 +310,9 @@ func EmbedPending(cfg *config.Config, conn *sql.DB) (int, error) {
 	done := 0
 	batch := cfg.Embed.Batch
 	for i := 0; i < len(pending); i += batch {
+		if err := ctx.Err(); err != nil {
+			return done, err
+		}
 		end := i + batch
 		if end > len(pending) {
 			end = len(pending)

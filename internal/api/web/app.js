@@ -18,7 +18,13 @@ const el = (tag, attrs = {}, ...children) => {
     if (v === true) { node.setAttribute(k, ""); continue; }
     node.setAttribute(k, v);
   }
-  for (const c of children) node.append(c);
+  for (const c of children) {
+    // null/undefined/false are common as conditional children
+    // (`cond ? el(...) : null`); appending them would render the literal
+    // text "null"/"undefined"/"false", so skip them.
+    if (c === null || c === undefined || c === false) continue;
+    node.append(c);
+  }
   return node;
 };
 
@@ -931,9 +937,26 @@ function docRow(d, opts = {}) {
     chips.append(el("span", { class: "chip pend", title: "thin text layer — processing will OCR it" }, "ocr"));
   if (d.category && !opts.inTree) chips.append(el("span", { class: "chip sug" }, esc(d.category)));
   for (const t of d.tags) chips.append(el("span", { class: "chip" }, esc(t)));
-  const row = el("li", { class: "item", onclick: () => openPage("summary", d.id) },
+  const row = el("li", { class: "item" },
     el("span", { class: "item-title" }, esc(title)),
     chips);
+  row.addEventListener("click", (ev) => {
+    if (!opts.selectable) { openPage("summary", d.id); return; }
+    // in select mode a click anywhere on the row toggles selection (the
+    // checkbox handler stops propagation, so this only fires for the body)
+    if (ev.shiftKey && lastSelectedDoc != null) {
+      toggleDocSelected(d, true);
+      refreshPage(libraryPage()); // re-render so the whole range shows checked
+      return;
+    }
+    if (selectedDocs.has(d.id)) selectedDocs.delete(d.id);
+    else selectedDocs.add(d.id);
+    lastSelectedDoc = d.id;
+    row.classList.toggle("selected", selectedDocs.has(d.id));
+    const cb = row.querySelector("input.doc-check");
+    if (cb) cb.checked = selectedDocs.has(d.id);
+    updateSelectionBar();
+  });
   if (opts.selectable) {
     const cb = el("input", { type: "checkbox", class: "doc-check" });
     cb.checked = selectedDocs.has(d.id);
@@ -2064,7 +2087,9 @@ async function embedNow() {
   try {
     notice("Embedding chunks…");
     const res = await api("/api/embed", { method: "POST" });
-    notice(`Embedded ${res.embedded} chunk(s).`);
+    notice(res.cancelled
+      ? `Stopped — embedded ${res.embedded} chunk(s) before cancelling.`
+      : `Embedded ${res.embedded} chunk(s).`);
     await refresh();
     for (const p of pages) if (p.kind === "stats") refreshPage(p);
   } catch (e) { notice("embed: " + e.message); }
