@@ -76,6 +76,23 @@ sudo ln -s /opt/vellum/vellum /usr/local/bin/vellum
 
 Log out/in (or `source` it) and `vellum --version` works from any directory.
 
+> `/etc/profile.d/` is only read by **login** shells. To make the config be
+> found no matter how `vellum` is invoked, replace the symlink with a wrapper:
+>
+> ```sh
+> sudo rm /usr/local/bin/vellum
+> sudo tee /usr/local/bin/vellum >/dev/null <<'EOF'
+> #!/bin/sh
+> exec /opt/vellum/vellum --config /opt/vellum/config.yaml "$@"
+> EOF
+> sudo chmod +x /usr/local/bin/vellum
+> ```
+>
+> Note: if the service runs as a dedicated user (below), the `library.db` is
+> owned by that user, so `vellum` from your own shell cannot write it — run
+> the CLI as the service user instead (see
+> [Ingesting sources under your home](#ingesting-sources-under-your-home-permissions)).
+
 ## OpenRC (Artix/Gentoo/Alpine)
 
 ```sh
@@ -218,6 +235,69 @@ two server units entirely if your config uses an external backend.
 - Back up before upgrading a binary: `vellum export /path/backup.zip` writes a
   consistent snapshot.
 
+## Ingesting sources under your home (permissions)
+
+Vellum indexes files **in place** — it stores their paths and the extracted
+text; it does not copy the sources. So whatever directory you ingest or watch
+must be readable by the user the service runs as (the `vellum` system user by
+default). A home directory is usually `0700`, so that user cannot even
+traverse into it:
+
+```
+drwx------ you you /home/you
+$ curl -s "http://127.0.0.1:8090/api/fs?path=/home/you"
+{"error":"open /home/you: permission denied"}
+```
+
+This is what makes the watcher fail to start, and what makes an ingest report
+"done" while indexing nothing. Two ways to fix it (replace `you` with your
+login name):
+
+**Run the service as your own user** — simplest on a single-user machine. Set
+`VELLUM_USER`/`VELLUM_GROUP` in `/etc/conf.d/vellum` (or `User=`/`Group=` in
+the systemd unit) to your account, then hand it the install:
+
+```sh
+sudo rc-service vellum stop
+sudo chown -R you:you /opt/vellum /var/log/vellum /run/vellum
+sudo rc-service vellum start
+```
+
+**Keep the dedicated user and grant it access with ACLs** — more isolation:
+
+```sh
+# traverse-only through your home (can follow a path, cannot list it)
+sudo setfacl -m u:vellum:x /home/you
+# read + traverse the source tree, now and for files added later
+sudo setfacl -R  -m u:vellum:rX "/home/you/library"
+sudo setfacl -R -d -m u:vellum:rX "/home/you/library"
+# optional: also let the UI's file browser list your home
+# sudo setfacl -m u:vellum:rx /home/you
+sudo rc-service vellum restart
+
+# verify — the API runs as the service user, so this is the real test:
+curl -s "http://127.0.0.1:8090/api/fs?path=/home/you/library"
+```
+
+With a dedicated service user the `library.db` is owned by that user, so the
+CLI has to run as them. The pack's shared libraries must be on the path for
+OCR (`tesseract`), which the service normally exports but a bare `sudo` does
+not:
+
+```sh
+sudo -u vellum env \
+    LD_LIBRARY_PATH=/opt/vellum/lib \
+    TESSDATA_PREFIX=/opt/vellum/tessdata \
+    /opt/vellum/vellum --config /opt/vellum/config.yaml \
+    ingest "/home/you/library"
+```
+
+`sudo -u vellum` works even though the account's shell is `/sbin/nologin`
+(that only affects login shells). You can skip both approaches when using the
+UI: the Ingest dialog has a **"paste paths"** toggle, so you can paste the
+folder directly, and the Watch dialog can register it once the ACLs are in
+place.
+
 ## Least privilege
 
 The simplest setup runs everything as one `vellum` user that owns
@@ -232,3 +312,26 @@ sudo chown vellum:vellum /opt/vellum /opt/vellum/library.db* /opt/vellum/*.log
 
 Or run entirely as root (OpenRC: `VELLUM_USER="root"` in
 `/etc/conf.d/vellum`; systemd: set `User=root`/`Group=root`).
+
+## Troubleshooting
+
+- **`exec: "mutool": executable file not found in $PATH`** (or `tesseract`) —
+  the config was not loaded, so the built-in defaults (the bare word `mutool`)
+  were used. The resolver is `--config` → `$VELLUM_CONFIG` → `./config.yaml`;
+  this happens when none is set/exported and the working directory has no
+  `config.yaml`. With no config the working directory also becomes the library
+  root, so a run like `vellum ingest .` creates a stray `./library.db`
+  (`-wal`/`-shm`) there — delete it. Fix by passing `--config`, exporting
+  `VELLUM_CONFIG`, or installing the wrapper in step 3.
+- **Ingest reports "done" but the library stays empty** — the source path is
+  not readable by the service user (see
+  [Ingesting sources under your home](#ingesting-sources-under-your-home-permissions)).
+  Note the job currently *skips unreadable paths silently*, so it can finish
+  with 0 files and no error; confirm with the `curl .../api/fs?path=...` probe.
+- **A config edit had no effect** — only some settings hot-reload (the Watch
+  toggle does). `rc-service vellum restart` (OpenRC) or
+  `systemctl restart vellum` (systemd) after editing `config.yaml`.
+- **A model server is "up" but answers are wrong** — a stale server from an
+  earlier manual run may already hold the port; the launcher reuses a healthy
+  server instead of replacing it. `ss -tlnp | grep -E '808[12]'` and stop the
+  stray process, then restart the service.
