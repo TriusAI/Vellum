@@ -497,12 +497,17 @@ loaded across UI restarts. No binary/stage/tarball change.
 
 ## 10. Where things state-wise
 
-- HEAD: v0.29.0 (`ff025ec`), all tests green. Since 0.28.0: a UI/UX pass —
-  a ☰ pages sidebar (jump/reorder/close), a Ctrl/Cmd-K command palette,
-  bulk document actions, filter chips, per-row actions, a Stats page and
-  an Embed button, a stacking toast area, chat stop/scroll-lock/copy/
-  linkified #refs/rename/export/clear, dirty-state Save, and an "auto"
-  theme that follows the OS.
+- HEAD: v0.29.1 (`039fa94`), all tests green. Ingest now reports
+  inaccessible paths (missing, permission denied, or a file that vanished
+  mid-walk) as failed FileResults instead of silently skipping them — such
+  an ingest used to return zero files and a nil error ("done" with an empty
+  library). The CLI prints `failed=N`; the UI lists `FAILED: <path>: <error>`
+  and keeps the dialog open. New tests in `internal/ingest`.
+- v0.29.0: a UI/UX pass — a ☰ pages sidebar (jump/reorder/close), a
+  Ctrl/Cmd-K command palette, bulk document actions, filter chips, per-row
+  actions, a Stats page and an Embed button, a stacking toast area, chat
+  stop/scroll-lock/copy/linkified #refs/rename/export/clear, dirty-state
+  Save, and an "auto" theme that follows the OS.
 - v0.28.0: chat revert; interleaved text/tool rendering; more specific
   tags (prompt + `filterCategoryTags`); fixed the esc() double-escaping
   that showed `&#39;`.
@@ -536,14 +541,19 @@ loaded across UI restarts. No binary/stage/tarball change.
   pages; .item-list styling with hover affordance.
 - v0.17: COLLECTIONS; CSS-order page moves; bottom status bar.
 - v0.16: auto-filing learns from user corrections; flash-free updates.
-- Pack stage `pack/stage/vellum-ff025ec-linux-amd64/` (user's live
-  library inside) updated to the 0.29.0 binary; distributable tarball
-  `pack/vellum-ff025ec-linux-x86_64.tar.gz` (clean of the DB — verified
+- Pack stage `pack/stage/vellum-039fa94-linux-amd64/` (user's live
+  library inside) updated to the 0.29.1 binary; distributable tarball
+  `pack/vellum-039fa94-linux-x86_64.tar.gz` (clean of the DB — verified
   with tar -tzf | grep -c library.db = 0). NOTE: the user runs their OWN
   serve(s) and restarts them freely — an old one (PID 701, port 8097) is
   long-running; a newer one from the stage may appear (its exe shows
   "(deleted)" after the version-dir rename). Do NOT kill them; each
   restart picks up the current stage binary.
+- The user also has a GLOBAL install at `/opt/vellum` (OpenRC service
+  `vellum`, runs as the dedicated `vellum` user), separate from the dev
+  stage; its library is `/opt/vellum/library.db`, not the stage DB. Sources
+  under `/home/bctnry` need the ACL / run-as-your-user step from
+  `pack/README.md` before the service can ingest or watch them.
 - For the LLM e2e, the GGUF models live in the stage's `models/` dir (not
   /tmp): `QWEN_GGUF=$PWD/pack/stage/<ver>/models/qwen3-1.7b.gguf`,
   `NOMIC_GGUF=.../nomic-embed-text-v1.5.gguf`,
