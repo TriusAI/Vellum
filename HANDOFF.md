@@ -497,12 +497,19 @@ loaded across UI restarts. No binary/stage/tarball change.
 
 ## 10. Where things state-wise
 
-- HEAD: v0.29.1 (`039fa94`), all tests green. Ingest now reports
-  inaccessible paths (missing, permission denied, or a file that vanished
-  mid-walk) as failed FileResults instead of silently skipping them — such
-  an ingest used to return zero files and a nil error ("done" with an empty
-  library). The CLI prints `failed=N`; the UI lists `FAILED: <path>: <error>`
-  and keeps the dialog open. New tests in `internal/ingest`.
+- HEAD: v0.29.2 (`fd55ac2`), all tests green. Two fixes: embedding jobs are
+  now cancellable (`search.EmbedPendingCtx` checks its context before the
+  first batch and between batches; `POST /api/embed` passes the job context
+  and returns {embedded, cancelled}); and the document-selection UI is
+  repaired — `el()` no longer appends null/undefined children as the literal
+  text "null" (the toolbar read "selectnull"), and in select mode clicking a
+  row toggles selection instead of opening the Summary. New tests in
+  `internal/search`.
+- v0.29.1: ingest reports inaccessible paths (missing, permission denied, or
+  a file that vanished mid-walk) as failed FileResults instead of silently
+  skipping them — such an ingest used to return zero files and a nil error
+  ("done" with an empty library); the CLI prints `failed=N`, the UI lists
+  `FAILED: <path>: <error>`.
 - v0.29.0: a UI/UX pass — a ☰ pages sidebar (jump/reorder/close), a
   Ctrl/Cmd-K command palette, bulk document actions, filter chips, per-row
   actions, a Stats page and an Embed button, a stacking toast area, chat
@@ -541,9 +548,9 @@ loaded across UI restarts. No binary/stage/tarball change.
   pages; .item-list styling with hover affordance.
 - v0.17: COLLECTIONS; CSS-order page moves; bottom status bar.
 - v0.16: auto-filing learns from user corrections; flash-free updates.
-- Pack stage `pack/stage/vellum-039fa94-linux-amd64/` (user's live
-  library inside) updated to the 0.29.1 binary; distributable tarball
-  `pack/vellum-039fa94-linux-x86_64.tar.gz` (clean of the DB — verified
+- Pack stage `pack/stage/vellum-fd55ac2-linux-amd64/` (user's live
+  library inside) updated to the 0.29.2 binary; distributable tarball
+  `pack/vellum-fd55ac2-linux-x86_64.tar.gz` (clean of the DB — verified
   with tar -tzf | grep -c library.db = 0). NOTE: the user runs their OWN
   serve(s) and restarts them freely — an old one (PID 701, port 8097) is
   long-running; a newer one from the stage may appear (its exe shows
