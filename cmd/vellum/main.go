@@ -41,6 +41,7 @@ Commands:
                         full-text (default) or semantic search
   show all | ID         list library or show one document
   remove ID...         remove documents from the library (files stay on disk)
+  dedup [--apply]      report (or merge) documents with identical content
   rename-category OLD NEW
                         rename a shelf; its whole subtree moves with it
   collection list|create|delete|add|remove|show
@@ -58,6 +59,8 @@ Commands:
                         filesystem watcher: auto-ingest + enrich new files
   serve [--listen ADDR] [--open]
                         local web UI + JSON API (default 127.0.0.1:8090)
+  open [--listen ADDR] [--url URL]
+                        open the RUNNING web UI in the browser (starts nothing)
   agent                 print AI-agent instructions (commands, JSON, API)
 
 --json switches command output to machine-readable JSON (anywhere in args).
@@ -66,7 +69,7 @@ file (FTS5). Models served locally by llama.cpp llama-server.
 `
 
 // versionString is reported by --version, /api/status and `vellum agent`.
-const versionString = "0.29.2"
+const versionString = "0.30.0"
 
 // documentColumns is the explicit projection used everywhere (never SELECT *,
 // so the scan order is fixed even if the schema gains columns).
@@ -176,6 +179,8 @@ func main() {
 		cmdReextract(cfg, args[1:])
 	case "remove":
 		cmdRemove(cfg, args[1:])
+	case "dedup":
+		cmdDedup(cfg, args[1:])
 	case "backends":
 		cmdBackends(cfg, args[1:])
 	case "skip":
@@ -186,6 +191,8 @@ func main() {
 		cmdWatch(cfg, args[1:])
 	case "serve":
 		cmdServe(cfg, args[1:])
+	case "open":
+		cmdOpen(cfg, args[1:])
 	case "agent", "agents":
 		cmdAgent(cfg, args[1:])
 	case "-h", "-help", "--help", "help":
@@ -227,8 +234,8 @@ func cmdIngest(cfg *config.Config, args []string) {
 		printJSON(st)
 		return
 	}
-	fmt.Printf("added=%d updated=%d skipped=%d failed=%d\n",
-		st.Added, st.Updated, st.Skipped, st.Failed)
+	fmt.Printf("added=%d updated=%d skipped=%d duplicates=%d failed=%d\n",
+		st.Added, st.Updated, st.Skipped, st.Duplicates, st.Failed)
 	fmt.Println("next: vellum process   (summarize + tag with the LLM)")
 }
 

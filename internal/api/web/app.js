@@ -2750,13 +2750,20 @@ $("#ingest-go").onclick = async () => {
     const pre = $("#ingest-result");
     pre.classList.remove("hidden");
     pre.textContent =
-      `added=${st.Added} updated=${st.Updated} skipped=${st.Skipped} failed=${st.Failed}`;
-    for (const f of st.files || [])
-      if (f.action === "failed") pre.textContent += `\nFAILED: ${f.path}: ${f.error}`;
+      `added=${st.Added} updated=${st.Updated} skipped=${st.Skipped} duplicates=${st.Duplicates} failed=${st.Failed}`;
+    for (const f of st.files || []) {
+      if (f.action === "failed")
+        pre.textContent += `\nFAILED: ${f.path}: ${f.error}`;
+      else if (f.action === "duplicate")
+        pre.textContent += `\nDUPLICATE: ${f.path} — identical to #${f.duplicate_of}`;
+    }
     await loadDocs();
     await loadCategories();
     await refresh();
-    if (!st.Failed) $("#dlg-ingest").close();
+    if (!st.Failed) {
+      if (st.Duplicates) notice(`Ingest done — ${st.Duplicates} duplicate(s) skipped.`);
+      $("#dlg-ingest").close();
+    }
   } catch (e) { notice("ingest: " + e.message); }
   stopProgressPolling();
   btn.textContent = "Ingest";

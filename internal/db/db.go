@@ -26,6 +26,7 @@ CREATE TABLE IF NOT EXISTS documents(
   id INTEGER PRIMARY KEY,
   path TEXT UNIQUE NOT NULL,
   sha256 TEXT,
+  sha3 TEXT DEFAULT '',
   title TEXT,
   authors TEXT,
   year TEXT,
@@ -159,6 +160,7 @@ func migrate(conn *sql.DB) error {
 	migrations := []struct{ table, column, ddl string }{
 		{"documents", "kind", "ALTER TABLE documents ADD COLUMN kind TEXT DEFAULT ''"},
 		{"documents", "summary_source", "ALTER TABLE documents ADD COLUMN summary_source TEXT DEFAULT ''"},
+		{"documents", "sha3", "ALTER TABLE documents ADD COLUMN sha3 TEXT DEFAULT ''"},
 		{"documents", "category", "ALTER TABLE documents ADD COLUMN category TEXT DEFAULT ''"},
 		{"documents", "ocr_pending", "ALTER TABLE documents ADD COLUMN ocr_pending INTEGER DEFAULT 0"},
 		{"documents", "kind_user", "ALTER TABLE documents ADD COLUMN kind_user INTEGER DEFAULT 0"},

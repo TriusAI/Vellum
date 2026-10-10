@@ -7,6 +7,7 @@ package ingest
 import (
 	"context"
 	"crypto/sha256"
+	"crypto/sha3"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -33,16 +34,17 @@ var yearRE = regexp.MustCompile(`^\d{4}(-\d{4})?$`)
 
 // FileResult is the outcome for one ingested file.
 type FileResult struct {
-	Path   string `json:"path"`
-	Action string `json:"action"` // added | updated | skipped | failed
-	Error  string `json:"error,omitempty"`
+	Path        string `json:"path"`
+	Action      string `json:"action"` // added | updated | skipped | failed | duplicate
+	DuplicateOf int64  `json:"duplicate_of,omitempty"`
+	Error       string `json:"error,omitempty"`
 }
 
 // Stats summarizes an ingest run.
 type Stats struct {
-	Added, Updated, Skipped, Failed int
-	Cancelled                       bool         `json:"cancelled,omitempty"`
-	Files                           []FileResult `json:"files"`
+	Added, Updated, Skipped, Duplicates, Failed int
+	Cancelled                                   bool         `json:"cancelled,omitempty"`
+	Files                                       []FileResult `json:"files"`
 }
 
 func (st *Stats) count(action string) {
@@ -53,6 +55,8 @@ func (st *Stats) count(action string) {
 		st.Updated++
 	case "skipped":
 		st.Skipped++
+	case "duplicate":
+		st.Duplicates++
 	case "failed":
 		st.Failed++
 	}
@@ -95,13 +99,13 @@ func Ingest(ctx context.Context, cfg *config.Config, conn *sql.DB, paths []strin
 			progress(fmt.Sprintf("ingesting %d/%d: %s",
 				i+1, len(files), filepath.Base(path)))
 		}
-		action, err := ingestOne(cfg, conn, path, reprocess)
+		action, dupOf, err := ingestOne(cfg, conn, path, reprocess)
 		if err != nil {
 			log.Printf("failed to ingest %s: %s", path, err)
 			action = "failed"
 			st.Files = append(st.Files, FileResult{Path: path, Action: action, Error: err.Error()})
 		} else {
-			st.Files = append(st.Files, FileResult{Path: path, Action: action})
+			st.Files = append(st.Files, FileResult{Path: path, Action: action, DuplicateOf: dupOf})
 		}
 		st.count(action)
 	}
@@ -161,27 +165,68 @@ func collectFiles(paths []string) (files []string, failed []FileResult) {
 	return files, failed
 }
 
-func sha256file(path string) (string, error) {
+// contentHashes returns the SHA-256 and SHA3-256 digests of a file in one
+// pass. Two independent constructions guard content dedup: SHA-256 alone is
+// already collision-resistant; SHA3-256 backs it up.
+func contentHashes(path string) (sum256, sum3 string, err error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	defer f.Close()
-	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
-		return "", err
+	h256 := sha256.New()
+	h3 := sha3.New256()
+	if _, err := io.Copy(io.MultiWriter(h256, h3), f); err != nil {
+		return "", "", err
 	}
-	return fmt.Sprintf("%x", h.Sum(nil)), nil
+	return fmt.Sprintf("%x", h256.Sum(nil)), fmt.Sprintf("%x", h3.Sum(nil)), nil
 }
 
-func ingestOne(cfg *config.Config, conn *sql.DB, path string, reprocess bool) (string, error) {
+// findDuplicate returns the id and path of a live document whose bytes match
+// (sum256, sum3), or (0, ""). A document stored before the sha3 column existed
+// is hashed on demand and backfilled; a candidate whose file has gone missing
+// is never used as the canonical (that would hide this copy behind a stale
+// entry).
+func findDuplicate(conn *sql.DB, sum256, sum3, selfPath string) (int64, string) {
+	rows, err := conn.Query(
+		"SELECT id, path, COALESCE(sha3,'') FROM documents WHERE sha256=? AND path<>?",
+		sum256, selfPath)
+	if err != nil {
+		return 0, ""
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id int64
+		var p, stored3 string
+		if err := rows.Scan(&id, &p, &stored3); err != nil {
+			continue
+		}
+		if _, err := os.Stat(p); err != nil {
+			continue
+		}
+		if stored3 == "" {
+			_, got3, err := contentHashes(p)
+			if err != nil {
+				continue
+			}
+			stored3 = got3
+			conn.Exec("UPDATE documents SET sha3=? WHERE id=?", stored3, id)
+		}
+		if stored3 == sum3 {
+			return id, p
+		}
+	}
+	return 0, ""
+}
+
+func ingestOne(cfg *config.Config, conn *sql.DB, path string, reprocess bool) (string, int64, error) {
 	abs, err := filepath.Abs(path)
 	if err != nil {
-		return "failed", err
+		return "failed", 0, err
 	}
-	digest, err := sha256file(abs)
+	digest, digest3, err := contentHashes(abs)
 	if err != nil {
-		return "failed", err
+		return "failed", 0, err
 	}
 
 	var docID int64
@@ -190,7 +235,18 @@ func ingestOne(cfg *config.Config, conn *sql.DB, path string, reprocess bool) (s
 		Scan(&docID, &oldDigest)
 	known := err == nil
 	if known && oldDigest == digest && !reprocess {
-		return "skipped", nil
+		// keep the secondary hash current (also backfills pre-sha3 rows)
+		conn.Exec("UPDATE documents SET sha3=? WHERE id=?", digest3, docID)
+		return "skipped", 0, nil
+	}
+	if !known {
+		// content dedup: a different path with identical bytes is the same
+		// work — store it once (the first path ingested wins)
+		if dupID, dupPath := findDuplicate(conn, digest, digest3, abs); dupID != 0 {
+			log.Printf("%s: duplicate of #%d %s — skipped",
+				filepath.Base(abs), dupID, filepath.Base(dupPath))
+			return "duplicate", dupID, nil
+		}
 	}
 
 	t0 := time.Now()
@@ -200,7 +256,7 @@ func ingestOne(cfg *config.Config, conn *sql.DB, path string, reprocess bool) (s
 	// with live progress, then re-classifies on the better text.
 	res, err := extract.ExtractText(abs, cfg)
 	if err != nil {
-		return "failed", err
+		return "failed", 0, err
 	}
 	hasText := res.NeedsOCR // raster-heavy documents ingest with thin text
 	for _, c := range res.Chunks {
@@ -210,7 +266,7 @@ func ingestOne(cfg *config.Config, conn *sql.DB, path string, reprocess bool) (s
 		}
 	}
 	if !hasText {
-		return "failed", fmt.Errorf("no text extracted and nothing to OCR")
+		return "failed", 0, fmt.Errorf("no text extracted and nothing to OCR")
 	}
 
 	pending := 0
@@ -221,26 +277,26 @@ func ingestOne(cfg *config.Config, conn *sql.DB, path string, reprocess bool) (s
 	action := "updated"
 	if known {
 		if _, err := conn.Exec(
-			"UPDATE documents SET sha256=?, status='ingested', error=NULL, processed_at=NULL, ocr_pending=?, n_pages=? WHERE id=?",
-			digest, pending, len(res.Chunks), docID); err != nil {
-			return "failed", err
+			"UPDATE documents SET sha256=?, sha3=?, status='ingested', error=NULL, processed_at=NULL, ocr_pending=?, n_pages=? WHERE id=?",
+			digest, digest3, pending, len(res.Chunks), docID); err != nil {
+			return "failed", 0, err
 		}
 	} else {
 		result, err := conn.Exec(
-			"INSERT INTO documents(path, sha256, title, authors, year, ocr_pages, n_pages, ocr_pending, status) VALUES(?,?,?,?,?,?,?,?,'ingested')",
-			abs, digest, res.Title, res.Authors, "", 0, len(res.Chunks), pending)
+			"INSERT INTO documents(path, sha256, sha3, title, authors, year, ocr_pages, n_pages, ocr_pending, status) VALUES(?,?,?,?,?,?,?,?,?,'ingested')",
+			abs, digest, digest3, res.Title, res.Authors, "", 0, len(res.Chunks), pending)
 		if err != nil {
-			return "failed", err
+			return "failed", 0, err
 		}
 		docID, err = result.LastInsertId()
 		if err != nil {
-			return "failed", err
+			return "failed", 0, err
 		}
 		action = "added"
 	}
 
 	if err := db.ReplaceDocumentText(conn, docID, res.Chunks); err != nil {
-		return "failed", err
+		return "failed", 0, err
 	}
 
 	// kind detection is instant and deterministic: structural heuristics
@@ -255,7 +311,7 @@ func ingestOne(cfg *config.Config, conn *sql.DB, path string, reprocess bool) (s
 	}
 	if _, err := conn.Exec(
 		"UPDATE documents SET kind=? WHERE id=?", kind, docID); err != nil {
-		return "failed", err
+		return "failed", 0, err
 	}
 
 	ocrNote := ""
@@ -265,7 +321,7 @@ func ingestOne(cfg *config.Config, conn *sql.DB, path string, reprocess bool) (s
 	log.Printf("%s: %d chunks in %.1fs%s%s",
 		filepath.Base(abs), len(res.Chunks), time.Since(t0).Seconds(),
 		kindSuffix, ocrNote)
-	return action, nil
+	return action, 0, nil
 }
 
 func chunkTexts(chunks []db.Chunk) []string {

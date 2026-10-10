@@ -69,6 +69,9 @@ vellum ingest ~/papers/that-scan.pdf ~/books/
 vellum ingest ~/MyObsidianVault   # recursive; skips .obsidian/, .trash/
 vellum process [ID...]     # summarize + tag pending (all, or specific docs by id)
 vellum watch add ~/inbox   # auto-ingest + enrich arrivals while `vellum serve` runs
+vellum dedup [--apply]     # report (or merge) byte-identical documents
+                           # (ingest stores identical content once — SHA-256 +
+                           #  SHA3-256; this cleans up copies already indexed)
 
 # 2. find things
 vellum search "quantum error correction"     # FTS5 keyword
@@ -133,7 +136,8 @@ vellum vocab add my-new-tag "what it covers"
 #    show the matching snippet with a jump to the page; pending/error
 #    documents are marked in the list; long jobs get a cancel button in
 #    the notice bar
-vellum serve --open
+vellum serve --open        # start the server and open the UI
+vellum open                # open the RUNNING web UI in the browser (starts nothing)
 ```
 
 Add `--json` to any command for machine-readable output; `vellum agent`

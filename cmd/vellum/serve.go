@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"os/exec"
 
 	"vellum/internal/api"
 	"vellum/internal/config"
@@ -43,7 +42,9 @@ func cmdServe(cfg *config.Config, args []string) {
 			cfg.Tools.LLMURL)
 	}
 	if *open {
-		exec.Command("xdg-open", url).Start() // best effort; Linux pack
+		if err := openURL(url); err != nil {
+			log.Printf("open: %s", err)
+		}
 	}
 	log.Printf("listening on %s — Ctrl+C to stop", *listen)
 	if err := http.ListenAndServe(*listen, server.Mux()); err != nil {

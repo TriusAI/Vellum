@@ -34,6 +34,9 @@ Everything is local; no network calls except the local model servers.
     vellum show all | ID          # inspect
     vellum remove ID [ID...]      # remove documents from the library index
                                   # (the files stay on disk — indexed in place)
+    vellum dedup [--apply]        # report (or merge) byte-identical documents
+                                  # (SHA-256 + SHA3-256; ingest already skips
+                                  #  new copies, this cleans up existing ones)
     vellum rename-category OLD NEW
                                   # rename a shelf; its whole subtree moves
                                   # (machine-learning -> computer-science/
@@ -48,6 +51,7 @@ Everything is local; no network calls except the local model servers.
                                   # restore a bundle into this library
     vellum vocab list|review|promote|add|remove
     vellum serve [--listen ADDR] # local web UI + JSON API (see below)
+    vellum open [--listen ADDR]  # open the RUNNING web UI in a browser
 
 Add --json to ingest/process/search/show/vocab for machine-readable output.
 Configuration is read from ./config.yaml (or --config PATH / $VELLUM_CONFIG).
@@ -79,7 +83,9 @@ live (CLI lines, /api/progress in the web UI). To go faster:
 
 Add documents:      vellum ingest --json /path/to/dir
   -> {"added":N,"updated":N,"skipped":N,"failed":N,"files":[...]}
-  (unchanged files are skipped via sha256; --reprocess forces re-extract)
+  (unchanged files are skipped via SHA-256; a byte-identical copy at another
+   path is stored once and reported as "duplicate" — SHA-256 + SHA3-256;
+   --reprocess forces re-extract)
 
 Then process:       vellum process --json [ID...]
   -> [{"id":N,"path":"...","status":"done","tags":["..."],"tags_other":[...]},...]
@@ -480,7 +486,9 @@ Errors: {"error":"..."} with 4xx/5xx status codes.
   read-only listings; entries carry "supported" flags).
 - Metadata: PDF producers emit junk ("unknown"); Vellum filters known
   junk values and validates years as 4-digit patterns.
-- Files are indexed in place (absolute paths, sha256 change detection).
+- Files are indexed in place (absolute paths). Change detection and dedup use
+  two hashes: SHA-256 and SHA3-256. Documents whose bytes are identical are
+  stored once; later copies are reported as "duplicate" (see "vellum dedup").
 - The database is a single SQLite file; vellum show is safe at any time.
 `
 
