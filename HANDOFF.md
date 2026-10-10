@@ -175,6 +175,19 @@ learnable suggestion loop).
 - remove: `vellum remove ID [ID...]` / `DELETE /api/documents/{id}` —
   index-only removal (chunks + tags + FTS rows + cover cache go; the FILE
   stays on disk). Also a "Remove from library…" button in the UI.
+- content dedup: ingest hashes each file with SHA-256 + SHA3-256 in one pass
+  (`documents.sha3`, additive column) and stores a byte-identical copy at
+  another path ONCE — the later path reports as `duplicate` (`duplicates=N`
+  in the CLI; "DUPLICATE: …" in the UI). A copy is never matched against a
+  canonical whose file has gone missing. `vellum dedup [--apply]` finds
+  copies already indexed (bucketed by the stored SHA-256, confirmed by
+  re-hashing) and, with `--apply`, folds them into the canonical (tags,
+  collection membership and document-scoped chats move; the extra row is
+  deleted; both files stay on disk). Dry-run by default.
+- open: `vellum open [--listen ADDR] [--url URL]` opens the RUNNING web UI
+  in a browser (`$BROWSER` → `xdg-open`/`open`/…); if nothing answers
+  /api/status it prints "there is no server running" and exits non-zero.
+  `serve --open` shares the opener. It starts nothing.
 - tags/notes/theme: `GET /api/tags` (cloud) + `GET /api/tags/{tag}`;
   `vellum note list|add|show|delete` + `/api/notes` CRUD; `theme` in
   config (preset + color overrides) drives the UI's CSS variables.
@@ -497,14 +510,17 @@ loaded across UI restarts. No binary/stage/tarball change.
 
 ## 10. Where things state-wise
 
-- HEAD: v0.29.2 (`fd55ac2`), all tests green. Two fixes: embedding jobs are
-  now cancellable (`search.EmbedPendingCtx` checks its context before the
-  first batch and between batches; `POST /api/embed` passes the job context
-  and returns {embedded, cancelled}); and the document-selection UI is
-  repaired — `el()` no longer appends null/undefined children as the literal
-  text "null" (the toolbar read "selectnull"), and in select mode clicking a
-  row toggles selection instead of opening the Summary. New tests in
-  `internal/search`.
+- HEAD: v0.30.0 (`ed5a39c`), all tests green. New: `vellum open [--listen
+  ADDR] [--url URL]` opens the RUNNING web UI (probes /api/status; exits
+  "there is no server running" when nothing answers; starts nothing).
+  Hash-based dedup: ingest hashes each file with SHA-256 AND SHA3-256 and
+  stores identical content once (later copies report as "duplicate");
+  `vellum dedup [--apply]` merges copies already indexed (dry-run default).
+- v0.29.2: cancellable embedding (`search.EmbedPendingCtx` checks its
+  context before the first batch and between batches); fixed the
+  document-selection UI (`el()` no longer appended null/undefined children
+  as the literal text "null"; select-mode row clicks toggle selection
+  instead of opening the Summary).
 - v0.29.1: ingest reports inaccessible paths (missing, permission denied, or
   a file that vanished mid-walk) as failed FileResults instead of silently
   skipping them — such an ingest used to return zero files and a nil error
@@ -548,9 +564,9 @@ loaded across UI restarts. No binary/stage/tarball change.
   pages; .item-list styling with hover affordance.
 - v0.17: COLLECTIONS; CSS-order page moves; bottom status bar.
 - v0.16: auto-filing learns from user corrections; flash-free updates.
-- Pack stage `pack/stage/vellum-fd55ac2-linux-amd64/` (user's live
-  library inside) updated to the 0.29.2 binary; distributable tarball
-  `pack/vellum-fd55ac2-linux-x86_64.tar.gz` (clean of the DB — verified
+- Pack stage `pack/stage/vellum-ed5a39c-linux-amd64/` (user's live
+  library inside) updated to the 0.30.0 binary; distributable tarball
+  `pack/vellum-ed5a39c-linux-x86_64.tar.gz` (clean of the DB — verified
   with tar -tzf | grep -c library.db = 0). NOTE: the user runs their OWN
   serve(s) and restarts them freely — an old one (PID 701, port 8097) is
   long-running; a newer one from the stage may appear (its exe shows
